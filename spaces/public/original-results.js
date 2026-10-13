@@ -10,16 +10,43 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  const title=document.createElement('span');title.className='original-results-title';
  const status=document.createElement('span');status.className='original-results-status';status.setAttribute('role','status');
  const retry=document.createElement('button');retry.type='button';retry.className='original-results-retry';retry.hidden=true;
+ const thumbnail=document.createElement('img');thumbnail.className='original-results-thumb';thumbnail.alt='';
+ const subtitle=document.createElement('small');subtitle.className='original-results-subtitle';
+ const heading=document.createElement('div');heading.className='original-results-heading';heading.append(subtitle,title);
+ const tools=document.createElement('div');tools.className='original-results-tools';tools.append(status,retry);
  const body=document.createElement('div');body.className='original-results-body';
- bar.append(back,title,status,retry);layer.append(bar,body);document.body.append(layer);
- const text=(en,ar)=>getLanguage()==='ar'?ar:en;
+ const waiting=document.createElement('div');waiting.className='original-results-waiting';waiting.setAttribute('aria-hidden','true');
+ waiting.innerHTML='<span class="search-spinner"></span><span class="results-skeletons"><i></i><i></i></span>';body.append(waiting);
+ bar.append(thumbnail,heading,back);layer.append(bar,tools,body);document.body.append(layer);
+ const text=(en,ar)=>globalThis.window?.FindziaI18n?.t(en,ar,document.querySelector('#findzia-home-spaces'))||(getLanguage()==='ar'?ar:en);
+ function resultsOnly(session){
+  // The full page's decorative home scene and wait screen do not belong in a
+  // results-only frame. Both expose teardown APIs; leave the search engine alone.
+  const root=session.root;if(!root)return;
+  root.fzStoreScene?.destroy();root.fzSearchWait?.destroy();
+  delete root.dataset.waitActive;delete root.dataset.waitExiting;
+ }
+ function syncLanguage(session){
+  const select=session.root?.querySelector('[data-profile-language-select]');if(!select)return;
+  const lang=getLanguage();if(select.value!==lang){select.value=lang;select.dispatchEvent(new session.frame.contentWindow.Event('change',{bubbles:true}));}
+  session.frame.contentDocument.documentElement.lang=lang;
+  // Some original releases do not yet offer Dutch in the hidden selector.
+  session.frame.contentWindow.FindziaI18n?.set(session.root,lang);
+ } 
  function paint(session){
   if(current!==session)return;
+  layer.dir=['ar','ur'].includes(getLanguage())?'rtl':'ltr';
+  if(thumbnail.getAttribute('src')!==session.crop)thumbnail.src=session.crop;subtitle.textContent=text('Store options','خيارات المتاجر');
   back.textContent='×';back.setAttribute('aria-label',text('Close results','إغلاق النتائج'));title.textContent=session.name;
   retry.textContent=text('Search again · 1 credit','بحث جديد · كردت واحد');retry.hidden=session.busy||session.loading;
   const elapsed=Math.max(0,Math.floor((Date.now()-session.started)/1000));
   status.classList.toggle('is-searching',session.busy||session.loading);
-  status.textContent=session.loading?text('Opening Findzia…','جاري فتح Findzia…'):session.busy?text('Searching… ','جاري البحث… ')+elapsed+text('s',' ث'):session.error||session.legacy?session.error||text('Saved search','بحث محفوظ'):'';
+  const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
+  waiting.hidden=!!visible||!!session.error||!(session.busy||session.loading);
+  status.textContent=session.loading?text('Opening store options…','جاري فتح خيارات المتاجر…'):session.busy?(visible?text('Checking more options…','جاري فحص خيارات إضافية…'):text('Finding your piece…','جاري البحث عن قطعتك…')):session.error||text('Save a favourite to your design','احفظ اللي يعجبك لتصميمك');
+  status.setAttribute('aria-busy',String(session.busy||session.loading));
+  // Elapsed time is a secondary hint, not a constantly announced live region.
+  tools.dataset.elapsed=session.busy?elapsed+'s':'';
  }
  function close(){if(!layer.open)return;save(current);layer.close();document.body.style.overflow='';returnFocus?.focus?.({preventScroll:true});onClose?.();}
  back.addEventListener('click',close);layer.addEventListener('cancel',event=>{event.preventDefault();close();});
@@ -39,7 +66,8 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  }
  function watch(session){
   if(!session.root)return;
-  const c=context(session),busy=!!(session.launching||c?.busy||c?.media_pending||session.root.dataset.searchLaunching);
+  resultsOnly(session);
+  const c=context(session),busy=!!(session.launching||c?.busy||c?.media_pending||session.root.dataset.searchLaunching==='true');
   if(session.busy!==busy){session.busy=busy;onStatus?.(session.key,busy);if(!busy){save(session);document.querySelector('#findzia-home-spaces')?.fzBilling?.refresh(true);}}
   syncPicks(session);paint(session);
  }
@@ -107,7 +135,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   const win=session.frame.contentWindow,root=session.root;
   const market=root.querySelector('[data-profile-market-select]');if(!market)throw Error('Market unavailable');
   market.value=session.market;market.dispatchEvent(new win.Event('change',{bubbles:true}));
-  const lang=root.querySelector('[data-profile-language-select]');if(lang){lang.value=getLanguage();lang.dispatchEvent(new win.Event('change',{bubbles:true}));}
+  syncLanguage(session);resultsOnly(session);
   if(context(session).country!==session.market)throw Error('Market unavailable');
   // Warm the EXISTING wallet before displaying the original account controls.
   // This shares same-origin storage, never sends credentials through messages.
@@ -127,7 +155,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    // Restore the original media state using its own validator; no new search
    // or credit is involved. Never fabricate a Saved search from legacy rows.
    if(root.fzRefineBridge.prepare)await root.fzRefineBridge.prepare(view.items,new AbortController().signal);
-   session.loading=false;syncPicks(session);watch(session);
+   session.loading=false;session.completed=true;syncPicks(session);watch(session);
   }else await run(session);
  }
  async function open({key,name,crop,market,room,design,item,view,picks=[],newSearch=false,readOnly=false}){
@@ -141,11 +169,11 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    frame.addEventListener('load',()=>ready(session).catch(()=>{session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح Findzia. سكّر الطبقة وحاول مجددًا.');paint(session);} ),{once:true});
    frame.src='/api/findzia-results';body.append(frame);
   }
-  session.picks=picks;if(session.root)syncPicks(session);
+  session.picks=picks;if(session.root){syncLanguage(session);resultsOnly(session);syncPicks(session);}
   current=session;for(const other of sessions.values())other.frame.hidden=other!==session;
   paint(session);if(!layer.open){layer.showModal();document.body.style.overflow='hidden';}back.focus({preventScroll:true});
   if(existing&&newSearch&&!session.busy&&!session.loading)await run(session);
  }
- return {open,close,has:key=>sessions.has(key),busy:key=>sessions.get(key)?.busy===true,
+ return {open,close,refreshLanguage(){for(const session of sessions.values())if(session.root)syncLanguage(session);if(current)paint(current);},has:key=>sessions.has(key),busy:key=>sessions.get(key)?.busy===true,
   destroy(){close();for(const session of sessions.values()){clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
 }

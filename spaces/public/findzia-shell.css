@@ -24,3 +24,5 @@ html[data-findzia-theme=dark] :is(.segments,.search-message.is-active,.search-pr
 html[data-findzia-theme=dark] .segments input:checked+span{background:#354c3b}
 html[data-findzia-theme=dark] .country-choice.selected{background:#314c3b;border-color:#95b6a1}
 [dir=rtl] .history-card{text-align:right}
+
+@media(max-width:600px){#shopify-section-spaces .fz-home[data-home-state=empty] .fz-dark-home{padding:14px 16px 16px!important}#findzia-home-spaces .fz-dark-header{min-height:54px}}

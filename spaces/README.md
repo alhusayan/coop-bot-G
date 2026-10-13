@@ -69,3 +69,23 @@ Every visually accepted piece has a bounded product-page stock check before publ
 ### 0.3.8 — Conflicting stock evidence
 
 Observed Home Centre schema and product meta both report InStock for the user’s sold-out examples. Landmark positive SEO availability is therefore unconfirmed unless actual purchase controls or SKU-scoped product state confirm stock; explicit negative evidence still excludes the listing. Confirmed local stock ranks first, then confirmed global stock, followed by unconfirmed listings. Unknown availability cannot crowd real purchasable options out of the capped result set.
+
+
+### 0.7.0 — mobile discovery and results
+
+Room photos now include one gentle tap invitation; choosing a piece remains free.
+The results layer has a compact piece thumbnail/title, a separate search status
+strip, and a quiet loading skeleton. Spaces tears down the original page's home
+store scene and full-page wait presentation through their own cleanup methods;
+searchPhoto, wallet authorization, original rendering and result ranking remain
+unchanged. Card details sit below the image, beside the store and its flag.
+
+The browser calls Findzia's existing geo endpoint, falls back to browser region,
+and puts the detected market first. The shared market list covers the original
+engine's 24 countries, ordered by major shopping markets, with native country
+names. Each market gets its native UI default; manual language choices are saved
+per market. A late geo response cannot override an explicit country choice.
+
+Validation: 13 targeted tests cover original-page script preservation, one paid
+launch, free restored views, scene teardown, Similar screening, design picks,
+market isolation, geo fallback/order and per-market language preferences.

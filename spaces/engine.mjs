@@ -3,19 +3,8 @@ import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
-export const MARKETS = {
-  KW:{name:'الكويت',en:'Kuwait',currency:'KWD',symbol:'د.ك',flag:'🇰🇼',lang:'ar'},
-  SA:{name:'السعودية',en:'Saudi Arabia',currency:'SAR',symbol:'ر.س',flag:'🇸🇦',lang:'ar'},
-  AE:{name:'الإمارات',en:'United Arab Emirates',currency:'AED',symbol:'د.إ',flag:'🇦🇪',lang:'ar'},
-  QA:{name:'قطر',en:'Qatar',currency:'QAR',symbol:'ر.ق',flag:'🇶🇦',lang:'ar'},
-  BH:{name:'البحرين',en:'Bahrain',currency:'BHD',symbol:'د.ب',flag:'🇧🇭',lang:'ar'},
-  OM:{name:'عُمان',en:'Oman',currency:'OMR',symbol:'ر.ع',flag:'🇴🇲',lang:'ar'},
-  GB:{name:'بريطانيا',en:'United Kingdom',currency:'GBP',symbol:'£',flag:'🇬🇧',lang:'en'},
-  US:{name:'أمريكا',en:'United States',currency:'USD',symbol:'$',flag:'🇺🇸',lang:'en'},
-  DE:{name:'ألمانيا',en:'Germany',currency:'EUR',symbol:'€',flag:'🇩🇪',lang:'de'},
-  FR:{name:'فرنسا',en:'France',currency:'EUR',symbol:'€',flag:'🇫🇷',lang:'fr'},
-  JP:{name:'اليابان',en:'Japan',currency:'JPY',symbol:'¥',flag:'🇯🇵',lang:'ja'},
-};
+import {MARKETS} from './public/markets.js';
+export {MARKETS};
 export const STYLES = [
  {id:'contemporary',ar:'هدوء معاصر',en:'Quiet contemporary',description:'خطوط بسيطة، ألوان متوازنة، ومساحة تتنفّس.',palette:['#ddd4c6','#8e987e','#ac8c6c'],prompt:'Quiet contemporary design: clean architectural lines, warm ivory, muted olive accents, refined practical furniture.'},
  {id:'natural',ar:'دفء طبيعي',en:'Natural warmth',description:'خامات طبيعية ودرجات دافئة تشعرك بالراحة.',palette:['#c3a184','#dfd3b7','#706d4e'],prompt:'Warm natural design: light oak, earthy clay, linen textures, organic shapes, tranquil natural materials, practical furnishings.'},

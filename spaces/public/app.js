@@ -1,3 +1,4 @@
+import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
 import {createOriginalLayer} from './original-results.js';
 import {mountFindzia} from './findzia-shell.js';
@@ -13,21 +14,11 @@ const icon=(name,small=false)=>`<span class="icon${small?' small':''}" aria-hidd
 $$('[data-icon]').forEach(el=>el.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[el.dataset.icon]||paths.spark}"/></svg>`);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safe=u=>{try{const a=new URL(u,location.origin);return (a.protocol==='https:'||a.origin===location.origin)&&!a.username&&!a.password?a.href:'';}catch{return '';}};
-const fallbackMarkets={
-  KW:{name:'الكويت',en:'Kuwait',currency:'KWD',symbol:'د.ك',flag:'🇰🇼',lang:'ar'},
-  SA:{name:'السعودية',en:'Saudi Arabia',currency:'SAR',symbol:'ر.س',flag:'🇸🇦',lang:'ar'},
-  AE:{name:'الإمارات',en:'United Arab Emirates',currency:'AED',symbol:'د.إ',flag:'🇦🇪',lang:'ar'},
-  QA:{name:'قطر',en:'Qatar',currency:'QAR',symbol:'ر.ق',flag:'🇶🇦',lang:'ar'},
-  BH:{name:'البحرين',en:'Bahrain',currency:'BHD',symbol:'د.ب',flag:'🇧🇭',lang:'ar'},
-  OM:{name:'عُمان',en:'Oman',currency:'OMR',symbol:'ر.ع',flag:'🇴🇲',lang:'ar'},
-  GB:{name:'بريطانيا',en:'United Kingdom',currency:'GBP',symbol:'£',flag:'🇬🇧',lang:'en'},
-  US:{name:'أمريكا',en:'United States',currency:'USD',symbol:'$',flag:'🇺🇸',lang:'en'},
-  DE:{name:'ألمانيا',en:'Germany',currency:'EUR',symbol:'€',flag:'🇩🇪',lang:'de'},
-  FR:{name:'فرنسا',en:'France',currency:'EUR',symbol:'€',flag:'🇫🇷',lang:'fr'},
-  JP:{name:'اليابان',en:'Japan',currency:'JPY',symbol:'¥',flag:'🇯🇵',lang:'ja'},
-};
-const state={view:'home',market:'KW',image:null,job:null,design:0,compare:false,config:{markets:fallbackMarkets},auth:null,selections:{},quantities:{},itemId:null};
-try{state.market=localStorage.getItem('spaces-market')||'KW';state.selections=JSON.parse(localStorage.getItem('spaces-v2-selections')||'{}');state.quantities=JSON.parse(localStorage.getItem('spaces-v2-quantities')||'{}');}catch{}
+const fallbackMarkets=MARKETS;
+const initialMarket=browserMarket({timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,languages:globalThis.navigator?.languages||[]});
+let marketChosen=false;
+const state={view:'home',market:initialMarket,detectedMarket:initialMarket,image:null,job:null,design:0,compare:false,config:{markets:fallbackMarkets},auth:null,selections:{},quantities:{},itemId:null};
+try{state.selections=JSON.parse(localStorage.getItem('spaces-v2-selections')||'{}');state.quantities=JSON.parse(localStorage.getItem('spaces-v2-quantities')||'{}');}catch{}
 const designBookmarks={},demoViews={};
 try{Object.assign(designBookmarks,JSON.parse(localStorage.getItem('spaces-design-picks-v1')||'{}'));Object.assign(demoViews,JSON.parse(localStorage.getItem('spaces-demo-views-v1')||'{}'));}catch{}
 let shell,pointFocus=null;
@@ -70,13 +61,13 @@ async function changeJob(path,body){const token=roomContext.capture(),id=state.j
 function view(name){state.view=name;$$('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));window.scrollTo({top:0,behavior:'instant'});if(name==='designs')renderDesigns();if(name==='shopping')renderShop();}
 function country(){return state.config.markets[state.job?.options?.market||state.market]||fallbackMarkets.KW;}
 function money(n,currency=country().currency){if(n==null||!Number.isFinite(n))return 'Price at store';try{return new Intl.NumberFormat('en-US',{style:'currency',currency:currency||'USD',currencyDisplay:'code',maximumFractionDigits:['KWD','BHD','OMR'].includes(currency)?3:2}).format(n);}catch{return currency+' '+n;}}
-function syncMarket(){if(!state.config.markets[state.market])state.market='KW';const m=state.config.markets[state.market];$('#currency-label').textContent=m.currency;try{localStorage.setItem('spaces-market',state.market);}catch{}shell?.sync();}
+function syncMarket(){if(!state.config.markets[state.market])state.market=initialMarket;const m=state.config.markets[state.market];$('#currency-label').textContent=m.currency;try{localStorage.setItem('spaces-market',state.market);}catch{}shell?.sync();}
 let accessCheck;
 function init(){
  if(accessCheck)return accessCheck;
  syncMarket();$('#retry-access').disabled=true;
  accessCheck=(async()=>{
-  try{state.config=await api('/api/config');state.auth=true;syncMarket();$('#auth-notice').classList.add('hidden');$('#retry-access').classList.add('hidden');return true;}
+  try{const [config,detected]=await Promise.all([api('/api/config'),detectMarket({fallback:initialMarket})]);state.config=config;state.detectedMarket=detected;if(!marketChosen&&!state.job)state.market=detected;state.auth=true;syncMarket();shell?.setMarketLanguage();$('#auth-notice').classList.add('hidden');$('#retry-access').classList.add('hidden');return true;}
   catch(e){state.auth=e.code==='TRIAL_LINK_REQUIRED'?false:null;$('#auth-notice').textContent=state.auth===false?'This is a private preview. Open the invitation link shared with you.':'Couldn’t connect. Please try again.';$('#auth-notice').classList.remove('hidden');$('#retry-access').classList.remove('hidden');return false;}
   finally{$$('[data-action="upload"], [data-action="camera"], [data-action="demo"]').forEach(el=>el.disabled=state.auth!==true);$('#retry-access').disabled=false;}
  })().finally(()=>accessCheck=null);
@@ -117,8 +108,9 @@ function photoMarkup(items){
  const item=items.find(x=>pointFocus?.key===keyFor(x)),busy=pieceBusy(item);
  const view=item&&(pieceViews([item]).find(v=>v.marker===pointFocus?.marker)||pieceViews([item])[0]);
  let outline='';
+ const guide=!item?`<span class="photo-touch-guide" aria-hidden="true"><span class="touch-ripple">${icon('plus',true)}</span><span>${esc(translate('Tap a piece to shop','المس أي قطعة للتسوّق'))}</span></span>`:'';
  if(view){const [top,left,bottom,right]=view.box;outline=`<span class="piece-outline${busy?' is-searching':''}" style="top:${top/10}%;left:${left/10}%;width:${(right-left)/10}%;height:${(bottom-top)/10}%" aria-hidden="true"><i></i><i></i><i></i><i></i>${busy?'<span class="piece-scan"></span>':''}</span>`;}
- return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose a piece in this photo','اختر قطعة من الصورة'))}" aria-busy="${busy}"></button>${outline}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
+ return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose a piece in this photo','اختر قطعة من الصورة'))}" aria-busy="${busy}"></button>${outline}${guide}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
 }
 function feedbackMarkup(item){
  if(!item)return '';
@@ -154,7 +146,7 @@ function renderShop(){
  $('#compare-label').textContent=state.compare?'After':'Before';$('[data-action="compare"]').setAttribute('aria-pressed',String(state.compare));$('#hotspots').classList.toggle('hidden',state.compare);
  const items=d.items||[],preparing=d.status==='analyzing',adapting=d.status==='adapting';
  const pending=items.find(pieceBusy);if(pending&&!items.some(x=>pointFocus?.key===keyFor(x)))pointFocus={key:keyFor(pending),id:pending.id,waiting:true};
- patchHTML($('.stage-hint'),`<span>${esc(translate('Tap a piece in the photo','اضغط على القطعة بالصورة'))}</span><button class="browse-pieces" data-action="pieces" ${!items.length||preparing||adapting?'disabled':''}>${esc(translate('All pieces','كل القطع'))}${icon('chevron',true)}</button>`);
+ patchHTML($('.stage-hint'),`<span><strong>${esc(translate('Shop this room','تسوّق هالغرفة'))}</strong><small>${esc(translate('Tap a piece to see store options','المس القطعة وشوف خيارات المتاجر'))}</small></span><button class="browse-pieces" data-action="pieces" ${!items.length||preparing||adapting?'disabled':''}>${esc(translate('All pieces','كل القطع'))}${icon('chevron',true)}</button>`);
  $('#shop-count').textContent='';$('#search-progress').classList.add('hidden');$('#summary-button').classList.add('hidden');$('#items-list').replaceChildren();
  $('#empty-items').classList.toggle('hidden',items.length>0&&!preparing&&!adapting);
  if(!items.length||preparing||adapting)$('#empty-items').innerHTML=d.error?`<p>${esc(messages[d.error]||'We couldn’t identify the pieces.')}</p><button class="secondary" data-action="choose" data-index="${state.design}">Try again</button>`:`<span class="search-spinner" aria-hidden="true"></span><p role="status">${esc(adapting?translate('Updating your design…','جاري تحديث التصميم…'):translate('Finding the pieces in your room…','جاري تحديد قطع الغرفة…'))}</p>`;
@@ -220,8 +212,8 @@ async function openItem(id,{retry=false}={}){
 
 function summary(){const t=total(),items=selected().items;showSheet(`<div class="sheet-body"><h2>Your shopping list</h2><div class="list-total">${t.count?esc(money(t.sum)):'No prices yet'}</div><p>${t.count} of ${t.items} pieces included in this total.</p><ul class="list-items">${items.map(x=>{const o=chosen(x);return `<li><span>${esc(x.name_en)}${x.mode==='ready'?' × '+qty(x):''}</span><span>${o?.price!=null?esc(money(o.price,o.currency)):x.mode==='keep'?'Keep':'—'}</span></li>`;}).join('')}</ul><p class="detail-note">Items without prices, international currencies, measured materials, custom work, delivery and installation are not included.</p><button class="primary wide" data-action="export">Save shopping list ${icon('download',true)}</button></div>`,'summary');}
 async function demo(button){resetRoom();const token=roomContext.capture();if(button)button.disabled=true;try{const c=await api('/api/config');if(!roomContext.current(token))return;if(c.demo){const job=await api('/api/jobs/'+c.demo);if(!applyJob(job,token))return;renderKey='';view('designs');if(active())poll();}else{const r=await fetch('/hero.webp');await loadFile(new File([await r.blob()],'example.webp',{type:'image/webp'}));}}catch(e){toast(e.message);}finally{if(button)button.disabled=false;}}
-function setMarket(id){if(!state.config.markets[id]||state.market===id)return;localCatalog.clear();originalLayer.close();state.market=id;syncMarket();if(state.view==='shopping')renderShop();}
-function openMarket(){const language=shell?.getLanguage()||'en';const names=new Intl.DisplayNames([language],{type:'region'});showSheet(`<div class="sheet-body"><h2>Shop in</h2><div class="country-list">${Object.entries(state.config.markets).map(([k,m])=>`<button class="country-choice${k===state.market?' selected':''}" data-action="set-market" data-id="${k}" aria-pressed="${k===state.market}">${m.flag} ${esc(language==='en'?m.en:names.of(k))}</button>`).join('')}</div><div class="market-preferences"><label>${esc(translate('Language','اللغة'))}<select id="spaces-language">${Object.entries(shell?.languages||{en:'English',ar:'العربية'}).map(([k,v])=>`<option value="${k}"${language===k?' selected':''}>${esc(v)}</option>`).join('')}</select></label><label>${esc(translate('Currency','العملة'))}<select aria-label="Currency" disabled><option>${esc(state.config.markets[state.market].currency)}</option></select></label><p>Currency follows the selected market.</p></div></div>`,'market');$('#spaces-language').addEventListener('change',e=>shell?.setLanguage(e.target.value));}
+function setMarket(id){if(!state.config.markets[id])return;marketChosen=true;if(state.market===id)return;localCatalog.clear();originalLayer.close();state.market=id;syncMarket();shell?.setMarketLanguage();if(state.view==='shopping')renderShop();}
+function openMarket(){const language=shell?.getLanguage()||'en';const names=new Intl.DisplayNames([language],{type:'region'});showSheet(`<div class="sheet-body"><h2>Shop in</h2><p class="market-intro">${esc(translate('Your location first. Choose another market anytime.','بلدك أولًا. تقدر تغيّر السوق بأي وقت.'))}</p><div class="country-list">${orderedMarkets(state.config.markets,state.detectedMarket).map(([k,m])=>`<button class="country-choice${k===state.market?' selected':''}" data-action="set-market" data-id="${k}" aria-pressed="${k===state.market}"><span class="country-flag" aria-hidden="true">${m.flag}</span><span class="country-name" translate="no">${esc(m.name)}</span>${k===state.detectedMarket?'<span class="country-here" aria-hidden="true">'+icon('check',true)+'</span>':''}</button>`).join('')}</div><div class="market-preferences"><label>${esc(translate('Language','اللغة'))}<select id="spaces-language">${Object.entries(shell?.languages||{en:'English',ar:'العربية'}).map(([k,v])=>`<option value="${k}"${language===k?' selected':''}>${esc(v)}</option>`).join('')}</select></label><label>${esc(translate('Currency','العملة'))}<select aria-label="Currency" disabled><option>${esc(state.config.markets[state.market].currency)}</option></select></label><p>Currency follows the selected market.</p></div></div>`,'market');$('#spaces-language').addEventListener('change',e=>shell?.setLanguage(e.target.value));}
 async function history(){resetRoom();const token=roomContext.capture();view('history');$('#history-list').innerHTML='<p>Loading your rooms…</p>';try{const data=await api('/api/jobs');if(!roomContext.current(token))return;$('#history-list').innerHTML=data.jobs.length?data.jobs.map(j=>`<button class="history-card" data-action="load-job" data-id="${j.id}"><img src="${esc(j.designs.find(d=>d.image)?.image||j.original)}" alt="${esc(j.room)}"><div><h3>${esc(j.room)}</h3><p>${new Date(j.created).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</p></div></button>`).join(''):'<div class="empty-items"><p>Your next room starts with a photo.</p><button class="primary" data-action="upload">Add your room</button></div>';}catch(e){$('#history-list').innerHTML=`<p>${esc(e.message)}</p>`;}}
 function downloadBlob(blob,name){const a=document.createElement('a'),u=URL.createObjectURL(blob);a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1500);}
 async function saveDesign(){try{const r=await fetch(selected().image);if(!r.ok)throw Error();const blob=await r.blob();downloadBlob(blob,'Findzia-'+selected().id+'.'+(blob.type.includes('jpeg')?'jpg':blob.type.includes('webp')?'webp':'png'));}catch{toast('The image couldn’t be saved. Please try again.');}}
@@ -263,8 +255,8 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
 $('#sheet').addEventListener('click',e=>{if(e.target===$('#sheet')){const b=e.target.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)closeSheet();}});
 $('#sheet').addEventListener('cancel',()=>{if(pointFocus)pointFocus.waiting=false;});
 $('#sheet').addEventListener('close',()=>{if(!$('#sheet').open){sheetMode='';state.itemId=null;localCatalog.clear();document.body.style.overflow='';}});
-// Touch scrolling has native inertia. Add a small spring release to controls and drag-to-dismiss sheets.
-if(!reduced){document.addEventListener('pointerup',e=>{const el=e.target.closest('button:not(.photo-pick-target):not(.hotspot):not(.hero-photo):not(.example-button)');if(el&&!el.disabled&&!gestureDragged)el.animate([{transform:'scale(.965)'},{transform:'scale(1.025)',offset:.55},{transform:'scale(1)'}],{duration:360,easing:'ease-out'});});}
+// Gentle release feedback; native scrolling and reduced-motion preferences stay intact.
+if(!reduced){document.addEventListener('pointerup',e=>{const el=e.target.closest('button:not(.photo-pick-target):not(.hotspot):not(.hero-photo):not(.example-button)');if(el&&!el.disabled&&!gestureDragged)el.animate([{transform:'scale(.98)'},{transform:'scale(1)'}],{duration:200,easing:'ease-out'});});}
 let dragStart=null;const handle=$('.sheet-handle');handle.addEventListener('pointerdown',e=>{dragStart={y:e.clientY,t:performance.now()};handle.setPointerCapture(e.pointerId);});handle.addEventListener('pointermove',e=>{if(dragStart){const y=Math.max(0,e.clientY-dragStart.y);$('#sheet').style.transform=`translateY(${y}px)`;}});handle.addEventListener('pointerup',e=>{if(!dragStart)return;const y=e.clientY-dragStart.y,v=y/(performance.now()-dragStart.t);dragStart=null;if(y>90||y>30&&v>.5)closeSheet();else{$('#sheet').style.transform='';if(!reduced)$('#sheet').animate([{transform:`translateY(${Math.max(0,y)}px)`},{transform:'translateY(-7px)',offset:.6},{transform:'translateY(0)'}],{duration:380,easing:'ease-out'});}});
 let carouselDrag=null;$('#design-grid').addEventListener('pointerdown',e=>{if(e.pointerType!=='mouse')return;carouselDrag={x:e.clientX,scroll:$('#design-grid').scrollLeft};gestureDragged=false;});$('#design-grid').addEventListener('pointermove',e=>{if(!carouselDrag)return;const dx=e.clientX-carouselDrag.x;if(Math.abs(dx)>8){gestureDragged=true;$('#design-grid').scrollLeft=carouselDrag.scroll-dx;}});document.addEventListener('pointerup',()=>{carouselDrag=null;setTimeout(()=>gestureDragged=false,50);});
 new ResizeObserver(()=>{if(state.view==='shopping')renderShop();}).observe($('#design-canvas'));
@@ -272,6 +264,6 @@ document.addEventListener('load',event=>{if(state.view==='shopping'&&(event.targ
 init();
 
 
-mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));
+mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();shell.setMarketLanguage();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));
 
-document.addEventListener('spaces:locale',event=>{if(sheetMode==='market'){const names=new Intl.DisplayNames([event.detail.language],{type:'region'});for(const button of $$('.country-choice')){const code=button.dataset.id;button.textContent=state.config.markets[code].flag+' '+names.of(code);}}});
+document.addEventListener('spaces:locale',()=>{if(state.view==='shopping')renderShop();originalLayer.refreshLanguage?.();});

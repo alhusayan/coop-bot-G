@@ -42,3 +42,24 @@ html[data-findzia-spaces-results] #MainContent [data-spaces-empty="true"] {
 }
 html[data-findzia-spaces-results] .spaces-similar-note{padding:36px 18px;text-align:center;color:#69716b;font:inherit;line-height:1.6}
 html[data-findzia-spaces-results] .spaces-similar-note[hidden]{display:none}
+/* Keep the original renderer visible even while its full-page wait controller
+   is mounting. Only Spaces includes this scope; no engine or billing edits. */
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] :is(.fz-store-scene,.fz-store-toggle,.fz-search-wait){display:none!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] [data-results-body]{display:block!important;visibility:visible!important;opacity:1!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-results-shell{display:block!important;opacity:1!important;padding-top:0!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-container{min-height:0!important;opacity:1!important}
+/* A card's photo stays clear: bookmark above, details beside the store below. */
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-card-shell{border-radius:22px!important;overflow:hidden!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-tile-body{padding:14px 12px 12px!important;min-width:0!important;min-height:100px!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-store-row{display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:6px!important;padding-inline-end:36px!important;margin-top:8px!important;min-height:38px!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-inline-flag{order:-1!important;flex:0 0 20px!important;width:20px!important;height:22px!important;font-size:16px!important;border:0!important;box-shadow:none!important;background:transparent!important;display:inline-flex!important;align-items:center!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-tile-store{min-width:0!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;font-size:13px!important;line-height:1.4!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-offer-details{position:absolute!important;inset:auto 5px 9px auto!important;transform:none!important;width:44px!important;height:44px!important;margin:0!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme][dir=rtl] .fz-offer-details{inset:auto auto 9px 5px!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-offer-details summary{display:grid!important;place-items:center!important;width:44px!important;height:44px!important;padding:8px!important;background:transparent!important;border:0!important;box-shadow:none!important;border-radius:50%!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-offer-details summary svg{width:23px!important;height:23px!important;box-shadow:none!important;background:transparent!important;border:0!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-save-product{width:44px!important;height:44px!important;top:10px!important;right:10px!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-tile-price{font-size:clamp(22px,5.7vw,30px)!important;line-height:1.25!important;min-width:0!important;flex-wrap:wrap!important;overflow-wrap:anywhere!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-market-section{padding-block:18px!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-market-heading{font-size:16px!important}
+html[data-findzia-spaces-results] body{overscroll-behavior-y:contain}

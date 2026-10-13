@@ -1,3 +1,4 @@
+import {MARKETS,orderedMarkets,browserMarket} from '../public/markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from '../public/design-picks.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,13 +22,13 @@ test('clean photo selection is free and opens the original layer without a Space
  document.querySelector('.fz-home').fzBilling={authorizePiece:async()=>{authorizations++;},refresh(){}};
  const fetch=async(path,options={})=>{if(path==='/api/config')return Response.json({markets:{US:{currency:'USD',en:'United States',flag:'US'},KW:{currency:'KWD',en:'Kuwait',flag:'KW'}},demo:job.id});if(/\/(focus|search)\//.test(path))searches++;return Response.json(structuredClone(job));};
  globalThis.fetch=fetch;const storage={getItem:()=>null,setItem:()=>{}};
- const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoPiece,createLocalCatalog,createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},getLanguage:()=> 'en'})});
+ const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoPiece,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
  try{
   vm.runInContext(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),context);
   vm.runInContext("state.market='US'",context);await vm.runInContext('demo()',context);await vm.runInContext('choose(0)',context);
-  assert.equal(document.querySelectorAll('.hotspot').length,0);assert.equal(document.querySelectorAll('.piece-outline').length,0);
+  assert.equal(document.querySelectorAll('.photo-touch-guide').length,1,'first visit explains photo interaction');assert.equal(document.querySelectorAll('.hotspot').length,0);assert.equal(document.querySelectorAll('.piece-outline').length,0);
   vm.runInContext("selectPiece('1')",context);assert.equal(searches,0);assert.equal(authorizations,0);assert.equal(opens.length,0);
-  assert.equal(document.querySelectorAll('.piece-outline').length,1);
+  assert.equal(document.querySelectorAll('.piece-outline').length,1);assert.equal(document.querySelectorAll('.photo-touch-guide').length,0,'hint leaves the selected piece clear');
   await vm.runInContext("openItem('1')",context);
   assert.equal(opens.length,1);assert.equal(opens[0].market,'US');assert.equal(opens[0].crop,'/hero.webp');assert.equal(opens[0].view,null);
   assert.equal(searches,0);assert.equal(authorizations,0,'only the original page can authorize and charge');
