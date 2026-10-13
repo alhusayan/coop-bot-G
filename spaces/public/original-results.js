@@ -48,12 +48,12 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   const searching=!!(session.busy||session.loading);
   const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
   waiting.hidden=!!visible||!!session.error||!searching;
-  status.textContent=searching?text('Searching…','جاري البحث…'):!visible?(session.error||''):'';
+  status.textContent=searching?text('Searching…','جارٍ البحث…'):!visible?(session.error||''):'';
   status.setAttribute('aria-busy',String(searching));
   const value=searching?(session.budget?Math.min(99,Math.floor((Date.now()-session.started)/SEARCH_BUDGET_MS*100)):0):100;
   progress.setAttribute('aria-label',text('Search progress','تقدّم البحث'));
   progress.setAttribute('aria-valuenow',String(value));
-  progress.setAttribute('aria-valuetext',searching?text('Searching','جاري البحث'):text('Finished','انتهى'));
+  progress.setAttribute('aria-valuetext',searching?text('Searching','جارٍ البحث…'):text('Finished','اكتمل البحث'));
   fill.style.width=value+'%';percent.textContent=searching&&session.budget?value+'%':'';
   tools.classList.toggle('is-searching',searching);tools.classList.toggle('is-complete',!searching);
   tools.classList.toggle('has-error',!searching&&!visible&&!!session.error);
@@ -91,12 +91,12 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const visible=session.root.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
    const show=review.held>0&&!visible&&!session.busy&&!session.loading;
    session.reviewNote.hidden=!show;
-   const message=text('No close similar matches were confirmed for this piece.','ما تأكدنا من وجود منتجات مشابهة وقريبة لهالقطعة.');
+   const message=text('No close similar matches were confirmed for this piece.','لم نجد منتجات مشابهة بدرجة كافية لعرضها.');
    if(session.reviewNote.textContent!==message)session.reviewNote.textContent=message;
   }
   const chosen=new Set((session.picks||[]).map(x=>productKey(x.url)));
   for(const button of session.root?.querySelectorAll('[data-save-product]')||[]){
-   const active=chosen.has(productKey(button.dataset.saveProduct)),label=active?text('Remove from this design','إزالة من هالتصميم'):text('Save to this design','احفظ لهالتصميم');
+   const active=chosen.has(productKey(button.dataset.saveProduct)),label=active?text('Remove from this design','إزالة من هذا التصميم'):text('Save to this design','حفظ ضمن هذا التصميم');
    button.setAttribute('aria-pressed',String(active));button.setAttribute('aria-label',label);button.title=label;
    if(!button.querySelector('[data-design-check]'))button.innerHTML='<svg data-design-check viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>';
   }
@@ -113,8 +113,8 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const product={url,title:row?.title||img?.alt||session.name,store:card.querySelector('.fz-tile-store')?.textContent||row?.store||'',
     image:savedPickImage({url,image:img?.currentSrc||img?.src||''},snapshot.view.items),price:card.querySelector('.fz-tile-price')?.innerText||card.querySelector('.fz-tile-price')?.textContent||'',flag:card.querySelector('.fz-inline-flag')?.textContent||''};
    const remove=(session.picks||[]).some(x=>productKey(x.url)===productKey(url));button.disabled=true;
-   try{session.picks=await onPick(session,product,remove);syncPicks(session);session.notice.textContent=remove?text('Removed from this design','تمت الإزالة من هالتصميم'):text('Saved below your room photo','انحفظ تحت صورة غرفتك');}
-   catch{session.notice.textContent=text('Could not save. Please try again.','تعذّر الحفظ. حاول مرة ثانية.');}
+   try{session.picks=await onPick(session,product,remove);syncPicks(session);session.notice.textContent=remove?text('Removed from this design','تمت الإزالة من هذا التصميم'):text('Saved below your room photo','تم الحفظ أسفل صورة غرفتك');}
+   catch{session.notice.textContent=text('Could not save. Please try again.','تعذّر الحفظ. أعد المحاولة.');}
    finally{button.disabled=false;clearTimeout(session.noticeTimer);session.noticeTimer=setTimeout(()=>session.notice.textContent='',3500);}
   },true);
   session.notice=root.querySelector('[data-save-notice]');
@@ -133,7 +133,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const bridge=session.root?.fzRefineBridge,snapshot=bridge?.snapshot();
    if(snapshot?.view){bridge.restore(snapshot);bridge.revealSearchResults?.();session.root.fzSearchProgress?.stop();session.completed=hasSavedResults(snapshot.view,session.market);}
    const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
-   clearInterval(session.progressTimer);session.error=visible?'':text('No close matches found.','ما لقينا نتائج قريبة.');
+   clearInterval(session.progressTimer);session.error=visible?'':text('No close matches found.','لم نعثر على نتائج قريبة من هذه القطعة.');
    onStatus?.(session.key,false);paint(session);save(session);
   });
   session.started=session.budget.started;
@@ -156,7 +156,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    if(session.budget!==budget||budget.expired)return;
    session.completed=result!==false;
    if(result===false&&!context(session)?.busy)session.startedSearch=!!context(session)?.kind&&context(session).kind==='image';
-  }catch{if(session.budget===budget&&!budget.expired)session.error=text('Could not finish. Try again.','تعذّر إكمال البحث. حاول مرة ثانية.');}
+  }catch{if(session.budget===budget&&!budget.expired)session.error=text('Could not finish. Try again.','لم يكتمل البحث. أعد المحاولة.');}
   finally{if(session.budget===budget){budget.finish();clearInterval(session.progressTimer);session.launching=false;watch(session);save(session);}}
  }
  async function ready(session){
@@ -202,7 +202,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    // or credit is involved. Never fabricate a Saved search from legacy rows.
    if(root.fzRefineBridge.prepare){
     const prepared=await root.fzRefineBridge.prepare(view.items,new AbortController().signal);
-    if(Array.isArray(prepared)&&!prepared.length)session.error=text('Saved photos are unavailable. No new search was started.','صور البحث المحفوظ غير متاحة. ما بدأنا بحث جديد.');
+    if(Array.isArray(prepared)&&!prepared.length)session.error=text('Saved photos are unavailable. No new search was started.','صور البحث المحفوظ غير متاحة. لم يبدأ بحث جديد.');
    }
    session.loading=false;session.completed=true;syncPicks(session);watch(session);
   }else await run(session,true);
@@ -216,7 +216,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const frame=document.createElement('iframe');frame.title='Findzia — '+name;frame.className='original-results-frame';frame.allow='payment';
    session={key,name,crop,market,room,design,item,view,picks,readOnly,frame,loading:true,busy:false,started:Date.now(),path:'/api/jobs/'+room+'/results/'+item};sessions.set(key,session);
    if(!hasSavedResults(view,market))beginBudget(session);
-   frame.addEventListener('load',()=>ready(session).catch(()=>{session.budget?.finish();clearInterval(session.progressTimer);session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح Findzia. سكّر الطبقة وحاول مجددًا.');paint(session);} ),{once:true});
+   frame.addEventListener('load',()=>ready(session).catch(()=>{session.budget?.finish();clearInterval(session.progressTimer);session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح النتائج. أغلق النافذة وأعد المحاولة.');paint(session);} ),{once:true});
    frame.src='/api/findzia-results';body.append(frame);
   }
   session.picks=picks;if(session.root){syncLanguage(session);resultsOnly(session);syncPicks(session);}

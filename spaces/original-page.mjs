@@ -5,8 +5,10 @@ let cached,flight;
 export function frameDocument(html){
  if(!html.includes('fzRefineBridge.searchPhoto=')||!html.includes('fzRefineBridge'))throw Error('ORIGINAL_PAGE_UNAVAILABLE');
  return html.replace(/((?:src|href)=["'])\/(assets\/[^"']+|favicon\.svg)(["'])/g,'$1https://findzia.com/$2$3')
+  // Spaces shares the original search engine, with its own reviewed UI copy.
+  .replace(/(src=["'])https:\/\/findzia\.com\/assets\/findzia-i18n\.[^"']+\.js(["'])/g,'$1/findzia/i18n.js$2')
   .replace(/<html\b/i,'<html data-findzia-spaces-results')
-  .replace(/<\/head>/i,'<link rel="stylesheet" href="/original-results-frame.css"></head>');
+  .replace(/<\/head>/i,'<link rel="stylesheet" href="/original-results-frame.css"><link rel="stylesheet" href="/spaces-typography.css"></head>');
 }
 export function accountDocument(html){
  return html.replace('data-findzia-spaces-results','data-findzia-spaces-account')
