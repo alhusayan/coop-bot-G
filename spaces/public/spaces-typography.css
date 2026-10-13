@@ -44,3 +44,6 @@ html:is(:lang(ja),:lang(zh),:lang(ko),:lang(hi),:lang(ur)) .home-copy>p:not(.not
  html:lang(ar) .any-room{font-size:15px;line-height:1.9}
  .home-actions .primary{white-space:normal;padding-block:13px}
 }
+
+/* Secondary actions stay readable on the dark canvas. */
+html[data-findzia-theme="dark"] .example-button{color:#b8d1c1}

@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import {parseHTML} from 'linkedom';
 import {frameDocument} from '../original-page.mjs';
+import {syncLanguageControls} from '../public/findzia-shell.js';
 
 const code=readFileSync(new URL('../public/findzia/i18n.js',import.meta.url),'utf8');
 const catalog=JSON.parse(code.match(/ const DATA=(.+);\n \/\/ Build embeds/)[1]);
@@ -56,4 +57,15 @@ test('the results frame loads reviewed copy and Cairo while retaining the origin
  assert.match(framed,/href="\/spaces-typography.css"/);
  assert.match(framed,/src="https:\/\/findzia.com\/assets\/findzia-account.abc123.js" defer/);
  assert.equal(framed.match(/<script>(.*?)<\/script>/)[1],original.match(/<script>(.*?)<\/script>/)[1]);
+});
+
+test('a language change survives a translated market-sheet repaint',()=>{
+ const {document}=parseHTML('<html><body><section id="root"><select data-profile-language-select><option value="ar" selected>العربية</option><option value="de">Deutsch</option></select></section><div id="sheet"><select id="spaces-language"><option value="ar" selected>العربية</option><option value="de">Deutsch</option></select></div></body></html>');
+ const root=document.querySelector('#root');
+ for(const code of ['de','ar','de']){
+  syncLanguageControls(root,code);
+  const sheet=document.querySelector('#sheet');sheet.innerHTML=sheet.innerHTML;
+  assert.equal(document.querySelector('#spaces-language').value,code);
+  assert.equal(root.querySelector('select').value,code);
+ }
 });

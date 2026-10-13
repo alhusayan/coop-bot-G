@@ -4,6 +4,16 @@ import {prepareAccountReturn,rememberAccountRoom} from './account-navigation.js'
 // The account API remains the single authority for identity, credits and payment.
 const languages={en:'English',nl:'Nederlands',ar:'العربية',de:'Deutsch',fr:'Français',it:'Italiano',es:'Español',pt:'Português',tr:'Türkçe',ru:'Русский',ja:'日本語',zh:'中文',ko:'한국어',hi:'हिन्दी',ur:'اردو',id:'Bahasa Indonesia',ms:'Bahasa Melayu'};
 const read=(key,fallback)=>{try{return localStorage.getItem(key)||fallback;}catch{return fallback;}};
+export function syncLanguageControls(root,code){
+ const controls=[root.querySelector('[data-profile-language-select]'),root.ownerDocument.querySelector('#spaces-language')];
+ for(const control of controls){
+  if(!control)continue;
+  // Preserve the current choice if a translated label causes the sheet to repaint.
+  for(const option of control.options)option.toggleAttribute('selected',option.value===code);
+  const selected=[...control.options].find(option=>option.value===code);
+  if(selected)selected.selected=true;
+ }
+}
 export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,openDesigns,home,notice}){
  const root=document.querySelector('#findzia-home-spaces'),menu=root.querySelector('[data-dark-menu]');
  const market=root.querySelector('[data-profile-market-select]'),language=root.querySelector('[data-profile-language-select]'),appearance=root.querySelector('[data-solar-mode]');
@@ -17,14 +27,16 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
  function sync(){
   const markets=getMarkets();market.replaceChildren(...Object.entries(markets).map(([code,m])=>new Option(m.flag+' '+m.en,code)));market.value=getMarket();
   const selected=markets[getMarket()];root.querySelector('[data-dark-market-flag]').textContent=selected?.flag||'🇰🇼';
-  root.querySelector('[data-dark-market-open]').setAttribute('aria-label',(window.FindziaI18n?.t('Market, language and currency','السوق واللغة والعملة',root)||'Market, language and currency')+' · '+(selected?.en||''));
+  let countryName=selected?.en||'';try{countryName=new Intl.DisplayNames([root.dataset.lang||'en'],{type:'region'}).of(getMarket());}catch{}
+  root.querySelector('[data-dark-market-open]').setAttribute('aria-label',(window.FindziaI18n?.t('Market, language and currency','السوق واللغة والعملة',root)||'Market, language and currency')+' · '+countryName);
  }
  market.addEventListener('change',()=>{setMarket(market.value);sync();});
  language.replaceChildren(...Object.entries(languages).map(([code,label])=>new Option(label,code)));
  function setLanguage(code,{user=true}={}){
   if(!languages[code])code=getMarkets()[getMarket()]?.lang||'en';
   if(user)try{localStorage.setItem('spaces-language-choice-'+getMarket()+'-v1',code);}catch{}
-  window.FindziaLocale?.choose(code);window.FindziaI18n?.set(root,code);language.value=code;
+  syncLanguageControls(root,code);
+  window.FindziaLocale?.choose(code);window.FindziaI18n?.set(root,code);
   document.documentElement.dir=['ar','ur'].includes(code)?'rtl':'ltr';
   try{localStorage.setItem('findzia-lang',code);}catch{}
   document.dispatchEvent(new CustomEvent('spaces:locale',{detail:{language:code}}));sync();
