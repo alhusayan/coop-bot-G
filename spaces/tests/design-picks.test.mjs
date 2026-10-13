@@ -4,7 +4,7 @@ import {mkdtempSync,writeFileSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHmac} from 'node:crypto';
-import {updateDesignPicks,hasSavedResults} from '../public/design-picks.js';
+import {updateDesignPicks,hasSavedResults,savedPickImage} from '../public/design-picks.js';
 
 test('bookmarks stay within their room, design and piece and survive reopening',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'spaces-picks-')),owner='1'.repeat(32),id='a'.repeat(24),secret='picks-test';
@@ -39,4 +39,13 @@ test('empty or wrong-market snapshots cannot masquerade as a saved search',()=>{
  assert.equal(hasSavedResults({items:[],lastSearch:{kind:'image',country:'KW'}},'KW'),false);
  assert.equal(hasSavedResults({items:[{}],lastSearch:{kind:'image',country:'SA'}},'KW'),false);
  assert.throws(()=>updateDesignPicks(Array.from({length:20},(_,i)=>({url:'https://shop.test/'+i})),{url:'https://shop.test/new'}),/PICKS_LIMIT/);
+});
+
+test('saved product photos use a durable source instead of an expired verified-media cache',()=>{
+ const pick={url:'https://shop.test/table',image:'https://api.findzia.com/api/media/verified/expired'};
+ const row={url:pick.url,audited_image:'https://shop.test/table.jpg',image:'https://shop.test/other.jpg'};
+ assert.equal(savedPickImage(pick,[row]),row.audited_image);
+ assert.equal(savedPickImage({...pick,image:'https://shop.test/chosen.jpg'},[row]),'https://shop.test/chosen.jpg');
+ assert.equal(savedPickImage(pick,[{...row,audited_image:'javascript:alert(1)'}]),row.image);
+ assert.equal(savedPickImage(pick,[{...row,url:'https://different.test/table'}]),pick.image);
 });

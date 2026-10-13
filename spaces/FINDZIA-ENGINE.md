@@ -193,3 +193,11 @@ message replaces a blank area. Saved results pass through the same gate.
 
 Original bookmarks still target the room's design picks. Price text is
 normalized to keep fractional digits joined to the displayed amount.
+
+## 0.6.4 durable saved-product photos
+
+Design picks retain the source photo from the selected original result rather
+than the API's expiring verified-media cache URL. Existing picks recover the
+source from their own saved original views, matched by product URL. Store
+images use the original renderer's no-referrer policy. This does not run a
+search or alter product matching.

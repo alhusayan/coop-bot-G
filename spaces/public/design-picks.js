@@ -6,6 +6,15 @@ export function productKey(value){
   url.hash='';return url.href;
  }catch{return '';}
 }
+export function savedPickImage(pick,rows=[]){
+ const current=productKey(pick?.image),temporary=url=>/\/api\/media\/verified\//.test(url);
+ if(current&&!temporary(current))return current;
+ const row=rows.find(value=>productKey(value.url)===productKey(pick?.url));
+ for(const source of [row?.audited_image,row?.image,row?.thumbnail,row?.product_image]){
+  const url=productKey(source);if(url&&!temporary(url))return url;
+ }
+ return current;
+}
 export function designPick(value){
  const url=productKey(value?.url);if(!url||url.length>4000)throw Error('INVALID_INPUT');
  const clean=(text,max)=>String(text||'').slice(0,max);

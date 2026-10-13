@@ -1,4 +1,4 @@
-import {productKey,updateDesignPicks,hasSavedResults} from '../public/design-picks.js';
+import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from '../public/design-picks.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -21,7 +21,7 @@ test('clean photo selection is free and opens the original layer without a Space
  document.querySelector('.fz-home').fzBilling={authorizePiece:async()=>{authorizations++;},refresh(){}};
  const fetch=async(path,options={})=>{if(path==='/api/config')return Response.json({markets:{US:{currency:'USD',en:'United States',flag:'US'},KW:{currency:'KWD',en:'Kuwait',flag:'KW'}},demo:job.id});if(/\/(focus|search)\//.test(path))searches++;return Response.json(structuredClone(job));};
  globalThis.fetch=fetch;const storage={getItem:()=>null,setItem:()=>{}};
- const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoPiece,createLocalCatalog,createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},getLanguage:()=> 'en'})});
+ const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoPiece,createLocalCatalog,createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},getLanguage:()=> 'en'})});
  try{
   vm.runInContext(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),context);
   vm.runInContext("state.market='US'",context);await vm.runInContext('demo()',context);await vm.runInContext('choose(0)',context);

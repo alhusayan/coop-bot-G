@@ -1,4 +1,4 @@
-import {productKey,updateDesignPicks,hasSavedResults} from './design-picks.js';
+import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
 import {createOriginalLayer} from './original-results.js';
 import {mountFindzia} from './findzia-shell.js';
 import {pieceViews,pickPhotoPiece} from './hotspots.js';
@@ -36,11 +36,15 @@ function resultView(item){
  const view=item.original_views?.[countryCode()]||(hasSavedResults(item.original_view,countryCode())?item.original_view:null)||recent;return hasSavedResults(view,countryCode())?view:null;
 }
 function picksFor(item){return item.design_picks||designBookmarks[keyFor(item)]||[];}
+function imageForPick(item,pick){
+ const views=[item.original_view,...Object.values(item.original_views||{}),...Object.entries(demoViews).filter(([key])=>key.startsWith(keyFor(item)+':')).map(([,entry])=>entry.view)];
+ return savedPickImage(pick,views.flatMap(view=>view?.items||[]));
+}
 function renderDesignPicks(){
  const host=$('#design-picks');if(!host)return;
  const items=selected()?.items||[],groups=items.filter(item=>picksFor(item).length);
  host.hidden=!groups.length;
- patchHTML(host,groups.length?`<div class="design-picks-heading"><div><h2>${esc(translate('Your design picks','اختيارات هالتصميم'))}</h2><p>${esc(translate('The pieces you saved for this room.','القطع اللي اخترتها لهالغرفة.'))}</p></div><span>${groups.reduce((n,item)=>n+picksFor(item).length,0)}</span></div><div class="design-picks-grid">${groups.flatMap(item=>picksFor(item).map((pick,index)=>`<article class="design-pick" data-ui-key="${esc(keyFor(item)+':'+pick.url)}"><a class="design-pick-photo" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored" aria-label="${esc(pick.title)}"><img src="${esc(safe(pick.image))}" alt="${esc(pick.title)}" loading="lazy"></a><button class="design-pick-remove" data-action="remove-pick" data-id="${item.id}" data-index="${index}" aria-label="${esc(translate('Remove from this design','إزالة من هالتصميم'))}">${icon('close',true)}</button><div class="design-pick-copy"><span class="design-pick-piece">${esc(item.name_en)}</span><strong>${esc((pick.price||translate('View price at store','شوف السعر بالمتجر')).replace(/\s+([.,]\d)/g,'$1'))}</strong><div class="design-pick-store"><span>${esc(pick.store)}</span><span>${esc(pick.flag)}</span></div><a class="design-pick-visit" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored">${esc(translate('View at store','شوفه بالمتجر'))} ${icon('external',true)}</a></div></article>`)).join('')}</div>`:'');
+ patchHTML(host,groups.length?`<div class="design-picks-heading"><div><h2>${esc(translate('Your design picks','اختيارات هالتصميم'))}</h2><p>${esc(translate('The pieces you saved for this room.','القطع اللي اخترتها لهالغرفة.'))}</p></div><span>${groups.reduce((n,item)=>n+picksFor(item).length,0)}</span></div><div class="design-picks-grid">${groups.flatMap(item=>picksFor(item).map((pick,index)=>`<article class="design-pick" data-ui-key="${esc(keyFor(item)+':'+pick.url)}"><a class="design-pick-photo" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored" aria-label="${esc(pick.title)}"><img src="${esc(safe(imageForPick(item,pick)))}" alt="${esc(pick.title)}" loading="lazy" referrerpolicy="no-referrer"></a><button class="design-pick-remove" data-action="remove-pick" data-id="${item.id}" data-index="${index}" aria-label="${esc(translate('Remove from this design','إزالة من هالتصميم'))}">${icon('close',true)}</button><div class="design-pick-copy"><span class="design-pick-piece">${esc(item.name_en)}</span><strong>${esc((pick.price||translate('View price at store','شوف السعر بالمتجر')).replace(/\s+([.,]\d)/g,'$1'))}</strong><div class="design-pick-store"><span>${esc(pick.store)}</span><span>${esc(pick.flag)}</span></div><a class="design-pick-visit" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored">${esc(translate('View at store','شوفه بالمتجر'))} ${icon('external',true)}</a></div></article>`)).join('')}</div>`:'');
 }
 async function saveDesignPick(session,product,remove){
  const bookmarkKey=[session.room,session.design,session.item].join(':');

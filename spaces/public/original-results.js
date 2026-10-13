@@ -1,6 +1,6 @@
 // The frame runs findzia.com's current page, including the original photo
 // entry point, wallet, media checks, cards, groups and sorting. No offer adapter.
-import {productKey,hasSavedResults} from './design-picks.js';
+import {productKey,hasSavedResults,savedPickImage} from './design-picks.js';
 import {reviewSimilarCards} from './similar-review.js';
 export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClose,onPick}){
  const sessions=new Map();let current=null,returnFocus=null;
@@ -69,7 +69,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const card=button.closest('.fz-card-shell'),url=card?.querySelector('a.fz-tile')?.href;if(!url)return;
    const snapshot=root.fzRefineBridge.snapshot(),row=snapshot.view.items.find(x=>productKey(x.url)===productKey(url)),img=card.querySelector('.fz-tile-media img');
    const product={url,title:row?.title||img?.alt||session.name,store:card.querySelector('.fz-tile-store')?.textContent||row?.store||'',
-    image:img?.currentSrc||img?.src||'',price:card.querySelector('.fz-tile-price')?.innerText||card.querySelector('.fz-tile-price')?.textContent||'',flag:card.querySelector('.fz-inline-flag')?.textContent||''};
+    image:savedPickImage({url,image:img?.currentSrc||img?.src||''},snapshot.view.items),price:card.querySelector('.fz-tile-price')?.innerText||card.querySelector('.fz-tile-price')?.textContent||'',flag:card.querySelector('.fz-inline-flag')?.textContent||''};
    const remove=(session.picks||[]).some(x=>productKey(x.url)===productKey(url));button.disabled=true;
    try{session.picks=await onPick(session,product,remove);syncPicks(session);session.notice.textContent=remove?text('Removed from this design','تمت الإزالة من هالتصميم'):text('Saved below your room photo','انحفظ تحت صورة غرفتك');}
    catch{session.notice.textContent=text('Could not save. Please try again.','تعذّر الحفظ. حاول مرة ثانية.');}
