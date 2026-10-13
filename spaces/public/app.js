@@ -9,7 +9,7 @@ import {patchHTML,updateImage,pieceActivity} from './live-view.js';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
-const paths={camera:'M4 7h4l2-3h4l2 3h4v13H4z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',plus:'M12 5v14M5 12h14',back:'M19 12H5m6-6-6 6 6 6',forward:'M5 12h14m-6-6 6 6-6 6',chevron:'m7 10 5 5 5-5',folder:'M3 6h7l2 3h9v12H3z',close:'m6 6 12 12M6 18 18 6',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4',compare:'M12 2v20M3 5h7v14H3zm11 0h7v14h-7',check:'m5 12 4 4L19 6',external:'M14 3h7v7M21 3l-11 11M9 5H3v16h16v-6',expand:'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5',more:'M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2'};
+const paths={heart:'M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z',camera:'M4 7h4l2-3h4l2 3h4v13H4z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',plus:'M12 5v14M5 12h14',back:'M19 12H5m6-6-6 6 6 6',forward:'M5 12h14m-6-6 6 6-6 6',chevron:'m7 10 5 5 5-5',folder:'M3 6h7l2 3h9v12H3z',close:'m6 6 12 12M6 18 18 6',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4',compare:'M12 2v20M3 5h7v14H3zm11 0h7v14h-7',check:'m5 12 4 4L19 6',external:'M14 3h7v7M21 3l-11 11M9 5H3v16h16v-6',expand:'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5',more:'M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2'};
 const icon=(name,small=false)=>`<span class="icon${small?' small':''}" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${paths[name]||paths.spark}"/></svg></span>`;
 $$('[data-icon]').forEach(el=>el.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[el.dataset.icon]||paths.spark}"/></svg>`);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -35,7 +35,7 @@ function renderDesignPicks(){
  const host=$('#design-picks');if(!host)return;
  const items=selected()?.items||[],groups=items.filter(item=>picksFor(item).length);
  host.hidden=!groups.length;
- patchHTML(host,groups.length?`<div class="design-picks-heading"><div><h2>${esc(translate('Your design picks','اختيارات هالتصميم'))}</h2><p>${esc(translate('The pieces you saved for this room.','القطع اللي اخترتها لهالغرفة.'))}</p></div><span>${groups.reduce((n,item)=>n+picksFor(item).length,0)}</span></div><div class="design-picks-grid">${groups.flatMap(item=>picksFor(item).map((pick,index)=>`<article class="design-pick" data-ui-key="${esc(keyFor(item)+':'+pick.url)}"><a class="design-pick-photo" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored" aria-label="${esc(pick.title)}"><img src="${esc(safe(imageForPick(item,pick)))}" alt="${esc(pick.title)}" loading="lazy" referrerpolicy="no-referrer"></a><button class="design-pick-remove" data-action="remove-pick" data-id="${item.id}" data-index="${index}" aria-label="${esc(translate('Remove from this design','إزالة من هالتصميم'))}">${icon('close',true)}</button><div class="design-pick-copy"><span class="design-pick-piece">${esc(item.name_en)}</span><strong>${esc((pick.price||translate('View price at store','شوف السعر بالمتجر')).replace(/\s+([.,]\d)/g,'$1'))}</strong><div class="design-pick-store"><span>${esc(pick.store)}</span><span>${esc(pick.flag)}</span></div><a class="design-pick-visit" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored">${esc(translate('View at store','شوفه بالمتجر'))} ${icon('external',true)}</a></div></article>`)).join('')}</div>`:'');
+ patchHTML(host,groups.length?`<div class="design-picks-heading"><div><h2>${esc(translate('Your design picks','اختيارات هالتصميم'))}</h2><p>${esc(translate('The pieces you saved for this room.','القطع اللي اخترتها لهالغرفة.'))}</p></div><span>${groups.reduce((n,item)=>n+picksFor(item).length,0)}</span></div><div class="design-picks-grid">${groups.flatMap(item=>picksFor(item).map((pick,index)=>`<article class="design-pick" data-ui-key="${esc(keyFor(item)+':'+pick.url)}"><a class="design-pick-photo" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored" aria-label="${esc(pick.title)}"><img src="${esc(safe(imageForPick(item,pick)))}" alt="${esc(pick.title)}" loading="lazy" referrerpolicy="no-referrer"></a><button class="design-pick-remove" aria-pressed="true" data-action="remove-pick" data-id="${item.id}" data-index="${index}" aria-label="${esc(translate('Remove from this design','إزالة من هالتصميم'))}">${icon('heart',true)}</button><div class="design-pick-copy"><span class="design-pick-piece">${esc(item.name_en)}</span><strong>${esc((pick.price||translate('View price at store','شوف السعر بالمتجر')).replace(/\s+([.,]\d)/g,'$1'))}</strong><div class="design-pick-store"><span>${esc(pick.store)}</span><span>${esc(pick.flag)}</span></div><a class="design-pick-visit" href="${safe(pick.url)}" target="_blank" rel="noopener noreferrer sponsored">${esc(translate('View at store','شوفه بالمتجر'))} ${icon('external',true)}</a></div></article>`)).join('')}</div>`:'');
 }
 async function saveDesignPick(session,product,remove){
  const bookmarkKey=[session.room,session.design,session.item].join(':');
@@ -261,7 +261,19 @@ let dragStart=null;const handle=$('.sheet-handle');handle.addEventListener('poin
 let carouselDrag=null;$('#design-grid').addEventListener('pointerdown',e=>{if(e.pointerType!=='mouse')return;carouselDrag={x:e.clientX,scroll:$('#design-grid').scrollLeft};gestureDragged=false;});$('#design-grid').addEventListener('pointermove',e=>{if(!carouselDrag)return;const dx=e.clientX-carouselDrag.x;if(Math.abs(dx)>8){gestureDragged=true;$('#design-grid').scrollLeft=carouselDrag.scroll-dx;}});document.addEventListener('pointerup',()=>{carouselDrag=null;setTimeout(()=>gestureDragged=false,50);});
 new ResizeObserver(()=>{if(state.view==='shopping')renderShop();}).observe($('#design-canvas'));
 document.addEventListener('load',event=>{if(state.view==='shopping'&&(event.target.id==='selected-image'||event.target.matches?.('.zoom-canvas>img')))renderShop();},true);
-init();
+// Only room coordinates are retained across account navigation. Session tokens
+// stay exclusively with the original account's same-origin session storage.
+document.addEventListener('spaces:account-navigation',()=>{
+ try{sessionStorage.setItem('spaces-account-room',JSON.stringify({job:state.job?.id,design:state.design,view:state.view,market:state.market,at:Date.now()}));}catch{}
+});
+init().then(async allowed=>{
+ if(!allowed)return;
+ let saved;try{saved=JSON.parse(sessionStorage.getItem('spaces-account-room'));sessionStorage.removeItem('spaces-account-room');}catch{}
+ if(!saved||Date.now()-saved.at>86400000||!state.config.markets[saved.market])return;
+ state.market=saved.market;marketChosen=true;syncMarket();shell?.setMarketLanguage();
+ if(!/^[a-f0-9]{24}$/.test(saved.job||''))return;
+ try{const token=roomContext.capture(),job=await api('/api/jobs/'+saved.job);if(!applyJob(job,token))return;state.design=Math.max(0,Math.min(job.designs.length-1,Number(saved.design)||0));view(saved.view==='shopping'?'shopping':'designs');if(active())poll();}catch{toast('Your room is no longer available.');}
+});
 
 
 mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();shell.setMarketLanguage();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));

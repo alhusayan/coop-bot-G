@@ -8,6 +8,10 @@ export function frameDocument(html){
   .replace(/<html\b/i,'<html data-findzia-spaces-results')
   .replace(/<\/head>/i,'<link rel="stylesheet" href="/original-results-frame.css"></head>');
 }
+export function accountDocument(html){
+ return html.replace('data-findzia-spaces-results','data-findzia-spaces-account')
+  .replace('<link rel="stylesheet" href="/original-results-frame.css">','<link rel="stylesheet" href="/account-page.css"><script type="module" src="/account-page.js"></script>');
+}
 export async function originalPage(fetcher=fetch){
  if(cached&&Date.now()-cached.at<60000)return cached.html;
  if(flight)return flight;

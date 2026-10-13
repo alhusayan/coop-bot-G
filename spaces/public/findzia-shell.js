@@ -1,4 +1,5 @@
 import {marketLanguage} from './markets.js';
+import {bindAccountNavigation,openAccountPage} from './account-navigation.js';
 // Connect the original Findzia account, billing and menu to the Spaces screens.
 // The account API remains the single authority for identity, credits and payment.
 const languages={en:'English',nl:'Nederlands',ar:'العربية',de:'Deutsch',fr:'Français',it:'Italiano',es:'Español',pt:'Português',tr:'Türkçe',ru:'Русский',ja:'日本語',zh:'中文',ko:'한국어',hi:'हिन्दी',ur:'اردو',id:'Bahasa Indonesia',ms:'Bahasa Melayu'};
@@ -29,8 +30,8 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
   document.dispatchEvent(new CustomEvent('spaces:locale',{detail:{language:code}}));sync();
  }
  language.addEventListener('change',()=>setLanguage(language.value));
- appearance.value=read('findzia-appearance-v1','light');
- appearance.addEventListener('change',()=>{try{localStorage.setItem('findzia-appearance-v1',appearance.value);}catch{}window.FindziaAppearance.apply(root,window.FindziaAppearance.resolve(appearance.value));});
+ appearance.value=read('findzia-appearance-v1','auto');
+ appearance.addEventListener('change',()=>{try{localStorage.setItem('findzia-appearance-v1',appearance.value);}catch{}window.SpacesTheme?.apply();});
  const trigger=root.querySelector('[data-dark-menu-open]');
  trigger.addEventListener('click',()=>{if(!menu.open)menu.showModal();trigger.setAttribute('aria-expanded','true');});
  root.querySelector('[data-dark-menu-close]').addEventListener('click',()=>menu.close());
@@ -38,7 +39,11 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
  menu.addEventListener('click',event=>{if(event.target===menu){const r=menu.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)menu.close();}});
  root.querySelector('[data-dark-market-open]').addEventListener('click',openMarket);
  root.querySelector('[data-home-link]').addEventListener('click',event=>{event.preventDefault();home();});
- for(const name of ['boot','i18n','motion','support','account','billing']){await import('./findzia/'+name+'.js');if(name==='boot')window.FindziaAppearance.apply(root,window.FindziaAppearance.resolve(appearance.value));}
+ // Capture header/menu navigation before the original modal handlers mount.
+ bindAccountNavigation(root,view=>openAccountPage(view,getMarket(),root.dataset.lang||'en'));
+ for(const name of ['i18n','motion','support','account','billing'])await import('./findzia/'+name+'.js');
+ const nativeOpen=root.fzAccount.open;
+ root.fzAccount.open=(view='home',...args)=>['home','signin','plans','subscription','usage','checkout','profile'].includes(view)?openAccountPage(view,getMarket(),root.dataset.lang||'en'):nativeOpen(view,...args);
  window.FindziaLocale.mount(root);setMarketLanguage();
  sync();window.FindziaI18n.refresh();
  root.querySelectorAll('[data-shell-pending]').forEach(el=>{el.disabled=false;el.removeAttribute('data-shell-pending');});

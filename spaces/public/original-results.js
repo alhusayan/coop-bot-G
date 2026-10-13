@@ -2,6 +2,8 @@
 // entry point, wallet, media checks, cards, groups and sorting. No offer adapter.
 import {productKey,hasSavedResults,savedPickImage} from './design-picks.js';
 import {reviewSimilarCards} from './similar-review.js';
+import {bindAccountNavigation,openAccountPage} from './account-navigation.js';
+import {searchBudget} from './search-budget.js';
 export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClose,onPick}){
  const sessions=new Map();let current=null,returnFocus=null;
  const layer=document.createElement('dialog');layer.className='original-results-layer';layer.setAttribute('aria-label','Findzia results');
@@ -25,8 +27,8 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   const root=session.root;if(!root)return;
   root.fzStoreScene?.destroy();root.fzSearchWait?.destroy();
   delete root.dataset.waitActive;delete root.dataset.waitExiting;
-  const theme=document.querySelector('#findzia-home-spaces')?.dataset.theme||'light';
-  if(root.dataset.theme!==theme)session.frame.contentWindow.FindziaAppearance?.apply(root,theme);
+  const theme=document.documentElement.dataset.findziaTheme||document.querySelector('#findzia-home-spaces')?.dataset.theme||'light';
+  if(root.dataset.theme!==theme)session.frame.contentWindow.FindziaAppearance?.apply(root,{theme,source:'spaces'});
  }
  function syncLanguage(session){
   const select=session.root?.querySelector('[data-profile-language-select]');if(!select)return;
@@ -45,14 +47,14 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   status.classList.toggle('is-searching',session.busy||session.loading);
   const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
   waiting.hidden=!!visible||!!session.error||!(session.busy||session.loading);
-  status.textContent=session.loading?text('Opening store options…','جاري فتح خيارات المتاجر…'):session.busy?(visible?text('Checking more options…','جاري فحص خيارات إضافية…'):text('Finding your piece…','جاري البحث عن قطعتك…')):session.error||text('Save a favourite to your design','احفظ اللي يعجبك لتصميمك');
+  status.textContent=session.loading?text('Opening store options…','جاري فتح خيارات المتاجر…'):session.busy?(visible?text('Checking more options…','جاري فحص خيارات إضافية…'):text('Finding your piece…','جاري البحث عن قطعتك…')):session.error||text('Tap the heart to save to your design','اضغط القلب لحفظ القطعة بتصميمك');
   status.setAttribute('aria-busy',String(session.busy||session.loading));
   // Elapsed time is a secondary hint, not a constantly announced live region.
   tools.dataset.elapsed=session.busy?elapsed+'s':'';
  }
  function close(){if(!layer.open)return;save(current);layer.close();document.body.style.overflow='';returnFocus?.focus?.({preventScroll:true});onClose?.();}
  back.addEventListener('click',close);layer.addEventListener('cancel',event=>{event.preventDefault();close();});
- retry.addEventListener('click',()=>{if(current&&!current.busy&&!current.loading)run(current);});
+ retry.addEventListener('click',()=>{if(current&&!current.busy&&!current.loading){if(current.root)run(current);else{const input={...current};current.frame.remove();sessions.delete(current.key);open(input);}}});
  function context(session){return session.root?.fzRefineBridge?.context();}
  async function save(session){
   if(!session||session.saving||session.busy||session.loading||!session.completed||!session.root)return;
@@ -69,7 +71,9 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  function watch(session){
   if(!session.root)return;
   resultsOnly(session);
-  const c=context(session),busy=!!(session.launching||c?.busy||c?.media_pending||session.root.dataset.searchLaunching==='true');
+  // Loading a late product photo is not an active search. The native stream
+  // can already be finished/stopped while media_pending remains true.
+  const c=context(session),busy=!session.budget?.expired&&!!(session.launching||c?.busy||session.root.dataset.searchLaunching==='true');
   if(session.busy!==busy){session.busy=busy;onStatus?.(session.key,busy);if(!busy){save(session);document.querySelector('#findzia-home-spaces')?.fzBilling?.refresh(true);}}
   syncPicks(session);paint(session);
  }
@@ -87,11 +91,13 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   for(const button of session.root?.querySelectorAll('[data-save-product]')||[]){
    const active=chosen.has(productKey(button.dataset.saveProduct)),label=active?text('Remove from this design','إزالة من هالتصميم'):text('Save to this design','احفظ لهالتصميم');
    button.setAttribute('aria-pressed',String(active));button.setAttribute('aria-label',label);button.title=label;
+   if(!button.querySelector('[data-design-heart]'))button.innerHTML='<svg data-design-heart viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></svg>';
   }
  }
  function bindPicks(session){
   const root=session.root;
   root.addEventListener('click',async event=>{
+   if(event.target.closest?.('[data-photo-retry]')){event.preventDefault();event.stopImmediatePropagation();if(!session.busy&&!session.loading)run(session);return;}
    const button=event.target.closest?.('[data-save-product]');if(!button||!root.contains(button))return;
    // Redirect only the bookmark's destination. Search, card rendering and
    // product details continue to run entirely in the original page.
@@ -112,32 +118,63 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(Observer){session.pickObserver=new Observer(()=>syncPicks(session));session.pickObserver.observe(root.querySelector('[data-results-body]')||root,{childList:true,subtree:true});}
   syncPicks(session);
  }
- async function run(session){
+ function beginBudget(session){
+  session.budget?.cancel();
+  session.budget=searchBudget(()=>{
+   session.loading=false;session.launching=false;session.busy=false;
+   // Native restore cancels its launch and request controllers, increments its
+   // generation, and retains the real verified photo states. No second request.
+   const bridge=session.root?.fzRefineBridge,snapshot=bridge?.snapshot();
+   if(snapshot?.view){bridge.restore(snapshot);bridge.revealSearchResults?.();session.root.fzSearchProgress?.stop();session.completed=hasSavedResults(snapshot.view,session.market);}
+   const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
+   session.error=visible?text('Search ended at 16 seconds. These are the results received so far.','انتهى البحث عند ١٦ ثانية. هذه النتائج اللي وصلت حتى الآن.'):text('No confirmed results arrived within 16 seconds. No automatic retry.','ما وصلت نتائج مؤكدة خلال ١٦ ثانية. ما راح نعيد البحث تلقائيًا.');
+   onStatus?.(session.key,false);paint(session);save(session);
+  });
+  session.started=session.budget.started;
+ }
+ async function run(session,reuseBudget=false){
   if(session.loading||session.busy)return;
-  session.error='';session.completed=false;session.legacy=false;session.launching=true;session.busy=true;session.started=Date.now();session.startedSearch=true;paint(session);onStatus?.(session.key,true);
+  if(reuseBudget&&session.budget?.expired)return;
+  if(!reuseBudget||!session.budget)beginBudget(session);
+  const budget=session.budget;
+  session.error='';session.completed=false;session.legacy=false;session.launching=true;session.busy=true;session.startedSearch=true;paint(session);onStatus?.(session.key,true);
   try{
-   const response=await fetch(session.crop,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw Error('Photo unavailable');
+   const response=await fetch(session.crop,{credentials:'same-origin',cache:'no-store',signal:budget.signal});if(!response.ok)throw Error('Photo unavailable');
    const blob=await response.blob(),win=session.frame.contentWindow;
+   if(budget.expired||budget.signal.aborted)return;
    // The same function used by the original camera/file picker authorizes and
    // charges the one request. Spaces never calls authorizePiece or /focus here.
    const file=new win.File([blob],'room-piece.jpg',{type:blob.type||'image/jpeg'});
-   const result=await session.root.fzRefineBridge.searchPhoto(file);session.completed=result!==false;
+   const result=await session.root.fzRefineBridge.searchPhoto(file);
+   if(session.budget!==budget||budget.expired)return;
+   session.completed=result!==false;
    if(result===false&&!context(session)?.busy)session.startedSearch=!!context(session)?.kind&&context(session).kind==='image';
-  }catch{session.error=text('Could not finish. Try again.','تعذّر إكمال البحث. حاول مرة ثانية.');}
-  finally{session.launching=false;watch(session);save(session);}
+  }catch{if(session.budget===budget&&!budget.expired)session.error=text('Could not finish. Try again.','تعذّر إكمال البحث. حاول مرة ثانية.');}
+  finally{if(session.budget===budget){budget.finish();session.launching=false;watch(session);save(session);}}
  }
  async function ready(session){
   const start=Date.now();
-  while(Date.now()-start<25000){
+  while(Date.now()-start<16000&&!session.budget?.expired){
    const root=session.frame.contentDocument?.querySelector('.fz-home');
    if(root?.fzRefineBridge?.searchPhoto&&root.fzBilling&&root.fzAccount){session.root=root;break;}
    await new Promise(resolve=>setTimeout(resolve,100));
   }
+  if(session.budget?.expired)return;
   if(!session.root)throw Error('Original page unavailable');
   const win=session.frame.contentWindow,root=session.root;
+  bindAccountNavigation(root,view=>openAccountPage(view,session.market,getLanguage()));
+  const beforeSearch=win.FindziaBeforeSearch;
+  if(beforeSearch)win.FindziaBeforeSearch=async(...args)=>{
+   const budget=session.budget;
+   if(budget?.expired)return false;
+   const allowed=await beforeSearch(...args);
+   // A slow credit check must not launch a paid search after our deadline.
+   return allowed&&session.budget===budget&&!budget?.expired;
+  };
   const market=root.querySelector('[data-profile-market-select]');if(!market)throw Error('Market unavailable');
   market.value=session.market;market.dispatchEvent(new win.Event('change',{bubbles:true}));
   syncLanguage(session);resultsOnly(session);
+  session.frame.dataset.ready='true';
   if(context(session).country!==session.market)throw Error('Market unavailable');
   // Warm the EXISTING wallet before displaying the original account controls.
   // This shares same-origin storage, never sends credentials through messages.
@@ -161,7 +198,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
     if(Array.isArray(prepared)&&!prepared.length)session.error=text('Saved photos are unavailable. No new search was started.','صور البحث المحفوظ غير متاحة. ما بدأنا بحث جديد.');
    }
    session.loading=false;session.completed=true;syncPicks(session);watch(session);
-  }else await run(session);
+  }else await run(session,true);
  }
  async function open({key,name,crop,market,room,design,item,view,picks=[],newSearch=false,readOnly=false}){
   returnFocus=document.activeElement;
@@ -171,7 +208,8 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(!session){
    const frame=document.createElement('iframe');frame.title='Findzia — '+name;frame.className='original-results-frame';frame.allow='payment';
    session={key,name,crop,market,room,design,item,view,picks,readOnly,frame,loading:true,busy:false,started:Date.now(),path:'/api/jobs/'+room+'/results/'+item};sessions.set(key,session);
-   frame.addEventListener('load',()=>ready(session).catch(()=>{session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح Findzia. سكّر الطبقة وحاول مجددًا.');paint(session);} ),{once:true});
+   if(!hasSavedResults(view,market))beginBudget(session);
+   frame.addEventListener('load',()=>ready(session).catch(()=>{session.budget?.finish();session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح Findzia. سكّر الطبقة وحاول مجددًا.');paint(session);} ),{once:true});
    frame.src='/api/findzia-results';body.append(frame);
   }
   session.picks=picks;if(session.root){syncLanguage(session);resultsOnly(session);syncPicks(session);}
@@ -180,5 +218,5 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(existing&&newSearch&&!session.busy&&!session.loading)await run(session);
  }
  return {open,close,refreshLanguage(){for(const session of sessions.values())if(session.root)syncLanguage(session);if(current)paint(current);},has:key=>sessions.has(key),busy:key=>sessions.get(key)?.busy===true,
-  destroy(){close();for(const session of sessions.values()){clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
+  destroy(){close();for(const session of sessions.values()){session.budget?.cancel();clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
 }

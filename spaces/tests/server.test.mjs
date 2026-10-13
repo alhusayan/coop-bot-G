@@ -7,12 +7,15 @@ process.env.NODE_ENV='production';process.env.SPACES_TRIAL_TOKEN='test-invite';p
 const {createServer}=await import('../server.mjs');
 test('private trial requires its invite, serves app assets, and does not reveal another session job',async()=>{
  const s=createServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+s.address().port;
+ const realFetch=globalThis.fetch;globalThis.fetch=(url,options)=>url==='https://findzia.com/'?Promise.resolve(new Response('<html><head><script>e.fzRefineBridge.searchPhoto=fzAcceptPhoto;</script></head></html>',{headers:{'Content-Type':'text/html'}})):realFetch(url,options);
  try{
   assert.equal((await fetch(base+'/healthz')).status,200);
   assert.equal((await fetch(base+'/api/config')).status,401);
+  assert.equal((await fetch(base+'/account')).status,401);
   assert.equal((await fetch(base+'/trial/wrong',{redirect:'manual'})).status,404);
   const unlock=await fetch(base+'/trial/test-invite',{redirect:'manual'});assert.equal(unlock.status,200);assert.equal(unlock.headers.get('location'),null);assert.match(await unlock.text(),/Findzia Spaces/);assert.equal(unlock.headers.get('cache-control'),'no-store');
   const cookie=unlock.headers.get('set-cookie').split(';')[0];const config=await fetch(base+'/api/config',{headers:{cookie}});assert.equal(config.status,200);assert.equal((await config.json()).markets.KW.currency,'KWD');
+  const account=await fetch(base+'/account?view=home',{headers:{cookie}});assert.equal(account.status,200);assert.equal(account.headers.get('x-frame-options'),'DENY');assert.match(account.headers.get('content-security-policy'),/frame-ancestors 'none'/);assert.match(await account.text(),/data-findzia-spaces-account/);
   const reopen=await fetch(base+'/trial/test-invite',{method:'HEAD',headers:{cookie}});assert.equal(reopen.status,200);assert.equal(reopen.headers.get('set-cookie').split('.')[0],cookie.split('.')[0]);
   // A second browser follows the very same URL, with no cookies from the first.
   const safari=await fetch(base+'/trial/test-invite',{redirect:'manual'});const safariCookie=safari.headers.get('set-cookie').split(';')[0];assert.equal(safari.status,200);assert.notEqual(safariCookie.split('.')[0],cookie.split('.')[0]);assert.equal((await fetch(base+'/api/config',{headers:{cookie:safariCookie}})).status,200);
@@ -24,8 +27,8 @@ test('private trial requires its invite, serves app assets, and does not reveal 
   assert.equal((await fetch(base+'/lens-media/000000000000000000000000/original.jpg')).status,404);
   const root=await fetch(base+'/');const html=await root.text();assert.match(html,/Findzia Spaces/);assert.match(html,/<html lang="en" dir="ltr">/);assert.equal(root.headers.get('x-robots-tag'),'noindex, nofollow, noarchive');
   assert.match(html,/data-action="upload" disabled/);assert.match(html,/id="retry-access"/);
-  const queue=['/app.js'],visited=new Set();while(queue.length){const path=queue.shift();if(visited.has(path))continue;visited.add(path);const asset=await fetch(base+path);assert.equal(asset.status,200,path+' must be served');assert.match(asset.headers.get('content-type'),/javascript/);const code=await asset.text();for(const match of code.matchAll(/^import .*?from ['"]([^'"]+)['"]/gm)){const url=new URL(match[1],base+path);if(url.origin===base)queue.push(url.pathname);}}assert.ok(visited.has('/markets.js'));
+  const queue=['/app.js','/account-page.js',...[...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(x=>x[1])],visited=new Set();while(queue.length){const path=queue.shift();if(visited.has(path))continue;visited.add(path);const asset=await fetch(base+path);assert.equal(asset.status,200,path+' must be served');assert.match(asset.headers.get('content-type'),/javascript/);const code=await asset.text();for(const match of code.matchAll(/^import .*?from ['"]([^'"]+)['"]/gm)){const url=new URL(match[1],base+path);if(url.origin===base)queue.push(url.pathname);}}assert.ok(visited.has('/markets.js'));assert.ok(visited.has('/spaces-theme.js'));assert.ok(visited.has('/account-navigation.js'));
   assert.equal((await fetch(base+'/style.css')).status,200);assert.equal((await fetch(base+'/app.js')).status,200);assert.equal((await fetch(base+'/request.js')).status,200);
- }finally{await new Promise(r=>s.close(r));rmSync(process.env.SPACES_DATA_DIR,{recursive:true,force:true});}
+ }finally{globalThis.fetch=realFetch;await new Promise(r=>s.close(r));rmSync(process.env.SPACES_DATA_DIR,{recursive:true,force:true});}
 });
 

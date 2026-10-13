@@ -165,3 +165,38 @@
 @media(prefers-reduced-motion:reduce){.touch-ripple:after,.results-skeletons i,.original-results-tools:after{animation:none!important}.original-results-waiting>.search-spinner{border-style:dotted}}
 
 .original-results-layer .original-results-status{font-size:13px}.original-results-layer .original-results-retry{font-size:12px}
+
+/* One consistent surface while the original document boots behind the layer. */
+.original-results-frame:not([data-ready=true]){visibility:hidden}
+.design-pick-remove .icon svg{fill:#d75367;stroke:#d75367;width:22px;height:22px}
+.design-pick-remove{background:#fff;color:#23332b;border:1px solid #23332b15}
+.results-skeletons{display:none}
+.original-results-waiting{justify-content:flex-start;padding-top:50px}
+.original-results-tools{overflow:hidden}
+html[data-findzia-theme=dark]{--paper:#111917;--ink:#eef2ed;--muted:#b0bcb3;--green:#38664f;--light:#24382e;--line:#36463d;--surface:#1b2822;--soft:#23372d;--accent:#b4d6bf;color-scheme:dark;color:var(--ink);background:var(--paper)}
+html[data-findzia-theme=dark] body{background:var(--paper);color:var(--ink)}
+html[data-findzia-theme=dark] :is(.round,.hero-pill,.floating-button,.original-chip,.compare-button,.zoom-button,.sheet-close,.breathing-mark,.item-number,.item-quantity,.offer-thumb,.quantity button){background:#20342ded;color:var(--ink);border-color:var(--line)}
+html[data-findzia-theme=dark] :is(.history-card,.design-card,.item-card,.design-pick,.piece-picker-row,.piece-selection-card,#sheet,.country-choice,.menu-list button,input,select,textarea){background:var(--surface);color:var(--ink);border-color:var(--line);box-shadow:none}
+html[data-findzia-theme=dark] :is(.segments,.empty-items,.secondary,.quantity,.search-message.is-active,.search-progress,.piece-selection-card.is-searching){background:var(--soft);color:var(--ink);border-color:var(--line)}
+html[data-findzia-theme=dark] :is(.segments input:checked+span,.country-choice.selected){background:#344e3e;color:var(--ink);border-color:#93b5a0}
+html[data-findzia-theme=dark] :is(.country-here,.design-pick-visit,.piece-selection-card.is-searching .piece-selection-summary p){color:var(--accent)}
+html[data-findzia-theme=dark] :is(.item-photo,.item-photo>img,.item-photo.crop>img,.design-pick-photo,.preview-photo,.comparison img,.design-canvas){background:#17251f}
+html[data-findzia-theme=dark] :is(.photo-search-status,.piece-activity){background:#183227ed;color:var(--ink);border-color:#54705e}
+html[data-findzia-theme=dark] .browse-pieces{background:var(--surface);color:var(--ink)}
+html[data-findzia-theme=dark] .purchase-actions{background:#1b2822ed}
+html[data-findzia-theme=dark] .design-progress{background:#11191766;color:var(--ink)}
+html[data-findzia-theme=dark] .notice{background:#433427;color:#ffd2a5}
+html[data-findzia-theme=dark] .error-copy{color:#ffd2a5}
+html[data-findzia-theme=dark] :is(.spec-list li,footer){border-color:var(--line)}
+html[data-findzia-theme=dark] .sheet-handle{background:#718676}
+html[data-findzia-theme=dark] .search-elapsed{color:var(--muted)}
+html[data-findzia-theme=dark] .search-spinner{border-color:#77998666;border-top-color:#c0e4cc}
+html[data-findzia-theme=dark] :is(.search-track,.piece-search-track){background:#33493b}
+html[data-findzia-theme=dark] :is(.search-track>span,.piece-search-track>span){background:#98c2a7}
+html[data-findzia-theme=dark] .original-results-layer{background:var(--paper);color:var(--ink)}
+html[data-findzia-theme=dark] :is(.original-results-bar,.original-results-tools){background:#1b2822;color:var(--ink);border-color:var(--line)}
+html[data-findzia-theme=dark] :is(.original-results-frame,.original-results-waiting){background:var(--paper)}
+html[data-findzia-theme=dark] :is(.original-results-status,.original-results-subtitle){color:var(--muted)}
+html[data-findzia-theme=dark] .original-results-back{background:#304739;color:var(--ink)}
+html[data-findzia-theme=dark] .original-results-retry{color:#c0e4cc}
+html[data-findzia-theme=dark] .original-results-status.is-searching::before{border-color:#5d7b67;border-top-color:#c0e4cc}

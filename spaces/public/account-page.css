@@ -1,0 +1,15 @@
+/* Full-page presentation of Findzia's unmodified account and payment flows. */
+html[data-findzia-spaces-account]{background:#f7f7f2}
+html[data-findzia-spaces-account][data-findzia-theme=dark]{background:#111917}
+html[data-findzia-spaces-account] body{margin:0}
+html[data-findzia-spaces-account] .fz-home> :not(.fz-account):not(.fzb-wallet-dialog):not(.fzb-mf-dialog){display:none!important}
+html[data-findzia-spaces-account] .fz-home{padding:0!important;min-height:100dvh!important}
+html[data-findzia-spaces-account] .fz-account{inset:0!important;width:100%!important;max-width:none!important;height:100dvh!important;max-height:100dvh!important;margin:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;animation:none!important}
+html[data-findzia-spaces-account] .fz-account::backdrop{background:transparent;backdrop-filter:none}
+html[data-findzia-spaces-account] .fza-header{padding-top:max(16px,env(safe-area-inset-top));padding-inline:max(20px,calc((100vw - 700px)/2));min-height:76px}
+html[data-findzia-spaces-account] .fza-body{width:min(100%,740px);margin-inline:auto;padding:24px 20px max(24px,env(safe-area-inset-bottom))}
+html[data-findzia-spaces-account] .fza-header-actions{order:-1}
+html[data-findzia-spaces-account] [data-account-close]{min-width:44px;min-height:44px}
+html[data-findzia-spaces-account] .fz-account[dir=rtl] [data-account-close] svg{transform:rotate(180deg)}
+html[data-findzia-spaces-account] .fzb-wallet-dialog[open],html[data-findzia-spaces-account] .fzb-mf-dialog[open]{inset:0!important;width:100%!important;max-width:none!important;min-height:100dvh!important;max-height:100dvh!important;margin:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;padding:24px max(16px,calc((100vw - 580px)/2))!important}
+.spaces-account-error{position:fixed;inset:0;display:grid;place-content:center;gap:20px;background:inherit;color:inherit;font:16px/1.6 system-ui;text-align:center}.spaces-account-error button{padding:16px;font:inherit}
