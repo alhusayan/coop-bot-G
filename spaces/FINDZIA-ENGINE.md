@@ -15,10 +15,12 @@ money contract and currency. Shopify discovery remains separate and live-only.
 The dedicated service endpoint requires a server-only HMAC credential,
 body signature, short timestamp and one-time nonce. It has concurrency and
 per-room/daily request limits in addition to Spaces' existing private-preview
-admission. Public Findzia account, credit and payment admission are unchanged;
-preview room searches do not consume a customer's paid search balance.
+admission. As of 0.5.0, it also requires the customer's existing Findzia account
+or guest bearer, allowed origin and idempotent request ID. The original credit
+middleware reserves one customer search credit and settles/refunds it through
+the existing durable ledger. A service credential cannot bypass the wallet.
 
-Old selected rooms migrate to search revision 11 without regenerating images.
+Stored rooms retain their saved results without background search migrations.
 Overlapping objects retain separate selectable markers. Existing crop images,
 room history and 24-hour retention are preserved.
 
@@ -83,3 +85,22 @@ An explicit SPACES_REPAIR_ROOM / SPACES_REPAIR_DESIGN pair can repair one failed
 empty saved inventory once. It preserves the generated image and checks its
 checksum, respects normal task deduplication, and does not enable self-tests or
 modify successful inventories. These operational selectors are cleared after use.
+
+## 0.5.0 on-demand points and original customer credits
+
+Generating a design identifies and crops its pieces only. Opening a room,
+selecting a design, polling, changing language, restarting a service and
+reopening stored merchant options perform no shopping searches.
+
+A new piece search begins only after a point tap and original wallet admission.
+The point displays a stationary progress ring; the first visually reviewed
+options open the merchant sheet immediately while later verified cards stream in.
+Completed points reopen stored prices/options without another debit. An explicit
+Search again is labeled 1 credit and uses a new request ID. Per-piece in-flight
+deduplication, a persisted client request ID, and the original wallet's atomic
+ledger prevent double clicks/network replays from spending twice. Credentials
+are forwarded in memory, never written into room state.
+
+One customer credit is the retail price of one search, not one upstream provider
+API call. Original provider costs and completed visual-admission rules remain
+unchanged. The full-room automatic queue and all startup/demo searches are gone.

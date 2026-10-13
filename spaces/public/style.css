@@ -43,3 +43,32 @@
 
 .item-quantity{position:absolute;top:10px;right:10px;min-width:37px;padding:5px 8px;border-radius:20px;background:#fffE;color:var(--green);font-size:14px;font-weight:600}.title-quantity{white-space:nowrap;color:var(--muted);font-weight:500;font-size:.75em}
 
+
+/* The room is the shop: stationary, accessible points carry each search. */
+#shopping .shopping-layout{display:block;max-width:1000px;margin-inline:auto}
+#shopping .room-stage{position:relative;top:0;width:100%}
+#shopping .design-canvas{width:100%;margin:0}
+#shopping .design-canvas>img,.zoom-canvas>img{display:block;width:100%;height:auto;min-height:0;max-height:none;object-fit:contain}
+#shopping .shop-heading,#shopping .items-grid{display:none}
+#shopping .stage-hint{font-size:14px;text-align:center;margin:16px 0 12px}
+#shopping .hotspot,.zoom-canvas .hotspot{width:34px;height:34px;margin:-17px 0 0 -17px;background:#fffef7e8;color:#254f3d;border:1px solid #ffffffdb;box-shadow:0 2px 10px #10291c35;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transform:none;transition:background .2s,color .2s,box-shadow .2s}
+.hotspot .point-core{display:grid;place-items:center;font-size:12px;font-weight:650;line-height:1;pointer-events:none}
+.hotspot .point-core .icon{width:15px;height:15px}
+.hotspot .point-ring{position:absolute;inset:-4px;border:2px solid transparent;border-radius:50%;pointer-events:none}
+#shopping .hotspot.is-searching,.zoom-canvas .hotspot.is-searching{background:#305e4c;color:white;box-shadow:0 0 0 5px #ffffff45}
+.hotspot.is-searching .point-ring{border-color:#ffffff70;border-top-color:#fff;animation:point-search 1s linear infinite}
+#shopping .hotspot.has-results,.zoom-canvas .hotspot.has-results{background:#305e4c;color:#fff}
+#shopping .hotspot.selected,.zoom-canvas .hotspot.selected{z-index:4;box-shadow:0 0 0 4px #ffffffa8,0 4px 18px #13332050}
+.hotspot:focus-visible{outline:3px solid #e88b39;outline-offset:6px}
+.point-feedback{display:flex;align-items:center;gap:13px;max-width:540px;margin:0 auto;padding:16px 18px;border:1px solid var(--line);border-radius:22px;background:#ffffff90;text-align:start;min-height:80px}
+.point-feedback>img{width:50px;height:50px;object-fit:cover;border-radius:14px;flex-shrink:0}
+.point-feedback>div{flex:1;min-width:0}.point-feedback strong{font-size:16px;display:block}.point-feedback p{font-size:14px;color:var(--muted);margin:5px 0 0;line-height:1.45}
+.point-example{display:grid;place-items:center;width:40px;height:40px;border-radius:50%;background:var(--green);color:#fff;font-size:24px;flex-shrink:0}
+.point-credit-note{text-align:center;color:var(--muted);font-size:12px;line-height:1.5;margin:12px auto 20px}
+#shopping .empty-items{margin-top:18px}.zoom-canvas{border-radius:0;margin-top:60px}
+.preview-actions>p{text-align:center;color:var(--muted);font-size:14px}
+@keyframes point-search{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.hotspot.is-searching .point-ring{animation:none;border-color:#fff;border-style:dotted}}
+@media(max-width:760px){#shopping .room-title{font-size:30px}#shopping .stage-hint{font-size:13px;margin:14px 0 12px}.point-feedback{padding:14px}.point-credit-note{font-size:12px}.point-feedback strong{font-size:15px}}
+
+#shopping .shop-heading[hidden],#shopping #items-list[hidden]{display:none}

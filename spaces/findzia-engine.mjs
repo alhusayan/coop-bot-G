@@ -65,7 +65,7 @@ export function createOriginalResults(market,onProgress=()=>{}){
  };
 }
 
-export async function searchOriginalPiece(bytes,market,{room,language='en',taskKey=randomBytes(8).toString('hex'),interactive=false,env=process.env,fetcher=fetch,onProgress=()=>{}}={}){
+export async function searchOriginalPiece(bytes,market,{room,language='en',taskKey=randomBytes(8).toString('hex'),interactive=false,billing,env=process.env,fetcher=fetch,onProgress=()=>{}}={}){
  if(!MARKETS[market]||!Buffer.isBuffer(bytes)||!bytes.length||!(/^[a-f0-9]{24}$/).test(room||''))throw Error('INVALID_INPUT');
  const secret=env.FINDZIA_SPACES_ENGINE_KEY;if(!secret||secret.length<32)throw Error('ENGINE_UNAVAILABLE');
  return scheduler.run(taskKey,async({queue_ms})=>{
@@ -82,8 +82,8 @@ export async function searchOriginalPiece(bytes,market,{room,language='en',taskK
   const signature=createHmac('sha256',secret).update(stamp+'\n'+nonce+'\n'+body).digest('hex');
   // Compression can buffer small NDJSON updates until the entire search ends.
   // Keep this stream uncompressed so reviewed cards arrive immediately.
-  const response=await fetcher('https://api.findzia.com/internal/spaces/image/stream',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json','Accept-Encoding':'identity','X-Findzia-Spaces-Time':stamp,'X-Findzia-Spaces-Nonce':nonce,'X-Findzia-Spaces-Signature':signature},body,signal:AbortSignal.timeout(125000)});
-  if(!response.ok)throw Error(response.status===429?'PROVIDER_BUSY':'SEARCH_FAILED');
+  const response=await fetcher('https://api.findzia.com/internal/spaces/image/stream',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json','Accept-Encoding':'identity',...(billing?{Authorization:billing.authorization,Origin:billing.origin,'X-Findzia-Request-Id':billing.requestId}:{}),'X-Findzia-Spaces-Time':stamp,'X-Findzia-Spaces-Nonce':nonce,'X-Findzia-Spaces-Signature':signature},body,signal:AbortSignal.timeout(125000)});
+  if(!response.ok){let code;try{code=(await response.json()).error;}catch{}const allowed=['credits_exhausted','credits_unavailable','sign_in_required','session_expired','guest_session_expired','search_in_progress','search_already_processed','trial_daily_limit','trial_budget_reached'];throw Error(allowed.includes(code)?code:response.status===429?'PROVIDER_BUSY':'SEARCH_FAILED');}
   if(!response.headers.get('content-type')?.includes('ndjson'))throw Error('SEARCH_FAILED');
   const decoder=new TextDecoder();let buffer='',size=0;
   try{
