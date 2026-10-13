@@ -17,6 +17,7 @@ test('one original photo launch; closing/reopening preserves its live page and s
   root.fzStoreScene={destroy(){sceneStops++;delete root.fzStoreScene;}};root.fzSearchWait={destroy(){waitStops++;delete root.fzSearchWait;}};root.dataset.waitActive='true';root.dataset.searchLaunching='false';
   root.fzBilling={};root.fzAccount={};root.fzRefineBridge={
    context:()=>({country:market,kind:'image',busy}),
+   prepare:async()=>frame.dataset.expired==='true'?[]:[{}],
    searchPhoto:async file=>{calls.push(file);busy=true;await new Promise(resolve=>release=resolve);busy=false;return true;},
    snapshot:()=>({view:{items:[{url:'https://merchant.test/p',price:'95 KWD',result_group:'local'}],lastSearch:{country:market,kind:'image',image_base64:'private bytes'}}}),
    restore:()=>{restores++;},revealSearchResults(){}
@@ -36,7 +37,8 @@ test('one original photo launch; closing/reopening preserves its live page and s
   layer.close();await layer.open(input);assert.equal(calls.length,1);
   await layer.open({...input,key:'room:0:2',item:'2',view:saved.at(-1).view});original([...document.querySelectorAll('iframe')][1]);
   await new Promise(resolve=>setTimeout(resolve,5));assert.equal(restores,1);assert.equal(calls.length,1,'restoring never calls searchPhoto');assert.equal(crops,2,'restoring reads only the saved photo, not a new search');
-  await layer.open({...input,key:'room:0:3',item:'3',view:{items:[],lastSearch:{kind:'image',country:'KW'},message:'Saved search'}});original([...document.querySelectorAll('iframe')][2]);
+  await layer.open({...input,key:'room:0:expired',item:'expired',view:saved.at(-1).view});const expired=[...document.querySelectorAll('iframe')].at(-1);expired.dataset.expired='true';original(expired);await new Promise(resolve=>setTimeout(resolve,5));assert.equal(calls.length,1,'expired saved media must never start a paid search automatically');assert.match(document.querySelector('.original-results-status').textContent,/No new search/);
+  await layer.open({...input,key:'room:0:3',item:'3',view:{items:[],lastSearch:{kind:'image',country:'KW'},message:'Saved search'}});original([...document.querySelectorAll('iframe')].at(-1));
   await new Promise(resolve=>setTimeout(resolve,5));assert.equal(calls.length,2,'an empty legacy view starts the requested search on first open');release();await new Promise(resolve=>setTimeout(resolve,5));
  }finally{layer.destroy();globalThis.document=beforeDocument;globalThis.fetch=beforeFetch;}
 });

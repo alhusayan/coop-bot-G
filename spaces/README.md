@@ -89,3 +89,10 @@ per market. A late geo response cannot override an explicit country choice.
 Validation: 13 targeted tests cover original-page script preservation, one paid
 launch, free restored views, scene teardown, Similar screening, design picks,
 market isolation, geo fallback/order and per-market language preferences.
+
+Live validation also found expired original-engine media authorizations in old
+saved views (`evaluation_expired`, verified image 404s). These are not silently
+renewed or converted into a paid search. The layer now reports unavailable saved
+photos clearly and retains the explicit one-credit new-search action. Original
+media verification and authorization remain enforced. The frame theme follows
+Spaces so a saved dark preference cannot create a mismatched results panel.

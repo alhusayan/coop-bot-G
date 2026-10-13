@@ -25,6 +25,8 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   const root=session.root;if(!root)return;
   root.fzStoreScene?.destroy();root.fzSearchWait?.destroy();
   delete root.dataset.waitActive;delete root.dataset.waitExiting;
+  const theme=document.querySelector('#findzia-home-spaces')?.dataset.theme||'light';
+  if(root.dataset.theme!==theme)session.frame.contentWindow.FindziaAppearance?.apply(root,theme);
  }
  function syncLanguage(session){
   const select=session.root?.querySelector('[data-profile-language-select]');if(!select)return;
@@ -154,7 +156,10 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    root.fzRefineBridge.revealSearchResults?.();
    // Restore the original media state using its own validator; no new search
    // or credit is involved. Never fabricate a Saved search from legacy rows.
-   if(root.fzRefineBridge.prepare)await root.fzRefineBridge.prepare(view.items,new AbortController().signal);
+   if(root.fzRefineBridge.prepare){
+    const prepared=await root.fzRefineBridge.prepare(view.items,new AbortController().signal);
+    if(Array.isArray(prepared)&&!prepared.length)session.error=text('Saved photos are unavailable. No new search was started.','صور البحث المحفوظ غير متاحة. ما بدأنا بحث جديد.');
+   }
    session.loading=false;session.completed=true;syncPicks(session);watch(session);
   }else await run(session);
  }

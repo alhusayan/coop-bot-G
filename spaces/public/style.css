@@ -163,3 +163,5 @@
 }
 @media(max-width:360px){main{padding-inline:16px}.original-results-thumb{width:42px;height:42px}.original-results-title{font-size:14px}.country-choice{font-size:13px!important;padding:12px 10px!important;gap:7px}.country-flag{font-size:20px}.stage-hint small{max-width:180px}.design-pick-copy{padding:10px}.design-pick-copy>strong{font-size:18px}}
 @media(prefers-reduced-motion:reduce){.touch-ripple:after,.results-skeletons i,.original-results-tools:after{animation:none!important}.original-results-waiting>.search-spinner{border-style:dotted}}
+
+.original-results-layer .original-results-status{font-size:13px}.original-results-layer .original-results-retry{font-size:12px}
