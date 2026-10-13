@@ -15,6 +15,7 @@ from collections import Counter
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from findzia_billing import CreditMiddleware
 
 PATH = '/internal/spaces/image/stream'
 
@@ -78,14 +79,26 @@ class SpacesImageGateway:
         self.active += 1
         started = time.monotonic()
         try:
-            # Request.json uses the same exact bytes whose signature was checked.
-            request._body = raw
-            # Includes the original input preparation, market validation, Lens
-            # pipeline, visual classification, prices, removals and final events.
-            response = await self.original.web_api_image_search_stream(request)
-            response.headers['x-findzia-search-engine'] = 'original'
-            response.headers['Cache-Control'] = 'no-store'
-            await response(scope, receive, send)
+            # A service signature authenticates Spaces, NOT a customer's wallet.
+            # Require the existing account/guest bearer, origin and request ID.
+            # Reuse the original atomic one-credit reservation and durable refund
+            # settlement; no separate Spaces balance or client-authored debit.
+            owner = getattr(self.original, 'app', None)
+            credits = getattr(getattr(owner, 'state', None), 'findzia_credits', None)
+            if not credits or not credits.enabled or not credits.available:
+                return await fail('credits_unavailable', 503)
+            async def original_search(billed_scope, billed_receive, billed_send):
+                billed_request = Request(billed_scope, billed_receive)
+                billed_request._body = raw
+                response = await self.original.web_api_image_search_stream(billed_request)
+                response.headers['x-findzia-search-engine'] = 'original'
+                response.headers['Cache-Control'] = 'no-store'
+                await response(billed_scope, billed_receive, billed_send)
+            # The protected public path selects its existing billing policy.
+            # Retrieval still calls the exact same function with the signed bytes.
+            billed_scope = dict(scope, path='/api/search/image/stream',
+                                raw_path=b'/api/search/image/stream')
+            await CreditMiddleware(original_search, owner)(billed_scope, receive, send)
         finally:
             self.active -= 1
             print('SPACES_ORIGINAL_ENGINE ' + json.dumps({
