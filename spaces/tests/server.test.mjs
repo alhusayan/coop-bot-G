@@ -24,6 +24,8 @@ test('private trial requires its invite, serves app assets, and does not reveal 
   assert.equal((await fetch(base+'/lens-media/000000000000000000000000/original.jpg')).status,404);
   const root=await fetch(base+'/');const html=await root.text();assert.match(html,/Findzia Spaces/);assert.match(html,/<html lang="en" dir="ltr">/);assert.equal(root.headers.get('x-robots-tag'),'noindex, nofollow, noarchive');
   assert.match(html,/data-action="upload" disabled/);assert.match(html,/id="retry-access"/);
+  const queue=['/app.js'],visited=new Set();while(queue.length){const path=queue.shift();if(visited.has(path))continue;visited.add(path);const asset=await fetch(base+path);assert.equal(asset.status,200,path+' must be served');assert.match(asset.headers.get('content-type'),/javascript/);const code=await asset.text();for(const match of code.matchAll(/^import .*?from ['"]([^'"]+)['"]/gm)){const url=new URL(match[1],base+path);if(url.origin===base)queue.push(url.pathname);}}assert.ok(visited.has('/markets.js'));
   assert.equal((await fetch(base+'/style.css')).status,200);assert.equal((await fetch(base+'/app.js')).status,200);assert.equal((await fetch(base+'/request.js')).status,200);
  }finally{await new Promise(r=>s.close(r));rmSync(process.env.SPACES_DATA_DIR,{recursive:true,force:true});}
 });
+
