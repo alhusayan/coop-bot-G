@@ -22,7 +22,7 @@ export async function originalPage(fetcher=fetch){
 // A saved UI view is private to its room owner and never becomes a trusted
 // inventory/price record or a paid request. No credentials or photo bytes persist.
 export function savedOriginalView(value,market){
- if(!value||!Array.isArray(value.items)||value.items.length>300)throw Error('INVALID_INPUT');
+ if(!value||!Array.isArray(value.items)||!value.items.length||value.items.length>300)throw Error('INVALID_INPUT');
  if(value.lastSearch?.country!==market)throw Error('INVALID_INPUT');
  const view={query:String(value.query||'').slice(0,500),input:String(value.input||'').slice(0,500),
   items:value.items,sort:['relevance','price','price-desc','newest'].includes(value.sort)?value.sort:'relevance',

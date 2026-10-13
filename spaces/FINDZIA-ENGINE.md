@@ -153,3 +153,25 @@ header spacer. Original result groups, cards, Save/Info controls, status/error
 messages and payment dialogs are retained. All original inline scripts remain
 byte-for-byte unchanged. Spaces has only a compact title, close action, explicit
 new-search action and an animated search status above the frame.
+
+## 0.6.2 design bookmarks and complete saved views
+
+Original result-card bookmarks now save to the current room/design/piece.
+The frame capture handler redirects only the bookmark destination; retrieval,
+ranking, cards and product details remain the original implementation. Owned
+rooms persist picks in their existing private state; demo picks stay in the
+current browser. Selected store cards appear below the room photo. These UI
+snapshots never become trusted inventory or inputs to generation/billing.
+
+Only nonempty original views qualify as saved results. Legacy completion flags,
+old adapted offers and demo status no longer create a fabricated blank Saved
+search. A first search is labelled as one credit and launches on the first
+explicit click. Views are persisted only after completion with visible cards.
+Reopening restores through the original media validator without a new search.
+Demo views persist privately in the browser for up to 24 hours.
+
+The active Spaces market now controls photo searches immediately, independently
+of the room creation market. Frame sessions and saved original views are keyed
+by room/design/piece/market. Switching markets never starts a paid search by
+itself and cannot restore another country’s results. Design picks remain the
+customer’s explicit selections with their displayed store flag and currency.

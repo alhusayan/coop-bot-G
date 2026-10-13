@@ -16,6 +16,7 @@ import {groupIdenticalPieces,occurrences} from './identity.mjs';
 import {detectRoom,roomBrief,verifyRoomFunction} from './room-function.mjs';
 import {identifyPieces,inventoryRepairTarget} from './inventory.mjs';
 import {originalPage,savedOriginalView} from './original-page.mjs';
+import {updateDesignPicks} from './public/design-picks.js';
 
 const ROOT=fileURLToPath(new URL('.',import.meta.url));
 const DATA=resolve(process.env.SPACES_DATA_DIR||resolve(ROOT,'data'));
@@ -167,7 +168,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.6.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.6.2',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -212,7 +213,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    const market=j.options.market,result=await searchLocalCatalog(item.query||item.name_en,market,{language:MARKETS[market].lang});
    return send(res,200,{market,...result});
  }
- const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|focus|replace|results)(?:\/(\d+))?)?$/);
+ const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|focus|replace|results|picks)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
    if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
@@ -220,8 +221,14 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting')throw error('JOB_BUSY',409);
      if(action==='results'){
        const item=d.items.find(x=>x.id===String(itemIndex));if(!item)throw error('INVALID_INPUT');
-       try{item.original_view=savedOriginalView(b.view,j.options.market);}catch{throw error('INVALID_INPUT');}
+       const market=String(b.view?.lastSearch?.country||'');if(!MARKETS[market])throw error('INVALID_INPUT');
+       try{const view=savedOriginalView(b.view,market);item.original_views={...item.original_views,[market]:view};item.original_view=view;}catch{throw error('INVALID_INPUT');}
        item.original_saved_at=Date.now();persist();return send(res,200,{ok:true});
+     }
+     if(action==='picks'){
+       const item=d.items.find(x=>x.id===String(itemIndex));if(!item)throw error('INVALID_INPUT');
+       try{item.design_picks=updateDesignPicks(item.design_picks,b.product,b.remove===true);}catch(e){throw error(e.message);}
+       persist();return send(res,200,{picks:item.design_picks});
      }
      if(action==='select'){
        j.selected_design=i;
@@ -269,7 +276,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  if(/^\/policies\/(privacy-policy|terms-of-service|refund-policy)$/.test(path)){res.writeHead(302,{...headers,Location:'https://findzia.com'+path});return res.end();}
  const assets={'/':'index.html','/app.js':'app.js','/request.js':'request.js','/room-state.js':'room-state.js','/live-view.js':'live-view.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
  for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js'])assets['/findzia/'+name]='findzia/'+name;
- for(const name of ['findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js','original-results-frame.css'])assets['/'+name]=name;
+ for(const name of ['findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js','original-results-frame.css','design-picks.js'])assets['/'+name]=name;
  if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
  throw error('NOT_FOUND',404);
  }catch(e){if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'UNEXPECTED_ERROR'});else res.end();if(!e.status)console.error('SPACES_HTTP_ERROR',e.message);}
