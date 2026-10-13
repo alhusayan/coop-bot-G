@@ -1,6 +1,7 @@
 // The frame runs findzia.com's current page, including the original photo
 // entry point, wallet, media checks, cards, groups and sorting. No offer adapter.
 import {productKey,hasSavedResults} from './design-picks.js';
+import {reviewSimilarCards} from './similar-review.js';
 export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClose,onPick}){
  const sessions=new Map();let current=null,returnFocus=null;
  const layer=document.createElement('dialog');layer.className='original-results-layer';layer.setAttribute('aria-label','Findzia results');
@@ -43,6 +44,15 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   syncPicks(session);paint(session);
  }
  function syncPicks(session){
+  if(!session.root)return;
+  const review=reviewSimilarCards(session.root,session.root.fzRefineBridge.snapshot()?.view?.items||[]);
+  if(session.reviewNote){
+   const visible=session.root.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
+   const show=review.held>0&&!visible&&!session.busy&&!session.loading;
+   session.reviewNote.hidden=!show;
+   const message=text('No close similar matches were confirmed for this piece.','ما تأكدنا من وجود منتجات مشابهة وقريبة لهالقطعة.');
+   if(session.reviewNote.textContent!==message)session.reviewNote.textContent=message;
+  }
   const chosen=new Set((session.picks||[]).map(x=>productKey(x.url)));
   for(const button of session.root?.querySelectorAll('[data-save-product]')||[]){
    const active=chosen.has(productKey(button.dataset.saveProduct)),label=active?text('Remove from this design','إزالة من هالتصميم'):text('Save to this design','احفظ لهالتصميم');
@@ -67,6 +77,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   },true);
   session.notice=root.querySelector('[data-save-notice]');
   if(!session.notice){session.notice=root.ownerDocument.createElement('div');session.notice.setAttribute('role','status');root.append(session.notice);}
+  session.reviewNote=root.ownerDocument.createElement('p');session.reviewNote.className='spaces-similar-note';session.reviewNote.hidden=true;session.reviewNote.setAttribute('role','status');root.querySelector('.fz-container')?.append(session.reviewNote);
   const Observer=session.frame.contentWindow.MutationObserver;
   if(Observer){session.pickObserver=new Observer(()=>syncPicks(session));session.pickObserver.observe(root.querySelector('[data-results-body]')||root,{childList:true,subtree:true});}
   syncPicks(session);

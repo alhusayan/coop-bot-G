@@ -33,3 +33,12 @@ html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-results-
   margin-top: 0 !important;
   min-height: 0 !important;
 }
+/* Similar cards are withheld from their first paint until the original image
+   comparison confirms them. Local/global sections keep their native behavior. */
+html[data-findzia-spaces-results] #MainContent :is([data-stable-group="alternative"],[data-cinema-group="alternative"]) .fz-card-shell:not([data-spaces-visual="approved"]),
+html[data-findzia-spaces-results] #MainContent :is([data-stable-group="alternative"],[data-cinema-group="alternative"]) .fz-result-gap,
+html[data-findzia-spaces-results] #MainContent [data-spaces-empty="true"] {
+  display: none !important;
+}
+html[data-findzia-spaces-results] .spaces-similar-note{padding:36px 18px;text-align:center;color:#69716b;font:inherit;line-height:1.6}
+html[data-findzia-spaces-results] .spaces-similar-note[hidden]{display:none}

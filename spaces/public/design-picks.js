@@ -10,7 +10,7 @@ export function designPick(value){
  const url=productKey(value?.url);if(!url||url.length>4000)throw Error('INVALID_INPUT');
  const clean=(text,max)=>String(text||'').slice(0,max);
  return {url,title:clean(value.title,300),store:clean(value.store,120),image:productKey(value.image).slice(0,4000),
-  price:clean(value.price,100),flag:clean(value.flag,16),saved_at:Date.now()};
+  price:clean(value.price,100).replace(/\s+/g,' ').replace(/\s+([.,]\d)/g,'$1').trim(),flag:clean(value.flag,16),saved_at:Date.now()};
 }
 export function updateDesignPicks(current,value,remove=false){
  const pick=designPick(value),list=Array.isArray(current)?current:[],next=list.filter(x=>productKey(x.url)!==pick.url);

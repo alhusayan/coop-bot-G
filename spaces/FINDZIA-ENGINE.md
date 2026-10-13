@@ -175,3 +175,21 @@ of the room creation market. Frame sessions and saved original views are keyed
 by room/design/piece/market. Switching markets never starts a paid search by
 itself and cannot restore another country’s results. Design picks remain the
 customer’s explicit selections with their displayed store flag and currency.
+
+## 0.6.3 verified Similar cards
+
+At the customer's request, Similar cards now wait for the original engine's
+completed visual review before they can appear in the Spaces frame. A card
+requires the engine's alternative visual proof, an audited image, matching
+category and positive shape evidence, with no known conflicting shape,
+function, material, texture, pattern or color axis. Preview-only, unreviewed,
+rejected and unrelated products remain hidden from first paint.
+
+This is a display gate over the existing original search response: no added
+search, model request or wallet charge. Local and global groups retain their
+original handling. Similar counts reflect displayed cards. If no close
+Similar survives and no other card is present, a clear no-confirmed-match
+message replaces a blank area. Saved results pass through the same gate.
+
+Original bookmarks still target the room's design picks. Price text is
+normalized to keep fractional digits joined to the displayed amount.
