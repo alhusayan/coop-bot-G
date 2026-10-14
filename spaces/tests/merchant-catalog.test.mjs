@@ -23,3 +23,8 @@ test('catalogue traversal ignores unrelated furniture, external links, account a
  const html='<a href="/products/oak">Oak dining table</a><a href="/products/oak">Same dining table</a><a href="/cart/add">Add dining table</a><a href="//evil.example/x">Oak dining table</a><a href="javascript:alert(1)">Oak dining table</a><a href="/chair">Dining chair</a>';
  assert.deepEqual(catalogueLinks(html,root+'/bundle',catalogueRole('dining table')),[{name:'Oak dining table',link:root+'/products/oak'}]);
 });
+test('an empty first pair of catalogues does not prevent reading a third known merchant',async()=>{
+ const seeds=['one','two','three'].map(name=>({title:'Oak Dining Table',link:`https://${name}.co.uk/products/seed`,search_market:'GB',market_scope:'local'}));
+ const page=async url=>{const u=new URL(url);if(u.pathname.endsWith('seed'))return {url,html:'<a href="/products/table">Standalone Oak 180cm Dining Table</a>'};return {url,html:u.hostname==='three.co.uk'?product('Standalone Oak 180cm Dining Table'):'<h1>Unavailable</h1>'};};
+ const result=await merchantCatalogue({id:'9',name_en:'dining table'},seeds,'GB',{page});assert.equal(result.length,1);assert.equal(new URL(result[0].link).hostname,'three.co.uk');
+});

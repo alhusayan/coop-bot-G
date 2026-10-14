@@ -31,7 +31,7 @@ export function catalogueLinks(html,url,role){
 }
 export async function merchantCatalogue(item,offers,market,{page=safePage}={}){
  const role=catalogueRole(item.name_en);if(!role)return [];
- const hosts=new Set(),seeds=offers.filter(o=>o.market_scope==='local'&&o.search_market===market&&role.test(o.title||'')&&sourceDetails(o.link,market)?.market_scope==='local'&&!hosts.has(new URL(o.link).origin)&&hosts.add(new URL(o.link).origin)).slice(0,2);
+ const hosts=new Set(),seeds=offers.filter(o=>o.market_scope==='local'&&o.search_market===market&&role.test(o.title||'')&&sourceDetails(o.link,market)?.market_scope==='local'&&!hosts.has(new URL(o.link).origin)&&hosts.add(new URL(o.link).origin)).slice(0,4);
  for(const seed of seeds){try{
   const original=await page(seed.link,{timeout:5000});if(new URL(original.url).origin!==new URL(seed.link).origin)continue;
   let links=catalogueLinks(original.html,original.url,role).slice(0,4);if(!links.length)continue;
