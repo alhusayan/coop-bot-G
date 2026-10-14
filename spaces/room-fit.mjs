@@ -103,19 +103,21 @@ export function validateLayout(raw,products,room){
 // Doors, fixed obstacles, entry, product dimensions and confidence never change.
 export function fitFurnitureLayout(raw,products,room,{maxChecks=12000}={}){
  try{return validateLayout(raw,products,room);}catch(e){if(e.message!=='FURNITURE_DOES_NOT_FIT')throw e;}
- // Layered arrangements need the designer to keep lamps on their hosts and
- // dining groups coherent. Do not scatter a whole-room set with a grid search.
- if(products.length>4||products.some(p=>p.layer&&p.layer!=='floor'))throw Error('FURNITURE_DOES_NOT_FIT');
+ // Whole-room arrangements permit only small nudges around the designer's
+ // original positions, preserving zones and orientations. Layered furniture
+ // goes back to the designer so lamps stay attached to their supporting tables.
+ const local=products.length>4;
+ if(products.some(p=>p.layer&&p.layer!=='floor'))throw Error('FURNITURE_DOES_NOT_FIT');
  const obstacles=raw.obstacles.map(o=>({x:Number(o.x),z:Number(o.z),w:Number(o.width),d:Number(o.depth)}));
  if(obstacles.some(o=>![o.x,o.z,o.w,o.d].every(Number.isFinite)||o.x<0||o.z<0||o.w<=0||o.d<=0||o.x+o.w>room.width+1||o.z+o.d>room.length+1))throw Error('ROOM_LAYOUT_UNCERTAIN');
  const candidates=products.map(product=>{
   const previous=raw.placements.find(p=>p.id===product.id),rows=[];
   if(!previous||![previous.x,previous.z].every(Number.isFinite)||![0,90,180,270].includes(previous.rotation))throw Error('ROOM_LAYOUT_UNCERTAIN');
-  for(const rotation of [previous.rotation,(previous.rotation+90)%360]){
+  for(const rotation of local?[previous.rotation]:[previous.rotation,(previous.rotation+90)%360]){
    const rotated=rotation%180!==0,w=rotated?product.dimensions.depth:product.dimensions.width,d=rotated?product.dimensions.width:product.dimensions.depth;
    const xs=[previous.x],zs=[previous.z];
-   for(let x=10;x<=room.width-w-10;x+=20)xs.push(x);
-   for(let z=10;z<=room.length-d-10;z+=20)zs.push(z);
+   if(local){for(let shift=-40;shift<=40;shift+=10){xs.push(previous.x+shift);zs.push(previous.z+shift);}}
+   else{for(let x=10;x<=room.width-w-10;x+=20)xs.push(x);for(let z=10;z<=room.length-d-10;z+=20)zs.push(z);}
    for(const x of new Set(xs))for(const z of new Set(zs)){
     const p={id:product.id,x,z,w,d,rotation};
     if(x<10||z<10||x+w>room.width-10||z+d>room.length-10||obstacles.some(o=>overlap(o,p,10)))continue;
@@ -137,4 +139,18 @@ export function fitFurnitureLayout(raw,products,room,{maxChecks=12000}={}){
  };
  visit(0);if(!found)throw Error('FURNITURE_DOES_NOT_FIT');
  return {...found,positions_adjusted:true};
+}
+
+// Give the next designer attempt exact arithmetic, not a generic fit error.
+export function layoutFeedback(raw,products,room){
+ const boxes=(raw?.placements||[]).flatMap(p=>{const product=products.find(x=>x.id===p.id);if(!product)return [];const rotated=p.rotation%180!==0;return [{...p,layer:product.layer||'floor',w:rotated?product.dimensions.depth:product.dimensions.width,d:rotated?product.dimensions.width:product.dimensions.depth}];});
+ const issues=[];
+ for(let i=0;i<boxes.length;i++){
+  const a=boxes[i];
+  if(a.x<10||a.z<10||a.x+a.w>room.width-10||a.z+a.d>room.length-10)issues.push({type:'boundary',id:a.id,box:a,allowed:{x:[10,room.width-a.w-10],z:[10,room.length-a.d-10]}});
+  if(a.layer!=='floor')continue;
+  for(const b of boxes.slice(0,i).filter(p=>p.layer==='floor'))if(overlap(a,b,20))issues.push({type:'furniture_clearance',a:a.id,b:b.id,gap_cm:20,boxes:[a,b],rule:'Separate along x OR z: a.x+a.w+20<=b.x OR b.x+b.w+20<=a.x OR a.z+a.d+20<=b.z OR b.z+b.d+20<=a.z.'});
+  for(const obstacle of raw?.obstacles||[]){const b={...obstacle,w:obstacle.width,d:obstacle.depth};if(overlap(a,b,10))issues.push({type:'obstacle_clearance',id:a.id,box:a,obstacle:b,gap_cm:10});}
+ }
+ return {previous:raw,footprints:boxes,issues:issues.length?issues:[{type:'geometry_or_walkway',rule:'Check confidence, all IDs, lamp hosts, entry and a continuous 60cm route.'}]};
 }

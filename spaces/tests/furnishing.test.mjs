@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import {centimetres,productDimensions,roomMeasurements,validateLayout,fitFurnitureLayout,furnitureSlots,candidateMatchesKind,furnitureInstances} from '../room-fit.mjs';
+import {centimetres,productDimensions,roomMeasurements,validateLayout,fitFurnitureLayout,layoutFeedback,furnitureSlots,candidateMatchesKind,furnitureInstances} from '../room-fit.mjs';
 import {furnishingQuote,furnishRoom,furnishingRepairTarget,chooseRoomSet,previewProblems,furnishingPlan} from '../furnishing.mjs';
 import {furnishingLanguages,furnishingText} from '../public/furnishing-copy.js';
 import {readFurnishingMeasurements,furnishingArea,furnishingFailureKey} from '../public/furnishing.js';
@@ -206,4 +206,13 @@ test('a verified standalone merchant alternative completes the core set without 
  x.input.onCatalogue=(item,rows)=>persisted.push([item.id,rows]);
  x.deps.catalogue=async item=>item.id==='3'?[{...item.furnishing_offers.KW[0],link:'https://shop.example/standalone-table',merchant_facts:[f('width','180 cm'),f('depth','90 cm')]}]:[];
  const result=await furnishRoom(x.input,x.deps);assert.equal(result.products.length,7);assert.equal(x.requests.length,0);assert.equal(persisted.length,1);assert.equal(result.products.find(p=>p.id==='3').offer.link,'https://shop.example/standalone-table');
+});
+test('whole-room chair clearance is corrected locally without scattering the dining group',()=>{
+ const room={width:600,length:800},products=[{id:'table',kind:'table',dimensions:{width:180,depth:90}},...Array.from({length:4},(_,i)=>({id:'chair'+i,kind:'chair',dimensions:{width:55,depth:60}})),{id:'sofa',kind:'sofa',dimensions:{width:240,depth:95}}];
+ const raw={geometry_confidence:'high',entry:{x:50,z:790},obstacles:[],placements:[{id:'table',x:180,z:200,rotation:0},{id:'chair0',x:190,z:135,rotation:180},{id:'chair1',x:285,z:135,rotation:180},{id:'chair2',x:190,z:295,rotation:0},{id:'chair3',x:285,z:295,rotation:0},{id:'sofa',x:180,z:500,rotation:0}]};
+ assert.throws(()=>validateLayout(raw,products,room),/DOES_NOT_FIT/);
+ const feedback=layoutFeedback(raw,products,room);assert.equal(feedback.issues.filter(x=>x.type==='furniture_clearance').length,4);
+ const fixed=fitFurnitureLayout(raw,products,room);assert.equal(fixed.positions_adjusted,true);assert.equal(fixed.placements.length,6);
+ for(const p of fixed.placements){const old=raw.placements.find(x=>x.id===p.id);assert.equal(p.rotation,old.rotation);assert.ok(Math.abs(p.x-old.x)<=40&&Math.abs(p.z-old.z)<=40);}
+ assert.deepEqual(fixed.entry,raw.entry);assert.equal(validateLayout({...raw,placements:fixed.placements},products,room).estimated,true);
 });
