@@ -18,7 +18,7 @@ import {identifyPieces,inventoryRepairTarget} from './inventory.mjs';
 import {originalPage,savedOriginalView} from './original-page.mjs';
 import {updateDesignPicks} from './public/design-picks.js';
 import {createDetailsService} from './product-details.mjs';
-import {furnishingQuote,furnishingBusy,furnishRoom} from './furnishing.mjs';
+import {furnishingQuote,furnishingBusy,furnishRoom,furnishingRepairTarget} from './furnishing.mjs';
 import {roomMeasurements} from './room-fit.mjs';
 import {metricDepth,suggestMeasurementPoints,calibratedMeasurement} from './room-measure.mjs';
 
@@ -404,6 +404,15 @@ async function selfTest(){
  }
  persist();
  await configureModels();
+ // Explicit support recovery, scoped to the reported failed run. Its saved
+ // candidates are reused; no billing token or new search is available here.
+ const furnishingRepair=furnishingRepairTarget(state.jobs,process.env.SPACES_FURNISH_REPAIR_TARGET,process.env.SPACES_FURNISH_REPAIR_VERSION);
+ if(furnishingRepair){
+  const {job,index,design,version}=furnishingRepair,previous=design.furnishing;
+  design.furnishing={...previous,status:'depth',error:null,started:Date.now(),searches_used:0,repair_version:version};persist();
+  console.log('SPACES_FURNISH_REPAIR',job.id,index,JSON.stringify({version,searches:0}));
+  launch('furnish:'+job.id+':'+index,()=>startFurnishing(job,index,{max_searches:0,language:job.options.language},null));
+ }
  // Explicit, one-time repair of an already failed saved design. Do not enable
  // background demo scans or regenerate the customer's image to fix inventory.
  const repair=inventoryRepairTarget(state.jobs,process.env.SPACES_REPAIR_ROOM,process.env.SPACES_REPAIR_DESIGN);

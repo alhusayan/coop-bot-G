@@ -2,11 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import {centimetres,productDimensions,roomMeasurements,validateLayout,furnitureSlots,candidateMatchesKind} from '../room-fit.mjs';
-import {furnishingQuote,furnishRoom} from '../furnishing.mjs';
+import {furnishingQuote,furnishRoom,furnishingRepairTarget} from '../furnishing.mjs';
 import {furnishingLanguages,furnishingText} from '../public/furnishing-copy.js';
 import {readFurnishingMeasurements,furnishingArea} from '../public/furnishing.js';
 import {parseHTML} from 'linkedom';
 const f=(kind,value,label=kind)=>({kind,value,label,quote:label+': '+value,source:'merchant_page'});
+test('support recovery only targets the selected failed run once, with saved local offers',()=>{
+ const id='a'.repeat(24),run={status:'error',error:'FURNISH_PRODUCTS_INCOMPLETE',room:{width:500,length:700},market:'SA'},design={image:'design-2.jpg',furnishing:run,items:[{id:'4',name_en:'Sofa',furnishing_offers:{SA:[{title:'Sofa',link:'https://shop.example/sofa',market_scope:'local'}]}}]},jobs={[id]:{id,owner:'test',designs:[{}, {},design]}};
+ assert.equal(furnishingRepairTarget(jobs,id+':2',1)?.index,2);
+ assert.equal(furnishingRepairTarget(jobs,id+':0',1),null);assert.equal(furnishingRepairTarget(jobs,'b'.repeat(24)+':2',1),null);
+ run.repair_version=1;assert.equal(furnishingRepairTarget(jobs,id+':2',1),null);
+ run.status='ready';assert.equal(furnishingRepairTarget(jobs,id+':2',2),null);
+ run.status='error';run.market='KW';assert.equal(furnishingRepairTarget(jobs,id+':2',2),null);
+});
 test('the customer’s 6 × 8 form sends length 8 rather than the controls collection length',()=>{
  const {document}=parseHTML('<form><input name="width" value="6"><input name="length" value="8"><button>Continue</button></form>'),form=document.querySelector('form');
  Object.defineProperty(form,'elements',{value:{length:3}});
