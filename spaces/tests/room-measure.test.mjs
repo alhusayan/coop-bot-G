@@ -29,27 +29,25 @@ test('measurement refuses invalid, short, missing and non-rectangular selections
 test('no hidden room corners are fabricated when vision cannot see the boundaries',async()=>{
  const result=await suggestMeasurementPoints(Buffer.from('image'),{generate:async()=>({points:[]})});assert.deepEqual(result,[]);
 });
-test('measurement instructions are present in all supported languages',()=>{
- for(const lang of furnishingLanguages)for(const key of ['title','intro','reference','loading','calculate','use','reset','note','problem','unavailable','area','ready'])assert.notEqual(measurementText(lang,key),key);
+test('reference measurement copy exists in all supported languages',()=>{
+ for(const lang of furnishingLanguages)for(const key of 'title intro photo original reference areaStep custom width length next reset referenceGuide areaGuide calculate calculating note area use photoError pointsError sizeError smallError shapeError unstableError rough'.split(' '))assert.notEqual(measurementText(lang,key),key,lang+':'+key);
 });
 
-test('measurement UI sends one reference, applies server dimensions, and ignores a stale calculation after editing',async()=>{
+test('reference UI uses eight selected corners and two reference dimensions without starting depth analysis',async()=>{
  const {parseHTML}=await import('linkedom');const {createRoomMeasure}=await import('../public/room-measure.js');
  const {document,Event}=parseHTML('<main id="sheet"></main>');globalThis.document=document;
- const job={id:'a'.repeat(24),original:'/room.jpg'},applied=[],requests=[];
- let release;
+ const job={id:'a'.repeat(24),original:'/room.jpg'},requests=[],applied=[];
  const measure=createRoomMeasure({context:()=>({job}),language:()=> 'ar',escape:String,safe:String,onUse:r=>applied.push(r),showSheet:html=>{document.querySelector('#sheet').innerHTML=html;},api:async(_url,options)=>{
-  const b=JSON.parse(options.body);requests.push(b);
-  if(b.action==='analyze')return {id:'measurement-1',status:'ready',points};
-  return new Promise(resolve=>{release=()=>resolve({id:'measurement-1',status:'ready',result:{width:400,length:500,area_m2:20,source:'ai_calibrated'}});});
+  if(!options)return {method:'reference_scale',status:'idle',image:'/room.jpg',image_id:'original'};
+  const b=JSON.parse(options.body);requests.push(b);return {id:'reference-1',result:{width:400,length:500,area_m2:20,source:'reference_scale'}};
  }});
  try{
-  await measure();const input=document.querySelector('input'),calculate=document.querySelector('[data-calculate]');
-  input.value='4';input.dispatchEvent(new Event('input'));assert.equal(calculate.disabled,false);calculate.click();
-  assert.deepEqual(requests.at(-1),{action:'calculate',points,reference:4});
-  input.value='6';input.dispatchEvent(new Event('input'));release();await new Promise(r=>setImmediate(r));
-  assert.equal(document.querySelector('.measure-result').hidden,true);assert.equal(calculate.disabled,false);
-  calculate.click();release();await new Promise(r=>setImmediate(r));document.querySelector('[data-use]').click();
-  assert.equal(applied[0].measurement_id,'measurement-1');assert.equal(applied[0].length,500);
+  await measure();const photo=document.querySelector('.measure-photo'),calc=document.querySelector('[data-calculate]');photo.getBoundingClientRect=()=>({left:0,top:0,width:1000,height:1000});
+  const click=(x,y)=>{const e=new Event('click');Object.assign(e,{button:0,clientX:x,clientY:y});photo.dispatchEvent(e);};
+  [[100,100],[300,100],[300,400],[100,400]].forEach(p=>click(...p));assert.equal(calc.disabled,false);calc.click();
+  [[50,50],[900,50],[900,900],[50,900]].forEach(p=>click(...p));calc.click();await new Promise(r=>setImmediate(r));
+  assert.equal(requests.length,1);assert.equal(requests[0].action,'reference');assert.equal(requests[0].reference_points.length,4);assert.equal(requests[0].points.length,4);assert.equal(requests[0].reference_width,.21);assert.equal(requests[0].reference_length,.297);
+  assert.equal(document.querySelector('.measure-result').hidden,false);document.querySelector('[data-use]').click();assert.equal(applied[0].measurement_id,'reference-1');assert.equal(applied[0].source,'reference_scale');
+  document.querySelector('[data-reset]').click();assert.equal(document.querySelector('.measure-result').hidden,true);assert.equal(calc.disabled,true);
  }finally{delete globalThis.document;}
 });

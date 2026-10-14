@@ -4,6 +4,23 @@ English, touch-first private-invite experimental room redesign and shopping app.
 
 ## Deployment
 
+### 0.7.5 — reference scale measurements
+
+The measurement action now uses a known rectangular reference in the same floor
+plane. It does not run a depth model. Four ordered reference corners and the two
+real side lengths define a planar homography; four floor corners are transformed
+to metres to estimate the selected rectangular area. A4 (21 × 29.7 cm) and custom
+rectangles are supported. The visitor can upload a separate reference photograph
+without replacing the original room photo, and zoom to place corners precisely.
+That measurement photograph stays attached to the optional furnishing layout so
+its coordinates are not silently interpreted in a different camera view.
+
+Crossed corners, degenerate/small references and very unstable transforms are
+rejected with specific localized guidance. Moderately sensitive estimates are
+shown as rough estimates. The perturbation check is not an accuracy guarantee;
+real-world ground-truth validation is still required. Coplanarity and the true
+reference size are supplied by the visitor. No new search credits are used.
+
 ### 0.7.4 — calibrated AI area and furnishing recovery
 
 The optional **AI measurements** action runs Depth Anything V2 Metric Indoor
@@ -22,7 +39,7 @@ Furnishing excludes accessories and distinguishes a desk from a desk chair.
 It can source a compatible real product with different legs or silhouette; the
 ordinary close-match search policy is unchanged. Merchant dimensions, stock,
 function and style are still checked, followed by verification of the generated
-preview against the actual product photos. Up to six existing candidate pages
+preview against the actual product photos. Up to eight existing candidate pages
 per piece are inspected with bounded concurrency. A partial selection is labelled
 explicitly; unlisted furniture is inspiration. Saved searches retain their
 market scope and no additional search is silently charged. A failed candidate

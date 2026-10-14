@@ -11,6 +11,7 @@ export function readFurnishingMeasurements(form){
  if(![width,length].every(n=>Number.isFinite(n)&&n>=1.5&&n<=15))throw Object.assign(Error('ROOM_MEASUREMENTS_REQUIRED'),{code:'ROOM_MEASUREMENTS_REQUIRED'});
  return {width,length};
 }
+const imageMeasured=room=>['ai_calibrated','reference_scale'].includes(room?.source);
 export function furnishingArea(room){return Math.round(room.width*room.length/10000*100)/100;}
 export function furnishingFailureKey(run){
  if(run?.error!=='FURNISH_PRODUCTS_INCOMPLETE')return 'error';
@@ -23,12 +24,12 @@ export function createFurnishing({context,language,translate,api,apply,showSheet
  let prefill=null;
  const measure=createRoomMeasure({context,language,api,showSheet,escape:esc,safe,onUse:result=>{prefill={...result,job:context().job?.id};void open();}});
  const mark='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10 12 3l9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1zM7 15h10v6M7 15v-3h10v3M5 16v3m14-3v3"/></svg>';
- function area(room){return `<div class="furnish-area"><span>${esc(room.source==='ai_calibrated'?measurementText(language(),'area'):t('areaLabel'))}</span><strong dir="ltr">${room.source==='ai_calibrated'?'≈ ':''}${furnishingArea(room)} m²</strong></div>`;}
+ function area(room){return `<div class="furnish-area"><span>${esc(imageMeasured(room)?measurementText(language(),'area'):t('areaLabel'))}</span><strong dir="ltr">${imageMeasured(room)?'≈ ':''}${furnishingArea(room)} m²</strong></div>`;}
  function analysis(run){
   if(!run?.room)return '';
   const layout=run.layout;
   const plan=layout?`<div class="furnish-floor-plan"><h3>${esc(t('layoutTitle'))}</h3><svg viewBox="-25 -25 ${run.room.width+50} ${run.room.length+50}" role="img" aria-label="${esc(t('layoutTitle'))}"><rect class="floor" x="0" y="0" width="${run.room.width}" height="${run.room.length}" rx="6"/>${layout.obstacles.map(o=>`<rect class="obstacle" x="${o.x}" y="${o.z}" width="${o.w}" height="${o.d}"/>`).join('')}${layout.placements.map((p,i)=>`<g><rect class="piece" x="${p.x}" y="${p.z}" width="${p.w}" height="${p.d}" rx="8"/><text x="${p.x+p.w/2}" y="${p.z+p.d/2}" dominant-baseline="middle" text-anchor="middle">${i+1}</text></g>`).join('')}</svg><ol>${layout.placements.map(p=>`<li>${esc((run.products||[]).find(x=>x.id===p.id)?.name||context().design?.items.find(x=>String(x.id)===p.id)?.name_en||'')} <span dir="ltr">${p.w} × ${p.d} cm</span></li>`).join('')}</ol></div>`:'';
-  return `<section class="furnish-space-summary">${area(run.room)}${run.depth_image?`<details class="furnish-depth"><summary>${esc(t('depthTitle'))}</summary><img src="${esc(safe(run.depth_image))}" alt="${esc(t('depthTitle'))}"><p>${esc(run.room.source==='ai_calibrated'?measurementText(language(),'note'):t('depthNote'))}</p>${plan}</details>`:''}</section>`;
+  return `<section class="furnish-space-summary">${area(run.room)}${run.depth_image?`<details class="furnish-depth"><summary>${esc(t('depthTitle'))}</summary><img src="${esc(safe(run.depth_image))}" alt="${esc(t('depthTitle'))}"><p>${esc(imageMeasured(run.room)?measurementText(language(),'note'):t('depthNote'))}</p>${plan}</details>`:''}</section>`;
  }
  function render(){
   const c=context(),run=c.design?.furnishing,busy=isFurnishing(run);host.hidden=!c.design?.image;
@@ -46,7 +47,7 @@ export function createFurnishing({context,language,translate,api,apply,showSheet
   const form=document.querySelector('#furnishing-form');
   const measureButton=document.createElement('button');measureButton.type='button';measureButton.className='measure-launch';measureButton.textContent=measurementText(language(),'title');measureButton.addEventListener('click',()=>void measure());form.prepend(measureButton);
   const areaPreview=document.createElement('div');areaPreview.className='furnish-area-preview';form.querySelector('.furnish-measurements').after(areaPreview);
-  function updateArea(){try{const r=readFurnishingMeasurements(form),ai=room?.source==='ai_calibrated'&&Math.abs(room.width-r.width*100)<1&&Math.abs(room.length-r.length*100)<1;areaPreview.innerHTML=area({width:r.width*100,length:r.length*100,source:ai?'ai_calibrated':'customer'});}catch{areaPreview.innerHTML='';}}
+  function updateArea(){try{const r=readFurnishingMeasurements(form),ai=imageMeasured(room)&&Math.abs(room.width-r.width*100)<1&&Math.abs(room.length-r.length*100)<1;areaPreview.innerHTML=area({width:r.width*100,length:r.length*100,source:ai?room.source:'customer'});}catch{areaPreview.innerHTML='';}}
   form.addEventListener('input',updateArea);updateArea();
   form.addEventListener('submit',async event=>{
    event.preventDefault();if(blocked||!form.reportValidity())return;const button=form.querySelector('button[type="submit"]');if(button.disabled)return;button.disabled=true;
