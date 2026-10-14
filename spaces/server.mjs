@@ -18,8 +18,6 @@ import {identifyPieces,inventoryRepairTarget} from './inventory.mjs';
 import {originalPage,savedOriginalView} from './original-page.mjs';
 import {updateDesignPicks} from './public/design-picks.js';
 import {createDetailsService} from './product-details.mjs';
-import {furnishingQuote,furnishingBusy,furnishRoom,furnishingRepairTarget} from './furnishing.mjs';
-import {roomMeasurements} from './room-fit.mjs';
 
 const ROOT=fileURLToPath(new URL('.',import.meta.url));
 const DATA=resolve(process.env.SPACES_DATA_DIR||resolve(ROOT,'data'));
@@ -35,7 +33,6 @@ function persist(){state.revision=(state.revision||0)+1;writeFileSync(STATE+'.tm
 function cleanup(){for(const [id,j] of Object.entries(state.jobs)){if(j.owner!=='demo'&&Date.now()-j.created>86400000){delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});}}for(const k of Object.keys(state.quota)){if(!k.startsWith(new Date().toISOString().slice(0,10)))delete state.quota[k];}persist();}
 for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting'].includes(d.status)){d.status=d.image?'ready':'error';d.error='INTERRUPTED';}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
 cleanup();
-for(const j of Object.values(state.jobs))for(const d of j.designs||[])if(furnishingBusy(d.furnishing)){d.furnishing.status='error';d.furnishing.error='INTERRUPTED';}
 for(const j of Object.values(state.jobs))if(j.measurement?.status==='analyzing'){j.measurement.status='error';j.measurement.error='INTERRUPTED';}
 setInterval(cleanup,3600000).unref();
 function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
@@ -48,7 +45,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({furnishing,...d},i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(({furnishing_offers,...x})=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 const productDetails=createDetailsService({directory:resolve(DATA,'product-details'),onStart:owner=>{
  // Separate bounded enrichment allowance. Does not touch the Findzia wallet,
@@ -167,31 +164,6 @@ function makeJob(owner,opt,buffer,idempotency=''){
  const id=randomBytes(12).toString('hex');mkdirSync(resolve(DATA,id),{recursive:true,mode:0o700});writeFileSync(resolve(DATA,id,'original.jpg'),buffer,{mode:0o600});
  const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map(s=>({id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
 }
-async function startFurnishing(j,index,input,billing){
- const d=j.designs[index],run=d.furnishing;let retrieval=Promise.resolve();
- try{
-  const result=await furnishRoom({original:readFileSync(resolve(DATA,j.id,'original.jpg')),concept:readFileSync(resolve(DATA,j.id,d.image)),design:d,room:run.room,market:run.market,owner:j.owner,details:productDetails,keep:j.options.keep,notes:j.options.notes,budget:j.options.budget,
-   onCatalogue:(item,rows)=>{const key=run.market;item.furnishing_offers={...item.furnishing_offers,[key]:[...rows,...(item.furnishing_offers?.[key]||[])]};persist();},
-   onLayout:(layout,products)=>{Object.assign(run,{layout,products});persist();},
-   onSelection:(products,diagnostics,coverage)=>{Object.assign(run,{products,diagnostics,coverage});persist();},
-   onProgress:product_progress=>{run.product_progress=product_progress;persist();},
-   progress:status=>{const stamp=Date.now();if(run.phase_started){run.phase_ms={...run.phase_ms,[run.status]:stamp-run.phase_started};}run.status=status;run.phase_started=stamp;console.log('SPACES_FURNISH_PHASE',j.id,index,JSON.stringify({status,elapsed:stamp-run.started}));persist();},
-   discover:(item,{timeout=60000}={})=>{const retrieve=async()=>{
-    if(!billing||run.searches_used>=input.max_searches)throw Error('FURNISH_SEARCH_LIMIT');
-    run.searches_used++;persist();
-    const requestId=createHash('sha256').update([j.owner,j.id,index,run.request_id,item.id].join(':')).digest('hex').slice(0,32);
-    if(!item.crop){item.crop='crop-'+index+'-'+item.id+'-r'+Date.now()+'.jpg';writeFileSync(resolve(DATA,j.id,item.crop),await cropPiece(readFileSync(resolve(DATA,j.id,d.image)),item.box),{mode:0o600});}
-    const result=await searchOriginalPiece(readFileSync(resolve(DATA,j.id,item.crop)),run.market,{room:j.id,language:searchLanguage(input.language),purpose:'furnishing',timeout,taskKey:'furnish:'+j.id+':'+item.id,interactive:true,billing:{...billing,requestId}});
-    // New retrieval is stored separately, scoped to this furnishing run/market.
-    const key=run.market;item.furnishing_offers={...item.furnishing_offers,[key]:result.alternatives};
-    return result.alternatives;
-   };const task=retrieval.then(retrieve);retrieval=task.catch(()=>{});return task;}});
-  const filename='furnish-'+index+'-'+run.started+(result.mimeType==='image/jpeg'?'.jpg':'.png');
-  writeFileSync(resolve(DATA,j.id,filename),result.output,{mode:0o600});
-  const {output,...data}=result;Object.assign(run,data,{image:'/media/'+j.id+'/'+filename,status:'ready',completed:Date.now()});
-  console.log('SPACES_FURNISH_READY',j.id,index,JSON.stringify({products:run.products.length,quantity:run.coverage?.quantity,searches:run.searches_used,omitted:run.coverage?.omitted,source_ms:run.coverage?.source_ms,elapsed:Date.now()-run.started}));
- }catch(e){run.status='error';run.error=e.message;console.log('SPACES_FURNISH_FAILED',j.id,index,JSON.stringify({error:e.message,cause:e.cause,elapsed:Date.now()-run.started}));}persist();
-}
 export function createServer(){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{
  const u=new URL(req.url,'http://localhost');let path=u.pathname;
@@ -203,7 +175,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
-  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.8.10',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.9.0',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -222,32 +194,6 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  if(path==='/api/config'&&req.method==='GET')return send(res,200,{markets:MARKETS,styles:STYLES.map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
  const measurePath=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/measure$/);
  if(measurePath){ownerJob(measurePath[1],owner);throw error('ROOM_MEASUREMENTS_REQUIRED',410);}
- const furnishPath=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/furnish\/(\d)$/);
- if(furnishPath){
-  const j=ownerJob(furnishPath[1],owner),index=Number(furnishPath[2]),d=j.designs[index];if(!d?.image)throw error('NOT_FOUND',404);
-  if(req.method==='GET'){const market=MARKETS[u.searchParams.get('market')]?u.searchParams.get('market'):j.options.market;return send(res,200,{...furnishingQuote(d,market),run:d.furnishing||null});}
-  if(req.method!=='POST')throw error('NOT_FOUND',404);
-  mutateJob(j.id,owner);const b=await body(req);
-  if(!/^[a-f0-9-]{32,36}$/.test(b.request_id||'')||!MARKETS[b.market])throw error('INVALID_INPUT');
-  if(d.furnishing?.request_id===b.request_id||furnishingBusy(d.furnishing))return send(res,202,publicJob(j));
-  if(d.status==='adapting'||d.status==='analyzing'||[...tasks.keys()].some(k=>k.startsWith('furnish:')))throw error('JOB_BUSY',409);
-  let room;try{room=roomMeasurements(b);}catch(e){console.log('SPACES_FURNISH_REJECTED',j.id,index,JSON.stringify({error:e.message,widthPresent:Number.isFinite(b.width),lengthPresent:Number.isFinite(b.length)}));throw error(e.message);}
-  const quote=furnishingQuote(d,b.market);
-  if(!quote.items.length)throw error('FURNISH_PRODUCTS_INCOMPLETE',409);
-  if(!Number.isInteger(b.max_searches)||b.max_searches<quote.searches||b.max_searches>28)throw error('FURNISH_SEARCH_LIMIT',409);
-  let billing;
-  if(quote.searches){
-   const authorization=String(req.headers.authorization||''),origin=String(req.headers.origin||'');
-   if(!/^Bearer [^\s]{16,4096}$/.test(authorization))throw error('sign_in_required',401);
-   if(origin!==(secure?'https://':'http://')+req.headers.host)throw error('origin_not_allowed',403);
-   billing={authorization,origin};
-  }
-  consume(owner,'furnishing',3);consume('all','furnishing',12);
-  const savedProducts=d.furnishing?.market===b.market?d.furnishing.products:[];
-  d.furnishing={products:savedProducts||[],version:2,status:'products',request_id:b.request_id,started:Date.now(),room,market:b.market,searches_used:0,estimated:true};persist();
-  console.log('SPACES_FURNISH_STARTED',j.id,index,JSON.stringify({room,searches:quote.searches}));
-  launch('furnish:'+j.id+':'+index,()=>startFurnishing(j,index,b,billing));return send(res,202,publicJob(j));
- }
  const detailsPath=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/product-details(?:\/([a-f0-9]{64}))?$/);
  if(detailsPath){
   const j=ownerJob(detailsPath[1],owner);
@@ -297,7 +243,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
    if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
    if(req.method==='POST'){
-     const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting'||furnishingBusy(d.furnishing)&&['replace','retry'].includes(action))throw error('JOB_BUSY',409);
+     const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting')throw error('JOB_BUSY',409);
      if(action==='results'){
        const item=d.items.find(x=>x.id===String(itemIndex));if(!item)throw error('INVALID_INPUT');
        const market=String(b.view?.lastSearch?.country||'');if(!MARKETS[market])throw error('INVALID_INPUT');
@@ -349,14 +295,14 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      }
    }
  }
- const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|reference-[a-f0-9]{24}\.jpg|room-depth\.png|metric-depth\.png|design-[0-2](?:-r\d{13})?\.(?:jpg|png)|furnish-[0-2]-\d{13}\.(?:jpg|png)|crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
+ const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|reference-[a-f0-9]{24}\.jpg|room-depth\.png|metric-depth\.png|design-[0-2](?:-r\d{13})?\.(?:jpg|png)|crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
  if(media){ownerJob(media[1],owner);const f=resolve(DATA,media[1],media[2]);if(!existsSync(f))throw error('NOT_FOUND',404);const bytes=readFileSync(f);res.writeHead(200,{...headers,'Content-Type':bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp','Cache-Control':'private, max-age=3600'});return res.end(bytes);}
  if(!['GET','HEAD'].includes(req.method))throw error('NOT_FOUND',404);
  if(/^\/policies\/(privacy-policy|terms-of-service|refund-policy)$/.test(path)){res.writeHead(302,{...headers,Location:'https://findzia.com'+path});return res.end();}
  const assets={'/':'index.html','/app.js':'app.js','/request.js':'request.js','/room-state.js':'room-state.js','/live-view.js':'live-view.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
  assets['/findzia/fonts/OFL-Cairo.txt']='findzia/fonts/OFL-Cairo.txt';
  for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js'])assets['/findzia/'+name]='findzia/'+name;
-  for(const name of ['room-measure.js','room-measure-copy.js','furnishing.js','furnishing-copy.js','furnishing.css','spaces-typography.css','markets.js','findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js','original-results-frame.css','design-picks.js','product-facts.js','product-summary.js','similar-review.js','spaces-theme.js','mobile-viewport.js','account-navigation.js','account-page.js','account-page.css','search-budget.js'])assets['/'+name]=name;
+  for(const name of ['spaces-typography.css','markets.js','findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js','original-results-frame.css','design-picks.js','product-facts.js','product-summary.js','similar-review.js','spaces-theme.js','mobile-viewport.js','account-navigation.js','account-page.js','account-page.css','search-budget.js'])assets['/'+name]=name;
  if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
  throw error('NOT_FOUND',404);
  }catch(e){if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'UNEXPECTED_ERROR'});else res.end();if(!e.status)console.error('SPACES_HTTP_ERROR',e.message);}
@@ -373,15 +319,6 @@ async function selfTest(){
  }
  persist();
  await configureModels();
- // Explicit support recovery, scoped to the reported failed run. Its saved
- // candidates are reused; no billing token or new search is available here.
- const furnishingRepair=furnishingRepairTarget(state.jobs,process.env.SPACES_FURNISH_REPAIR_TARGET,process.env.SPACES_FURNISH_REPAIR_VERSION);
- if(furnishingRepair){
-  const {job,index,design,version}=furnishingRepair,previous=design.furnishing;
-  design.furnishing={...previous,version:2,status:'products',error:null,started:Date.now(),searches_used:0,repair_version:version};persist();
-  console.log('SPACES_FURNISH_REPAIR',job.id,index,JSON.stringify({version,searches:0}));
-  launch('furnish:'+job.id+':'+index,()=>startFurnishing(job,index,{max_searches:0,language:job.options.language},null));
- }
  // Explicit, one-time repair of an already failed saved design. Do not enable
  // background demo scans or regenerate the customer's image to fix inventory.
  const repair=inventoryRepairTarget(state.jobs,process.env.SPACES_REPAIR_ROOM,process.env.SPACES_REPAIR_DESIGN);
@@ -399,7 +336,7 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.8.10');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.9.0');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
 

@@ -122,12 +122,10 @@ test('a store-price link can never become a zero-price room summary',async()=>{
  item.alternatives.push({currency:'KWD',price:95});assert.equal(status(item),'2 store options · 95');
 });
 
-test('furnishing candidates may differ in silhouette without weakening ordinary match results',()=>{
+test('retired furnishing options cannot relax ordinary visual matching',()=>{
  const differentLegs={...row,visual_axes:{...row.visual_axes,shape_geometry:'different',support_base:'different'}};
  assert.equal(originalOffer(differentLegs,'US'),null);
- const candidate=originalOffer(differentLegs,'US',{purpose:'furnishing'});
- assert.equal(candidate.visual_review,'furnishing_candidate');assert.equal(candidate.price,1150);
+ assert.equal(originalOffer(differentLegs,'US',{purpose:'furnishing'}),null);
  const stream=createOriginalResults('US',()=>{},{purpose:'furnishing'});
- stream.accept({event:'result',item:differentLegs});assert.equal(stream.snapshot().length,1);
- for(const patch of [{hidden:true},{classification_final:false},{visual_axes:{category:'different'}},{photo_match_status:'rejected'},{stock_status:'out_of_stock'}])assert.equal(originalOffer({...differentLegs,...patch},'US',{purpose:'furnishing'}),null);
+ stream.accept({event:'result',item:differentLegs});assert.equal(stream.snapshot().length,0);
 });

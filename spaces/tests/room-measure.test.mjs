@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {calibratedMeasurement,validatePoints,suggestMeasurementPoints} from '../room-measure.mjs';
 import {measurementText} from '../public/room-measure-copy.js';
-import {furnishingLanguages} from '../public/furnishing-copy.js';
+const languages='en ar fr de es it pt nl tr ru zh ja ko hi ur id ms'.split(' ');
 // Synthetic pinhole scene: a square seen diagonally. A-B and B-C are
 // both 2m, all corners inside the image. This checks 3D distance recovery,
 // not the neural model's real-world accuracy.
@@ -30,7 +30,7 @@ test('no hidden room corners are fabricated when vision cannot see the boundarie
  const result=await suggestMeasurementPoints(Buffer.from('image'),{generate:async()=>({points:[]})});assert.deepEqual(result,[]);
 });
 test('reference measurement copy exists in all supported languages',()=>{
- for(const lang of furnishingLanguages)for(const key of 'title intro photo original reference areaStep custom width length next reset referenceGuide areaGuide calculate calculating note area use photoError pointsError sizeError smallError shapeError unstableError rough'.split(' '))assert.notEqual(measurementText(lang,key),key,lang+':'+key);
+ for(const lang of languages)for(const key of 'title intro photo original reference areaStep custom width length next reset referenceGuide areaGuide calculate calculating note area use photoError pointsError sizeError smallError shapeError unstableError rough'.split(' '))assert.notEqual(measurementText(lang,key),key,lang+':'+key);
 });
 
 test('reference UI uses eight selected corners and two reference dimensions without starting depth analysis',async()=>{
