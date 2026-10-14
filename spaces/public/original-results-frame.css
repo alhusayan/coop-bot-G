@@ -71,3 +71,13 @@ html[data-findzia-spaces-results] .spaces-similar-note{color:inherit;opacity:.8}
 html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-save-product[aria-pressed=true]{background:#2c604b!important;color:#fff!important;border-color:#2c604b!important}
 html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] [data-photo-retry]{display:none!important}
 @media(max-width:760px){html[data-findzia-spaces-results] #MainContent{padding-bottom:calc(80px + env(safe-area-inset-bottom,0px))!important}}
+
+/* Listing facts sit between the original price and store row. */
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-name{font:inherit!important;font-size:14px!important;font-weight:650!important;line-height:1.5!important;margin:0 0 10px!important;color:inherit!important;display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts{display:grid!important;gap:9px!important;margin:16px 0 12px!important;padding:13px 0!important;border-block:1px solid #71857830!important;font:inherit!important;text-align:start!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts>div{display:grid!important;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr)!important;gap:8px!important;align-items:baseline!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts dt{font:inherit!important;font-size:12px!important;font-weight:400!important;line-height:1.5!important;color:#667269!important;margin:0!important;overflow-wrap:anywhere}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts dd{font:inherit!important;font-size:12px!important;font-weight:600!important;line-height:1.5!important;color:inherit!important;margin:0!important;overflow-wrap:anywhere}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts .is-unspecified{color:#737b75!important;font-weight:400!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme=dark] .spaces-product-facts dt,html[data-findzia-spaces-results] #MainContent .fz-home[data-theme=dark] .spaces-product-facts .is-unspecified{color:#b3bfb6!important}
+@media(max-width:400px){html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts>div{grid-template-columns:minmax(0,1fr)!important;gap:2px!important}}

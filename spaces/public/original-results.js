@@ -4,6 +4,7 @@ import {productKey,hasSavedResults,savedPickImage} from './design-picks.js';
 import {reviewSimilarCards} from './similar-review.js';
 import {bindAccountNavigation,openAccountModal} from './account-navigation.js';
 import {searchBudget,SEARCH_BUDGET_MS} from './search-budget.js';
+import {syncProductFacts} from './product-facts.js';
 export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClose,onPick}){
  const sessions=new Map();let current=null,returnFocus=null;
  const layer=document.createElement('dialog');layer.className='original-results-layer';layer.setAttribute('aria-label','Findzia results');
@@ -86,7 +87,9 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  }
  function syncPicks(session){
   if(!session.root)return;
-  const review=reviewSimilarCards(session.root,session.root.fzRefineBridge.snapshot()?.view?.items||[]);
+  const rows=session.root.fzRefineBridge.snapshot()?.view?.items||[];
+  const review=reviewSimilarCards(session.root,rows);
+  syncProductFacts(session.root,rows,text);
   if(session.reviewNote){
    const visible=session.root.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
    const show=review.held>0&&!visible&&!session.busy&&!session.loading;

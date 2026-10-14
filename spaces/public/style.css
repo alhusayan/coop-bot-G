@@ -251,3 +251,10 @@ html[data-findzia-theme=dark] .piece-selection-media .piece-clear{background:#19
 @media(min-width:761px){.piece-selection-card{grid-template-columns:minmax(260px,1fr) minmax(0,1fr)}.piece-selection-media{aspect-ratio:16/10}.piece-selection-content{padding:26px;gap:22px}}
 @media(max-width:380px){.piece-selection-content{padding:16px;gap:14px}.piece-selection-media{padding:10px}.piece-selection-content .piece-search-button{font-size:15px}}
 @media(prefers-reduced-motion:reduce){.piece-selection-content .piece-search-button{transition:none}}
+
+/* The primary action in every design card uses the brand's deep green. */
+.design-card .secondary[data-action="choose"]{background:#234d3c!important;color:#fff!important;border-color:#234d3c!important;box-shadow:0 3px 0 #15352920;transition:background .18s ease,transform .18s ease}
+.design-card .secondary[data-action="choose"]:not(:disabled):hover{background:#193b2d!important}
+.design-card .secondary[data-action="choose"]:not(:disabled):active{transform:translateY(1px)}
+.design-card .secondary[data-action="choose"]:focus-visible{outline:3px solid #779b85;outline-offset:4px}
+.design-card .secondary[data-action="choose"]:disabled{opacity:.5}
