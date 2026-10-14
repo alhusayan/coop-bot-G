@@ -40,7 +40,8 @@ test('stream updates and locale changes render safely without duplicate nodes or
  assert.equal(root.querySelector('.fz-tile-price').textContent,'95.000 KWD');
  const lang={Colour:'اللون',Material:'الخامة',Dimensions:'المقاسات','Not listed':'غير مذكور'};
  syncProductFacts(root,[row],key=>lang[key]||key);
- assert.match(root.querySelector('dl').textContent,/اللونغير مذكور/);
+ assert.equal(root.querySelectorAll('dl>div').length,1,'missing fields must not add placeholder clutter');
+ assert.match(root.querySelector('dl').textContent,/الخامة/);
  row.card_attributes.push({name:'color',value:'Beige'});syncProductFacts(root,[row]);
  assert.match(root.querySelector('dl').textContent,/ColourBeige/);
  assert.equal(root.querySelectorAll('dl').length,1);

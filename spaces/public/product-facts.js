@@ -1,6 +1,7 @@
 // Listing evidence is a fallback while the exact merchant page is read.
 // Enrichment never changes native search results, prices, ranking or credits.
 import {productKey} from './design-picks.js';
+import {summarizeFacts,groupProductFacts} from './product-summary.js';
 const clean=value=>typeof value==='string'||typeof value==='number'?String(value).replace(/\s+/g,' ').trim().slice(0,180):'';
 const kinds={color:'Colour',colour:'Colour',material:'Material',materials:'Material',dimensions:'Dimensions',size:'Size',width:'Width',height:'Height',depth:'Depth',length:'Length',diameter:'Diameter',finish:'Finish',brand:'Brand',shape:'Shape',pattern:'Pattern',configuration:'Configuration'};
 const pageKinds={...kinds,care:'Care',assembly:'Assembly',origin:'Country of origin',weight:'Weight',capacity:'Capacity'};
@@ -106,9 +107,9 @@ export function syncProductFacts(root,rows=[],translate=value=>value,details){
  for(const card of root.querySelectorAll('[data-results-body] .fz-card-shell')){
   const link=card.querySelector('a.fz-tile'),body=card.querySelector('.fz-tile-body'),row=byUrl.get(productKey(link?.href));
   if(!body||!row)continue;
-  const page=details?.peek(row.url),title=clean(row.title||row.raw_title),facts=(details?displayedFacts(row,page):productFacts(row)).map(fact=>({...fact,label:translate(fact.label)||fact.label}));
+  const page=details?.peek(row.url),title=clean(row.title||row.raw_title),facts=summarizeFacts(displayedFacts(row,page),translate);
   const state=details?(page?.status||'pending'):'';
-  const note=state==='pending'?'Reading store details…':state==='ready'?(page?.retrieval==='indexed_merchant_page'?'Listed details':'From the product page'):state==='partial'?'Some details could not be retrieved':state==='empty'?'No specifications found on this page':state?'Details could not be retrieved':'';
+  const note=state==='pending'?'Reading store details…':'';
   const missing=translate('Not listed'),label=translate('Listed details'),signature=JSON.stringify([title,facts,missing,label,translate(note),state]);
   const old=body.querySelector('.spaces-product-facts');
   if(old?.dataset.facts===signature&&body.querySelector('.spaces-product-name'))continue;
@@ -119,4 +120,29 @@ export function syncProductFacts(root,rows=[],translate=value=>value,details){
   body.insertBefore(list,body.querySelector('.fz-store-row'));
   if(note){const source=doc.createElement('p');source.className='spaces-product-source';source.dataset.state=state;source.textContent=translate(note)||note;source.setAttribute('translate','no');if(state==='pending')source.setAttribute('role','status');body.insertBefore(source,body.querySelector('.fz-store-row'));}
  }
+}
+
+// Add the complete merchant specifications to the existing information dialog.
+// Its buying insights, store link and original evaluation continue to work.
+export function syncProductDetails(root,row,translate=value=>value,details){
+ const dialog=root.querySelector('.fz-insights[open]'),body=dialog?.querySelector('.fz-insights-body');
+ if(!body||!row)return;
+ const page=details?.peek(row.url),groups=groupProductFacts(displayedFacts(row,page),translate);
+ const state=page?.status||'pending';
+ const note=state==='pending'?'Reading store details…':state==='ready'?(page?.retrieval==='indexed_merchant_page'?'Listed details':'From the product page'):state==='partial'?'Some details could not be retrieved':state==='empty'?'No specifications found on this page':'Details could not be retrieved';
+ const signature=JSON.stringify([row.url,groups,state,translate(note)]);
+ // Native listing facts are already merged into the sourced sections below.
+ body.querySelector('.fz-insights-specs')?.remove();
+ const heading=dialog.querySelector('.fz-insights-head h2');if(heading&&heading.textContent!==translate('Product details'))heading.textContent=translate('Product details');
+ const exit=dialog.querySelector('.fz-insights-close');
+ if(exit){exit.setAttribute('aria-label',translate('Done'));if(!exit.querySelector('svg'))exit.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';}
+ const old=body.querySelector('.spaces-full-specs');if(old?.dataset.facts===signature)return;
+ const doc=root.ownerDocument,section=doc.createElement('section');section.className='spaces-full-specs';section.dataset.facts=signature;section.setAttribute('translate','no');
+ for(const group of groups){
+  const block=doc.createElement('section'),label=doc.createElement('h3'),list=doc.createElement('dl');label.textContent=group.label;block.className='spaces-spec-group';block.append(label,list);
+  for(const fact of group.facts){const entry=doc.createElement('div'),term=doc.createElement('dt'),value=doc.createElement('dd');term.textContent=translate(fact.label)||fact.label;value.textContent=fact.value;value.dir='auto';entry.append(term,value);list.append(entry);}
+  section.append(block);
+ }
+ const source=doc.createElement('p');source.className='spaces-product-source';source.dataset.state=state;source.textContent=translate(note);if(state==='pending')source.setAttribute('role','status');section.append(source);
+ if(old)old.replaceWith(section);else body.insertBefore(section,body.querySelector('.fz-insights-hero')?.nextSibling||body.firstChild);
 }

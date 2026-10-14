@@ -4,7 +4,7 @@ import {productKey,hasSavedResults,savedPickImage} from './design-picks.js';
 import {reviewSimilarCards} from './similar-review.js';
 import {bindAccountNavigation,openAccountModal} from './account-navigation.js';
 import {searchBudget,SEARCH_BUDGET_MS} from './search-budget.js';
-import {syncProductFacts,createProductDetailsLoader} from './product-facts.js';
+import {syncProductFacts,syncProductDetails,createProductDetailsLoader} from './product-facts.js';
 export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClose,onPick}){
  const sessions=new Map();let current=null,returnFocus=null;
  const layer=document.createElement('dialog');layer.className='original-results-layer';layer.setAttribute('aria-label','Findzia results');
@@ -92,6 +92,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   session.details ||= createProductDetailsLoader({request,room:session.room,design:session.design,item:session.item,getLanguage,onUpdate:()=>syncPicks(session),isActive:()=>current===session&&layer.open});
   session.details.scan(session.root);
   syncProductFacts(session.root,rows,text,session.details);
+  if(session.insightsUrl)syncProductDetails(session.root,rows.find(row=>productKey(row.url)===session.insightsUrl),text,session.details);
   if(session.reviewNote){
    const visible=session.root.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
    const show=review.held>0&&!visible&&!session.busy&&!session.loading;
@@ -108,6 +109,16 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  }
  function bindPicks(session){
   const root=session.root;
+  root.addEventListener('click',event=>{
+   const trigger=event.target.closest?.('[data-evaluate]');if(!trigger||!root.contains(trigger))return;
+   session.insightsUrl=productKey(trigger.dataset.offerKey||trigger.closest('.fz-card-shell')?.querySelector('a.fz-tile')?.href);
+   // The native handler opens its dialog synchronously, then loads insights.
+   // Re-apply sourced sections after its asynchronous body render as well.
+   session.insightsObserver?.disconnect();
+   const target=root.querySelector('.fz-insights-body'),Observer=session.frame.contentWindow.MutationObserver;
+   if(target&&Observer){session.insightsObserver=new Observer(()=>syncPicks(session));session.insightsObserver.observe(target,{childList:true,subtree:true});}
+   syncPicks(session);
+  },true);
   root.addEventListener('click',async event=>{
    const button=event.target.closest?.('[data-save-product]');if(!button||!root.contains(button))return;
    // Redirect only the bookmark's destination. Search, card rendering and
@@ -231,5 +242,5 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(existing&&newSearch&&!session.busy&&!session.loading)await run(session);
  }
  return {open,close,refreshLanguage(){for(const session of sessions.values())if(session.root)syncLanguage(session);if(current)paint(current);},has:key=>sessions.has(key),busy:key=>sessions.get(key)?.busy===true,
-  destroy(){close();for(const session of sessions.values()){session.details?.destroy();session.budget?.cancel();clearInterval(session.progressTimer);clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
+  destroy(){close();for(const session of sessions.values()){session.details?.destroy();session.budget?.cancel();clearInterval(session.progressTimer);clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.insightsObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
 }
