@@ -8,22 +8,29 @@ export function centimetres(value,fallbackUnit=''){
  if(!m||!(m[2]||fallbackUnit))return null;
  const n=Number(m[1])*factor(m[2]||fallbackUnit);return n>=1&&n<=1000?Math.round(n*100)/100:null;
 }
-export function productDimensions(facts=[]){
+export function productDimensions(facts=[],kind=''){
  const result={},evidence=[];
  const put=(kind,value,quote)=>{if(value==null)return;if(result[kind]&&Math.abs(result[kind]-value)>1)result.conflict=true;else{result[kind]=value;evidence.push(quote);}};
  const axis={w:'width',width:'width',d:'depth',depth:'depth',h:'height',height:'height',l:'length',length:'length',diameter:'diameter'};
  for(const f of facts){
-  const label=text(f.label),value=text(f.value);
+  const label=text(f.label),value=text(f.value).replace(/\b(?:dia|diam)\b\.?|[øØ⌀]/g,'diameter ').replace(/\b([wdhl])\s*\)/g,'$1');
   if(/seat|armrest|leg |packag|carton|shipping|cushion|مقعد|ذراع|عبوة/.test(label))continue;
   if(!f.quote||!['merchant_page','indexed_merchant_page'].includes(f.source||'merchant_page'))continue;
-  const fallback=(label+' '+value).match(new RegExp('('+unit+')\\s*\\)?$','i'))?.[1]||'';
+  const units=[...value.matchAll(new RegExp('(?<=\\d|\\s)('+unit+')(?![a-z])','gi'))].map(m=>m[1]);
+  const fallback=units.length&&new Set(units.map(factor)).size===1?units[0]:(label+' '+value).match(new RegExp('('+unit+')\\s*\\)?$','i'))?.[1]||'';
   if(['width','depth','height','length','diameter'].includes(f.kind))put(f.kind,centimetres(value,fallback),f.quote);
   if(f.kind==='dimensions'||f.kind==='size'){
-   for(const m of value.matchAll(new RegExp('\\b(width|depth|height|length|diameter|w|d|h|l)\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)\\s*('+unit+')?','gi')))put(axis[m[1]],centimetres(m[2],m[3]||fallback),f.quote);
+   const axes='width|depth|height|length|diameter|w|d|h|l';
+   for(const m of value.matchAll(new RegExp('\\b('+axes+')\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)\\s*('+unit+')?(?![a-z])','gi')))put(axis[m[1]],centimetres(m[2],m[3]||fallback),f.quote);
+   for(const m of value.matchAll(new RegExp('(\\d+(?:[.,]\\d+)?)\\s*('+unit+')?\\s*\\(?('+axes+')\\b','gi')))put(axis[m[3]],centimetres(m[1],m[2]||fallback),f.quote);
    // An explicit axis order is required. Never guess what a bare 80x50x40 means.
-   const order=(label+' '+value).match(/\b(w|width)\s*[x×/]\s*(d|depth|l|length)\s*[x×/]\s*(h|height)\b/);
+   const order=(label+' '+value).match(new RegExp('\\b('+axes+')\\s*[x×/]\\s*('+axes+')\\s*[x×/]\\s*('+axes+')\\b'));
    const nums=value.match(new RegExp('(\\d+(?:[.,]\\d+)?)\\s*[x×]\\s*(\\d+(?:[.,]\\d+)?)\\s*[x×]\\s*(\\d+(?:[.,]\\d+)?)\\s*('+unit+')','i'));
    if(order&&nums)order.slice(1).forEach((key,i)=>put(axis[key],centimetres(nums[i+1],nums[4]),f.quote));
+   // A rectangular rug is planar: its two advertised axes can be rotated.
+   // Never apply this convention to ambiguous three-dimensional furniture.
+   const flat=kind==='rug'&&value.match(new RegExp('^\\s*(\\d+(?:[.,]\\d+)?)\\s*('+unit+')?\\s*[x×]\\s*(\\d+(?:[.,]\\d+)?)\\s*('+unit+')\\s*$','i'));
+   if(flat){put('width',centimetres(flat[1],flat[2]||flat[4]),f.quote);put('depth',centimetres(flat[3],flat[4]),f.quote);}
   }
  }
  if(result.conflict)return null;
@@ -45,7 +52,7 @@ export function furnitureKind(value){
  if(/\b(?:cover|throw|blanket|bedding|bedspread|pillow|cushion|duvet|mattress|decor|organizer|headboard|footboard)\b|\bbed\s+(?:linen|sheet|skirt)|بطاني|مفرش|مفارش|وساد|لحاف|غطاء|مرتبة/.test(name))return 'accessory';
  if(/\brug\b|carpet|سجاد/.test(name))return 'rug';
  if(/lamp|chandelier|pendant|sconce|مصباح|ثريا|أباجور|اباجور/.test(name))return 'lighting';
- if(/sofa|sectional|settee|كنب|أريكة|اريكة|صوفا/.test(name))return 'sofa';
+ if(/sofa|sectional|settee|couch|loveseat|chaise|كنب|أريكة|اريكة|صوفا/.test(name))return 'sofa';
  if(/\bbed\b|bedframe|سرير/.test(name)&&! /\bbedside\b/.test(name))return 'bed';
  if(/chair|stool|bench|ottoman|pouf|كرسي|كراسي|مقعد/.test(name))return 'chair';
  if(/\btable\b|\bdesk\b|nightstand|bedside|طاول|طاوله|مكتب/.test(name))return 'table';

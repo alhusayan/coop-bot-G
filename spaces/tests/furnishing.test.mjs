@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import {centimetres,productDimensions,roomMeasurements,validateLayout,fitFurnitureLayout,furnitureSlots,candidateMatchesKind,furnitureInstances} from '../room-fit.mjs';
-import {furnishingQuote,furnishRoom,furnishingRepairTarget,chooseRoomSet,previewProblems} from '../furnishing.mjs';
+import {furnishingQuote,furnishRoom,furnishingRepairTarget,chooseRoomSet,previewProblems,furnishingPlan} from '../furnishing.mjs';
 import {furnishingLanguages,furnishingText} from '../public/furnishing-copy.js';
 import {readFurnishingMeasurements,furnishingArea,furnishingFailureKey} from '../public/furnishing.js';
 import {parseHTML} from 'linkedom';
@@ -82,10 +82,10 @@ test('all furniture types and repeated quantities are included without a three-k
  const slots=furnitureSlots([...items,{id:'9',name_en:'Sofa',mode:'keep'},{id:'10',name_en:'Curtains',mode:'measure'},{id:'11',name_en:'Throw pillow'}]);
  assert.equal(slots.length,7);assert.equal(slots.filter(x=>x.kind==='table').length,2);
  assert.equal(slots.find(x=>x.item.id==='7').layer,'surface');
- const quote=furnishingQuote({items},'KW');assert.equal(quote.items.length,7);assert.equal(quote.quantity,10);assert.equal(quote.searches,7);
+ const quote=furnishingQuote({items},'KW');assert.equal(quote.items.length,7);assert.equal(quote.quantity,10);assert.equal(quote.searches,6);
  items[0].furnishing_offers={KW:[{title:'Sofa',link:'https://shop.example/sofa',market_scope:'local'}]};
  assert.equal(furnishingQuote({items},'KW').saved,1);assert.equal(furnishingQuote({items},'SA').saved,0);
- assert.equal(furnishingQuote({items},'KW').searches,7,'saved candidates can need one disclosed fallback search');
+ assert.equal(furnishingQuote({items},'KW').searches,6,'saved candidates can need one disclosed fallback search');
  const instances=furnitureInstances([{id:'chair',quantity:4,dimensions:{width:50,depth:60}}]);assert.deepEqual(instances.map(p=>p.id),['chair.1','chair.2','chair.3','chair.4']);
 });
 const completeRoom=roomMeasurements({width:8,length:8});
@@ -145,4 +145,51 @@ test('curation cannot omit, duplicate, or invent a product candidate',()=>{
 });
 test('all supported languages explain the complete flow and quantities',()=>{
  for(const lang of furnishingLanguages)for(const key of ['curate','completeNote','legacy','schedule','packs','unitsPerPack'])assert.notEqual(furnishingText(lang,key,4),key,lang+':'+key);
+});
+
+test('merchant suffix axes, arbitrary labeled order and flat rugs preserve explicit evidence',()=>{
+ assert.deepEqual(productDimensions([f('dimensions','200cm (W) x 95cm (D) x 75cm (H)')]).width,200);
+ assert.equal(productDimensions([f('dimensions','75 x 95 x 200 cm','H x D x W')]).width,200);
+ assert.equal(productDimensions([f('dimensions','H: 58 cm, Dia: 35 cm')]).width,35);
+ assert.equal(productDimensions([f('dimensions','Height 58 cm, Diameter 35 cm')]).depth,35);
+ assert.equal(productDimensions([f('dimensions','160 x 230 cm')],'rug').depth,230);
+ assert.equal(productDimensions([f('dimensions','160 cm x 230 cm')],'rug').width,160);
+ assert.equal(productDimensions([f('dimensions','160 x 230 cm')],'table'),null);
+ assert.equal(productDimensions([f('dimensions','160 x 230 x 80 cm')],'rug'),null);
+});
+test('repeated dining chairs share one search and retain every requested copy',()=>{
+ const items=[{id:'1',name_en:'Sofa'},...['2','3','4'].map((id,i)=>({id,name_en:'Dining chair',quantity:i===1?2:1})),{id:'5',name_en:'Armchair'},{id:'6',name_en:'Dining table'},{id:'7',name_en:'Table lamp'}];
+ const plan=furnishingPlan({items}),chairs=plan.find(p=>p.item.id==='2');
+ assert.equal(chairs.quantity,4);assert.equal(chairs.members.length,3);assert.equal(chairs.required,true);
+ assert.equal(plan.find(p=>p.item.id==='5').required,false);assert.equal(plan.find(p=>p.item.id==='7').required,false);
+ const quote=furnishingQuote({items},'GB');assert.equal(quote.searches,5);assert.equal(quote.quantity,8);
+});
+test('credit exhaustion and missing accents still produce a fully sourced living/dining collection',async()=>{
+ const x=await fixture(),details=x.input.details.request,base=x.deps.generate;
+ x.items.push({id:'11',name_en:'Dining chair',quantity:2,box:[100,100,800,800]});
+ x.input.details.request=url=>/\/product\/[456]\//.test(url)?{status:'ready',facts:[]}:details(url);
+ x.input.discover=async item=>{x.requests.push(item.id);throw Error('credits_exhausted');};
+ const proposal=structuredClone(completeLayout);proposal.placements=proposal.placements.filter(p=>!['5','6','7'].includes(p.id));proposal.placements.push({id:'4.3',x:420,z:270,rotation:0},{id:'4.4',x:500,z:270,rotation:0});
+ x.review.products=x.review.products.filter(p=>!['5','6','7'].includes(p.id));
+ Object.assign(x.review.products.find(p=>p.id==='4'),{quantity:4,boxes:Array.from({length:4},(_,i)=>[i*200,100,i*200+150,400])});
+ x.deps.generate=async(parts,opts)=>{
+  if(parts[0].text.startsWith('Act as'))return {selections:['1','2','3','4'].map(id=>({id,candidate:0})),design_direction:'Coordinated seating and dining, without unsourced accents.'};
+  if(parts[0].text.startsWith('Plan'))return proposal;
+  return base(parts,opts);
+ };
+ const result=await furnishRoom(x.input,x.deps);
+ assert.equal(result.products.length,4);assert.equal(result.products.find(p=>p.id==='4').quantity,4);assert.equal(result.layout.placements.length,7);
+ assert.deepEqual(result.coverage.missing,[]);assert.equal(result.coverage.omitted.length,3);assert.equal(result.coverage.stop_reason,'credits_exhausted');
+ assert.equal(x.requests.length,1,'never send more paid searches after the first credit failure');assert.equal(result.partial,false);
+ assert.deepEqual(result.products.find(p=>p.id==='4').source_item_ids,['4','11']);
+ assert.match(x.renders[0],/Replace\/remove ALL other imagined concept furniture/);
+});
+test('fresh verified source stock is reused without redundant merchant requests',async()=>{
+ const x=await fixture();for(const item of x.items)for(const o of item.furnishing_offers.KW)Object.assign(o,{search_engine:'findzia-original',stock_checked_at:new Date().toISOString()});
+ let requests=0;x.deps.stock=async()=>{requests++;throw Error('should reuse fresh stock');};
+ assert.equal((await furnishRoom(x.input,x.deps)).products.length,7);assert.equal(requests,0);
+});
+test('credit failures are explained accurately and optional adaptation is translated',()=>{
+ assert.equal(furnishingFailureKey({error:'FURNISH_PRODUCTS_INCOMPLETE',coverage:{stop_reason:'credits_exhausted'}}),'credits');
+ for(const lang of furnishingLanguages)for(const key of ['adaptivePlan','adapted','credits'])assert.notEqual(furnishingText(lang,key),key);
 });
