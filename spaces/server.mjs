@@ -170,6 +170,8 @@ async function startFurnishing(j,index,input,billing){
  const d=j.designs[index],run=d.furnishing;
  try{
   const result=await furnishRoom({original:readFileSync(resolve(DATA,j.id,'original.jpg')),concept:readFileSync(resolve(DATA,j.id,d.image)),design:d,room:run.room,market:run.market,owner:j.owner,details:productDetails,keep:j.options.keep,
+   onDepth:result=>{const file='room-depth.png';writeFileSync(resolve(DATA,j.id,file),result.png,{mode:0o600});Object.assign(run,{depth_image:'/media/'+j.id+'/'+file,depth_model:result.model,depth_kind:result.kind});persist();console.log('SPACES_DEPTH_READY',j.id,index,JSON.stringify({model:result.model,kind:result.kind,elapsed:Date.now()-run.started}));},
+   onLayout:(layout,products)=>{Object.assign(run,{layout,products});persist();},
    progress:status=>{run.status=status;persist();},
    discover:async item=>{
     if(!billing||run.searches_used>=input.max_searches)throw Error('FURNISH_SEARCH_LIMIT');
@@ -223,7 +225,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
   if(!/^[a-f0-9-]{32,36}$/.test(b.request_id||'')||!MARKETS[b.market])throw error('INVALID_INPUT');
   if(d.furnishing?.request_id===b.request_id||furnishingBusy(d.furnishing))return send(res,202,publicJob(j));
   if(d.status==='adapting'||d.status==='analyzing'||[...tasks.keys()].some(k=>k.startsWith('furnish:')))throw error('JOB_BUSY',409);
-  let room;try{room=roomMeasurements(b);}catch(e){throw error(e.message);}
+  let room;try{room=roomMeasurements(b);}catch(e){console.log('SPACES_FURNISH_REJECTED',j.id,index,JSON.stringify({error:e.message,widthPresent:Number.isFinite(b.width),lengthPresent:Number.isFinite(b.length)}));throw error(e.message);}
   const quote=furnishingQuote(d,b.market);
   if(quote.items.length<2)throw error('FURNISH_PRODUCTS_INCOMPLETE',409);
   if(!Number.isInteger(b.max_searches)||b.max_searches<quote.searches||b.max_searches>3)throw error('FURNISH_SEARCH_LIMIT',409);
@@ -236,6 +238,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
   }
   consume(owner,'furnishing',3);consume('all','furnishing',12);
   d.furnishing={status:'depth',request_id:b.request_id,started:Date.now(),room,market:b.market,searches_used:0,estimated:true};persist();
+  console.log('SPACES_FURNISH_STARTED',j.id,index,JSON.stringify({room,searches:quote.searches}));
   launch('furnish:'+j.id+':'+index,()=>startFurnishing(j,index,b,billing));return send(res,202,publicJob(j));
  }
  const detailsPath=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/product-details(?:\/([a-f0-9]{64}))?$/);
@@ -339,7 +342,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      }
    }
  }
- const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|design-[0-2](?:-r\d{13})?\.(?:jpg|png)|furnish-[0-2]-\d{13}\.(?:jpg|png)|crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
+ const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|room-depth\.png|design-[0-2](?:-r\d{13})?\.(?:jpg|png)|furnish-[0-2]-\d{13}\.(?:jpg|png)|crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
  if(media){ownerJob(media[1],owner);const f=resolve(DATA,media[1],media[2]);if(!existsSync(f))throw error('NOT_FOUND',404);const bytes=readFileSync(f);res.writeHead(200,{...headers,'Content-Type':bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp','Cache-Control':'private, max-age=3600'});return res.end(bytes);}
  if(!['GET','HEAD'].includes(req.method))throw error('NOT_FOUND',404);
  if(/^\/policies\/(privacy-policy|terms-of-service|refund-policy)$/.test(path)){res.writeHead(302,{...headers,Location:'https://findzia.com'+path});return res.end();}

@@ -4,7 +4,18 @@ import sharp from 'sharp';
 import {centimetres,productDimensions,roomMeasurements,validateLayout,furnitureSlots} from '../room-fit.mjs';
 import {furnishingQuote,furnishRoom} from '../furnishing.mjs';
 import {furnishingLanguages,furnishingText} from '../public/furnishing-copy.js';
+import {readFurnishingMeasurements,furnishingArea} from '../public/furnishing.js';
+import {parseHTML} from 'linkedom';
 const f=(kind,value,label=kind)=>({kind,value,label,quote:label+': '+value,source:'merchant_page'});
+test('the customer’s 6 × 8 form sends length 8 rather than the controls collection length',()=>{
+ const {document}=parseHTML('<form><input name="width" value="6"><input name="length" value="8"><button>Continue</button></form>'),form=document.querySelector('form');
+ Object.defineProperty(form,'elements',{value:{length:3}});
+ const payload=JSON.parse(JSON.stringify(readFurnishingMeasurements(form)));
+ assert.deepEqual(payload,{width:6,length:8});assert.equal(furnishingArea(roomMeasurements(payload)),48);
+ form.querySelector('[name="length"]').value='';assert.throws(()=>readFurnishingMeasurements(form),/MEASUREMENTS_REQUIRED/);
+ form.querySelector('[name="length"]').value='٨٫٥';assert.equal(readFurnishingMeasurements(form).length,8.5);
+ form.querySelector('[name="width"]').value='16';assert.throws(()=>readFurnishingMeasurements(form),/MEASUREMENTS_REQUIRED/);
+});
 test('merchant dimensions require explicit axes and units; component and conflicting dimensions are rejected',()=>{
  assert.equal(centimetres('٦٥ سم'),65);assert.equal(centimetres('30 in'),76.2);assert.equal(centimetres('2 m'),200);assert.equal(centimetres('70'),null);
  assert.deepEqual(productDimensions([f('dimensions','H72, W70, D64cm','Assembled dimensions')]),{width:70,depth:64,height:72,unit:'cm',evidence:['Assembled dimensions: H72, W70, D64cm']});
@@ -34,18 +45,19 @@ test('optional sourcing is bounded, country-scoped and uses saved searches witho
 });
 test('all supported locales include optional-flow copy and consistent search-credit placeholders',()=>{
  assert.equal(furnishingLanguages.length,17);
- for(const language of furnishingLanguages){for(const key of 'title teaser intro begin cost free depth products layout render verify ready estimate error missing demo'.split(' ')){const value=furnishingText(language,key,3);assert.ok(value&&value!==key,language+':'+key);}assert.equal((furnishingText(language,'cost',3).match(/3/g)||[]).length,2);}
+ for(const language of furnishingLanguages){for(const key of 'title teaser intro begin cost free depth products layout render verify ready estimate error missing demo areaLabel invalidMeasurements depthTitle depthNote layoutTitle'.split(' ')){const value=furnishingText(language,key,3);assert.ok(value&&value!==key,language+':'+key);}assert.equal((furnishingText(language,'cost',3).match(/3/g)||[]).length,2);assert.notEqual(furnishingText(language,'invalidMeasurements'),furnishingText(language,'intro'));}
  assert.equal(furnishingText('ar','title'),'التصميم والتنفيذ');
 });
 test('furnishing pipeline retains originals and rejects a misleading generated preview',async()=>{
  const bytes=await sharp({create:{width:800,height:600,channels:3,background:'#baa995'}}).jpeg().toBuffer();
  const image={mimeType:'image/jpeg',data:bytes.toString('base64')};
  const items=['Sofa','Coffee table'].map((name,i)=>({id:String(i+1),name_en:name,box:[100,100,800,800],furnishing_offers:{KW:[{link:'https://shop.example/product/'+i,image:'https://shop.example/image.jpg',title:name,market_scope:'local',availability:'listed_available'}]}}));
- const initial=JSON.stringify(items),phases=[];
+ const initial=JSON.stringify(items),phases=[],observations=[];
  const dependencies={depth:async()=>({png:bytes,model:'test',kind:'relative_depth'}),fetchImage:async()=>({bytes}),stock:async()=>({availability:'listed_available'}),audit:async(_,offers)=>offers,
   generate:async(parts,opts)=>opts.image?image:parts[0].text.startsWith('Audit')?{room_preserved:true,scale_plausible:true,openings_clear:true,products:[{id:'1',identity_preserved:true,box:[100,100,400,800]},{id:'2',identity_preserved:true,box:[500,100,800,800]}]}:layout};
- const input={original:bytes,concept:bytes,design:{items},room,market:'KW',owner:'test',details:{request:url=>({status:'ready',facts:url.endsWith('/0')?[f('width','210 cm'),f('depth','90 cm')]:[f('width','100 cm'),f('depth','60 cm')]})},discover:()=>{throw Error('unwanted paid search');},progress:p=>phases.push(p)};
+ const input={original:bytes,concept:bytes,design:{items},room,market:'KW',owner:'test',details:{request:url=>({status:'ready',facts:url.endsWith('/0')?[f('width','210 cm'),f('depth','90 cm')]:[f('width','100 cm'),f('depth','60 cm')]})},discover:()=>{throw Error('unwanted paid search');},progress:p=>phases.push(p),onDepth:value=>observations.push({kind:value.kind,phase:phases.at(-1)}),onLayout:(value,products)=>observations.push({placements:value.placements.length,photos:products.some(p=>p.bytes),phase:phases.at(-1)})};
  const result=await furnishRoom(input,dependencies);assert.equal(result.products.length,2);assert.equal(JSON.stringify(items),initial);assert.deepEqual(phases,['depth','products','layout','render','verify']);
+ assert.deepEqual(observations,[{kind:'relative_depth',phase:'depth'},{placements:2,photos:false,phase:'layout'}]);
  await assert.rejects(furnishRoom(input,{...dependencies,generate:async(parts,opts)=>parts[0].text.startsWith('Audit')?{room_preserved:false}:dependencies.generate(parts,opts)}),/PREVIEW_UNVERIFIED/);
  await assert.rejects(furnishRoom(input,{...dependencies,stock:async()=>({availability:'unknown'})}),/PRODUCTS_INCOMPLETE/);
 });
