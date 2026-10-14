@@ -33,22 +33,29 @@ export function productDimensions(facts=[]){
  return {width:result.width,depth:result.depth,height:result.height||null,unit:'cm',evidence:[...new Set(evidence)]};
 }
 export function furnitureSlots(items=[]){
- const kinds=['sofa','bed','table','chair','storage'];
- const seen=new Set(),out=[];
- for(const kind of kinds){const item=items.find(x=>x.mode!=='keep'&&x.status!=='kept'&&furnitureKind(x.name_en)===kind&&!seen.has(x.id));if(item){seen.add(item.id);out.push({item,kind});}}
- return out.slice(0,3);
+ const seen=new Set();return items.flatMap(item=>{
+  const kind=furnitureKind(item.name_en);
+  if(!kind||kind==='accessory'||['keep','measure','quote'].includes(item.mode)||item.status==='kept'||seen.has(String(item.id)))return [];
+  seen.add(String(item.id));
+  return [{item,kind,quantity:Math.max(1,Math.min(12,Math.round(Number(item.quantity)||1))),layer:kind==='rug'?'rug':kind==='lighting'?(/table|desk|bedside|طاولة|مكتب/i.test(item.name_en)?'surface':/pendant|chandelier|ceiling|ثريا|سقف/i.test(item.name_en)?'ceiling':/wall|حائط|جدار/i.test(item.name_en)?'wall':'floor'):'floor'}];
+ });
 }
 export function furnitureKind(value){
  const name=text(value).replace(/[\u064b-\u065f\u0640]/g,'').split(/\bwith\b|\sمع\s/)[0];
- if(/\b(?:cover|throw|blanket|bedding|bedspread|pillow|cushion|duvet|mattress|rug|lamp|decor|organizer|headboard|footboard)\b|\bbed\s+(?:linen|sheet|skirt)|بطاني|مفرش|مفارش|وساد|لحاف|غطاء|مرتبة|سجاد|مصباح/.test(name))return 'accessory';
+ if(/\b(?:cover|throw|blanket|bedding|bedspread|pillow|cushion|duvet|mattress|decor|organizer|headboard|footboard)\b|\bbed\s+(?:linen|sheet|skirt)|بطاني|مفرش|مفارش|وساد|لحاف|غطاء|مرتبة/.test(name))return 'accessory';
+ if(/\brug\b|carpet|سجاد/.test(name))return 'rug';
+ if(/lamp|chandelier|pendant|sconce|مصباح|ثريا|أباجور|اباجور/.test(name))return 'lighting';
  if(/sofa|sectional|settee|كنب|أريكة|اريكة|صوفا/.test(name))return 'sofa';
  if(/\bbed\b|bedframe|سرير/.test(name)&&! /\bbedside\b/.test(name))return 'bed';
- if(/chair|stool|كرسي|كراسي/.test(name))return 'chair';
- if(/coffee table|dining table|writing desk|\bdesk\b|طاول|طاوله|مكتب/.test(name))return 'table';
- if(/tv unit|sideboard|console|cabinet|wardrobe|خزان|دولاب|بوفيه|وحدة تلفزيون/.test(name))return 'storage';
+ if(/chair|stool|bench|ottoman|pouf|كرسي|كراسي|مقعد/.test(name))return 'chair';
+ if(/\btable\b|\bdesk\b|nightstand|bedside|طاول|طاوله|مكتب/.test(name))return 'table';
+ if(/tv unit|tv stand|media unit|sideboard|console|cabinet|wardrobe|dresser|bookcase|shelving|shelf|خزان|دولاب|بوفيه|وحدة تلفزيون|رفوف/.test(name))return 'storage';
  return null;
 }
 export function candidateMatchesKind(title,kind){const actual=furnitureKind(title);return !actual||actual===kind;}
+export function furnitureInstances(products){
+ return products.flatMap(p=>Array.from({length:Math.max(1,Math.min(12,Math.round(p.quantity||1)))},(_,i)=>({...p,id:(p.quantity||1)>1?p.id+'.'+(i+1):p.id,product_id:p.id,copy:i+1})));
+}
 export function roomMeasurements(raw){
  const width=Number(raw.width),length=Number(raw.length);
  if(![width,length].every(n=>Number.isFinite(n)&&n>=1.5&&n<=15))throw Error('ROOM_MEASUREMENTS_REQUIRED');
@@ -60,19 +67,24 @@ export function validateLayout(raw,products,room){
  const ids=new Set();const placements=raw.placements.map(p=>{
   const product=products.find(x=>x.id===p.id);if(!product||ids.has(p.id)||![0,90,180,270].includes(p.rotation))throw Error('ROOM_LAYOUT_UNCERTAIN');ids.add(p.id);
   const rotated=p.rotation%180!==0,{width,depth}=product.dimensions;
-  const box={id:p.id,x:Number(p.x),z:Number(p.z),w:rotated?depth:width,d:rotated?width:depth,rotation:p.rotation};
+  const box={id:p.id,product_id:product.product_id||p.id,layer:product.layer||'floor',on:p.on||null,x:Number(p.x),z:Number(p.z),w:rotated?depth:width,d:rotated?width:depth,rotation:p.rotation};
   if(![box.x,box.z].every(Number.isFinite)||box.x<10||box.z<10||box.x+box.w>room.width-10||box.z+box.d>room.length-10)throw Error('FURNITURE_DOES_NOT_FIT');
   return box;
  });
  const obstacles=raw.obstacles.map(o=>({x:Number(o.x),z:Number(o.z),w:Number(o.width),d:Number(o.depth),kind:String(o.kind||'fixed').slice(0,40)}));
  if(obstacles.some(o=>![o.x,o.z,o.w,o.d].every(Number.isFinite)||o.x<0||o.z<0||o.w<=0||o.d<=0||o.x+o.w>room.width+1||o.z+o.d>room.length+1))throw Error('ROOM_LAYOUT_UNCERTAIN');
  for(let i=0;i<placements.length;i++){
-  if(placements.slice(0,i).some(p=>overlap(p,placements[i],20))||obstacles.some(o=>overlap(o,placements[i],10)))throw Error('FURNITURE_DOES_NOT_FIT');
+  const a=placements[i];if(a.layer!=='floor')continue;
+  if(placements.slice(0,i).some(p=>p.layer==='floor'&&overlap(p,a,20))||obstacles.some(o=>overlap(o,a,10)))throw Error('FURNITURE_DOES_NOT_FIT');
+ }
+ for(const p of placements.filter(p=>p.layer==='surface')){
+  const host=placements.find(x=>x.id===p.on&&x.layer==='floor');
+  if(!host||p.x<host.x||p.z<host.z||p.x+p.w>host.x+host.w||p.z+p.d>host.z+host.d)throw Error('FURNITURE_DOES_NOT_FIT');
  }
  // A real path must remain through the proposed rectangles. This checks only
  // the supplied estimated room geometry; it never claims a measured floor plan.
  const entry=raw.entry;if(!entry||![entry.x,entry.z].every(Number.isFinite)||entry.x<0||entry.z<0||entry.x>room.width||entry.z>room.length)throw Error('ROOM_LAYOUT_UNCERTAIN');
- const step=20,cols=Math.ceil(room.width/step),rows=Math.ceil(room.length/step),blocked=(x,z)=>[...placements,...obstacles.filter(o=>o.kind!=='door')].some(o=>x>=o.x-30&&x<=o.x+o.w+30&&z>=o.z-30&&z<=o.z+o.d+30);
+ const step=20,cols=Math.ceil(room.width/step),rows=Math.ceil(room.length/step),blocked=(x,z)=>[...placements.filter(p=>p.layer==='floor'),...obstacles.filter(o=>o.kind!=='door')].some(o=>x>=o.x-30&&x<=o.x+o.w+30&&z>=o.z-30&&z<=o.z+o.d+30);
  const start=[Math.min(cols-1,Math.floor(entry.x/step)),Math.min(rows-1,Math.floor(entry.z/step))];
  const queue=[start],seen=new Set();let reached=false;
  while(queue.length){const [x,z]=queue.shift(),key=x+':'+z;if(x<0||z<0||x>=cols||z>=rows||seen.has(key)||blocked((x+.5)*step,(z+.5)*step))continue;seen.add(key);if(x>cols*.25&&x<cols*.75&&z>rows*.25&&z<rows*.75)reached=true;for(const d of [[1,0],[-1,0],[0,1],[0,-1]])queue.push([x+d[0],z+d[1]]);}
@@ -84,6 +96,9 @@ export function validateLayout(raw,products,room){
 // Doors, fixed obstacles, entry, product dimensions and confidence never change.
 export function fitFurnitureLayout(raw,products,room,{maxChecks=12000}={}){
  try{return validateLayout(raw,products,room);}catch(e){if(e.message!=='FURNITURE_DOES_NOT_FIT')throw e;}
+ // Layered arrangements need the designer to keep lamps on their hosts and
+ // dining groups coherent. Do not scatter a whole-room set with a grid search.
+ if(products.length>4||products.some(p=>p.layer&&p.layer!=='floor'))throw Error('FURNITURE_DOES_NOT_FIT');
  const obstacles=raw.obstacles.map(o=>({x:Number(o.x),z:Number(o.z),w:Number(o.width),d:Number(o.depth)}));
  if(obstacles.some(o=>![o.x,o.z,o.w,o.d].every(Number.isFinite)||o.x<0||o.z<0||o.w<=0||o.d<=0||o.x+o.w>room.width+1||o.z+o.d>room.length+1))throw Error('ROOM_LAYOUT_UNCERTAIN');
  const candidates=products.map(product=>{

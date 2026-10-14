@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import {centimetres,productDimensions,roomMeasurements,validateLayout,fitFurnitureLayout,furnitureSlots,candidateMatchesKind} from '../room-fit.mjs';
-import {furnishingQuote,furnishRoom,furnishingRepairTarget} from '../furnishing.mjs';
+import {centimetres,productDimensions,roomMeasurements,validateLayout,fitFurnitureLayout,furnitureSlots,candidateMatchesKind,furnitureInstances} from '../room-fit.mjs';
+import {furnishingQuote,furnishRoom,furnishingRepairTarget,chooseRoomSet,previewProblems} from '../furnishing.mjs';
 import {furnishingLanguages,furnishingText} from '../public/furnishing-copy.js';
 import {readFurnishingMeasurements,furnishingArea,furnishingFailureKey} from '../public/furnishing.js';
 import {parseHTML} from 'linkedom';
@@ -60,12 +60,6 @@ test('an appearance rejection is not described as missing dimensions or unavaila
  assert.equal(furnishingFailureKey({error:'FURNITURE_DOES_NOT_FIT'}),'error');
  for(const language of furnishingLanguages)assert.notEqual(furnishingText(language,'incompatible'),'incompatible');
 });
-test('optional sourcing is bounded, country-scoped and uses saved searches without another charge',()=>{
- const items=[{id:'1',name_en:'Sofa'},{id:'2',name_en:'Coffee table'},{id:'3',name_en:'Armchair'},{id:'4',name_en:'TV unit'},{id:'5',name_en:'Throw pillow'}];
- assert.equal(furnitureSlots(items).length,3);assert.equal(furnishingQuote({items},'KW').searches,3);
- items[0].furnishing_offers={KW:[{link:'https://shop.example/sofa',market_scope:'local',availability:'listed_available'}]};
- assert.equal(furnishingQuote({items},'KW').searches,2);assert.equal(furnishingQuote({items},'SA').searches,3);
-});
 test('a desk chair cannot replace a desk, and bedding cannot replace a bed frame',()=>{
  const slots=furnitureSlots([{id:'1',name_en:'Bed with linen bedding'},{id:'2',name_en:'Desk chair'},{id:'3',name_en:'Writing desk'},{id:'4',name_en:'Armchair'}]);
  assert.equal(slots.find(x=>x.kind==='table').item.id,'3');
@@ -82,31 +76,73 @@ test('all supported locales include optional-flow copy and consistent search-cre
  for(const language of furnishingLanguages){for(const key of 'title teaser intro begin cost free depth products layout render verify ready estimate partial error missing demo areaLabel invalidMeasurements depthTitle depthNote layoutTitle'.split(' ')){const value=furnishingText(language,key,3);assert.ok(value&&value!==key,language+':'+key);}assert.equal((furnishingText(language,'cost',3).match(/3/g)||[]).length,2);assert.notEqual(furnishingText(language,'invalidMeasurements'),furnishingText(language,'intro'));}
  assert.equal(furnishingText('ar','title'),'التصميم والتنفيذ');
 });
-test('furnishing pipeline retains originals and rejects a misleading generated preview',async()=>{
- const bytes=await sharp({create:{width:800,height:600,channels:3,background:'#baa995'}}).jpeg().toBuffer();
- const image={mimeType:'image/jpeg',data:bytes.toString('base64')};
- const items=['Sofa','Coffee table'].map((name,i)=>({id:String(i+1),name_en:name,box:[100,100,800,800],furnishing_offers:{KW:[{link:'https://shop.example/product/'+i,image:'https://shop.example/image.jpg',title:name,market_scope:'local',availability:'listed_available'}]}}));
- const initial=JSON.stringify(items),phases=[],observations=[];
- const dependencies={depth:async()=>({png:bytes,model:'test',kind:'relative_depth'}),fetchImage:async()=>({bytes}),stock:async()=>({availability:'listed_available'}),audit:async(_,offers)=>offers,candidateReview:async()=>true,
-  generate:async(parts,opts)=>opts.image?image:parts[0].text.startsWith('Audit')?{room_preserved:true,scale_plausible:true,openings_clear:true,products:[{id:'1',identity_preserved:true,box:[100,100,400,800]},{id:'2',identity_preserved:true,box:[500,100,800,800]}]}:layout};
- const input={original:bytes,concept:bytes,design:{items},room,market:'KW',owner:'test',details:{request:url=>({status:'ready',facts:url.endsWith('/0')?[f('width','210 cm'),f('depth','90 cm')]:[f('width','100 cm'),f('depth','60 cm')]})},discover:()=>{throw Error('unwanted paid search');},progress:p=>phases.push(p),onDepth:value=>observations.push({kind:value.kind,phase:phases.at(-1)}),onLayout:(value,products)=>observations.push({placements:value.placements.length,photos:products.some(p=>p.bytes),phase:phases.at(-1)})};
- const result=await furnishRoom(input,dependencies);assert.equal(result.products.length,2);assert.equal(JSON.stringify(items),initial);assert.deepEqual(phases,['depth','products','layout','render','verify']);
- assert.deepEqual(observations,[{kind:'relative_depth',phase:'depth'},{placements:2,photos:false,phase:'layout'}]);
- await assert.rejects(furnishRoom(input,{...dependencies,generate:async(parts,opts)=>parts[0].text.startsWith('Audit')?{room_preserved:false}:dependencies.generate(parts,opts)}),/PREVIEW_UNVERIFIED/);
- await assert.rejects(furnishRoom(input,{...dependencies,stock:async()=>({availability:'unknown'})}),/PRODUCTS_INCOMPLETE/);
-});
 
-test('one broken merchant page does not discard another real piece; partial preview is explicit',async()=>{
- const bytes=await sharp({create:{width:800,height:600,channels:3,background:'#baa995'}}).jpeg().toBuffer();
- const image={mimeType:'image/jpeg',data:bytes.toString('base64')};
- const items=['Sofa','Coffee table'].map((name,i)=>({id:String(i+1),name_en:name,box:[100,100,800,800],furnishing_offers:{KW:[{link:'https://shop.example/product/'+i,image:'https://shop.example/p.jpg',title:name,market_scope:'local',availability:'listed_available'}]}}));
- const result=await furnishRoom({original:bytes,concept:bytes,design:{items},room,market:'KW',owner:'test',details:{request:url=>{if(url.endsWith('/1'))throw Error('merchant unavailable');return {status:'ready',facts:[f('width','210 cm'),f('depth','90 cm')]};}},discover:()=>{throw Error('unwanted new search');},progress:()=>{}},{depth:async()=>({png:bytes,model:'test',kind:'relative_depth'}),fetchImage:async()=>({bytes}),stock:async()=>({availability:'listed_available'}),candidateReview:async()=>true,audit:async(_,offers)=>offers,generate:async(parts,options)=>options.image?image:parts[0].text.startsWith('Audit')?{room_preserved:true,scale_plausible:true,openings_clear:true,products:[{id:'1',identity_preserved:true,box:[100,100,800,800]}]}:{...layout,placements:[layout.placements[0]]}});
- assert.equal(result.products.length,1);assert.equal(result.partial,true);
+test('all furniture types and repeated quantities are included without a three-kind cap',()=>{
+ const items=['Sofa','Coffee table','Dining table','Dining chair','Sideboard','Rug','Table lamp'].map((name,i)=>({id:String(i+1),name_en:name,quantity:i===3?4:1}));
+ const slots=furnitureSlots([...items,{id:'9',name_en:'Sofa',mode:'keep'},{id:'10',name_en:'Curtains',mode:'measure'},{id:'11',name_en:'Throw pillow'}]);
+ assert.equal(slots.length,7);assert.equal(slots.filter(x=>x.kind==='table').length,2);
+ assert.equal(slots.find(x=>x.item.id==='7').layer,'surface');
+ const quote=furnishingQuote({items},'KW');assert.equal(quote.items.length,7);assert.equal(quote.quantity,10);assert.equal(quote.searches,7);
+ items[0].furnishing_offers={KW:[{title:'Sofa',link:'https://shop.example/sofa',market_scope:'local'}]};
+ assert.equal(furnishingQuote({items},'KW').saved,1);assert.equal(furnishingQuote({items},'SA').saved,0);
+ assert.equal(furnishingQuote({items},'KW').searches,7,'saved candidates can need one disclosed fallback search');
+ const instances=furnitureInstances([{id:'chair',quantity:4,dimensions:{width:50,depth:60}}]);assert.deepEqual(instances.map(p=>p.id),['chair.1','chair.2','chair.3','chair.4']);
 });
-
-test('the eighth saved candidate is examined without purchasing another search',async()=>{
- const bytes=await sharp({create:{width:800,height:600,channels:3,background:'#baa995'}}).jpeg().toBuffer(),image={mimeType:'image/jpeg',data:bytes.toString('base64')},checked=[];
- const offers=Array.from({length:8},(_,i)=>({title:'Coffee table',link:'https://shop.example/table/'+i,image:'https://shop.example/table.jpg',market_scope:'local',availability:'listed_available'}));
- const result=await furnishRoom({original:bytes,concept:bytes,design:{items:[{id:'2',name_en:'Coffee table',box:[100,100,800,800],furnishing_offers:{SA:offers}}]},room,market:'SA',owner:'test',details:{request:url=>{checked.push(url);return {status:'ready',facts:url.endsWith('/7')?[f('width','100 cm'),f('depth','60 cm')]:[]};}},discover:()=>{throw Error('unwanted paid search');},progress:()=>{}},{depth:async()=>({png:bytes,model:'test',kind:'relative_depth'}),fetchImage:async()=>({bytes}),stock:async()=>({availability:'listed_available'}),candidateReview:async()=>true,audit:async(_,rows)=>rows,generate:async(parts,options)=>options.image?image:parts[0].text.startsWith('Audit')?{room_preserved:true,scale_plausible:true,openings_clear:true,products:[{id:'2',identity_preserved:true,box:[100,100,800,800]}]}:{...layout,placements:[layout.placements[1]]}});
- assert.equal(checked.length,8);assert.equal(result.products[0].offer.link,offers[7].link);
+const completeRoom=roomMeasurements({width:8,length:8});
+const names=['Sofa','Coffee table','Dining table','Dining chair','Sideboard','Rug','Table lamp'];
+const sizes=[[210,90],[100,60],[180,90],[50,50],[120,40],[300,300],[20,20]];
+const completeLayout={geometry_confidence:'high',entry:{x:750,z:790},obstacles:[{x:700,z:700,width:80,depth:100,kind:'door'}],placements:[
+ {id:'1',x:100,z:50,rotation:0},{id:'2',x:100,z:200,rotation:0},{id:'3',x:400,z:50,rotation:0},
+ {id:'4.1',x:420,z:170,rotation:0},{id:'4.2',x:500,z:170,rotation:0},{id:'5',x:10,z:400,rotation:0},
+ {id:'6',x:50,z:30,rotation:0},{id:'7',x:35,z:405,rotation:0,on:'5'}]};
+async function fixture(){
+ const bytes=await sharp({create:{width:800,height:600,channels:3,background:'#baa995'}}).jpeg().toBuffer(),image={mimeType:'image/jpeg',data:bytes.toString('base64')};
+ const items=names.map((name,i)=>({id:String(i+1),name_en:name,quantity:i===3?2:1,box:[100,100,800,800],furnishing_offers:{KW:[0,1].map(n=>({title:name+' option '+n,link:'https://shop.example/product/'+i+'/'+n,image:'https://shop.example/photo.jpg',market_scope:'local',availability:'listed_available'}))}}));
+ const phases=[],events=[],requests=[],renders=[];
+ const review={room_preserved:true,scale_plausible:true,openings_clear:true,cohesive_design:true,all_furniture_accounted_for:true,unlisted_furniture:[],products:items.map(p=>({id:p.id,identity_preserved:true,quantity:p.quantity,boxes:Array.from({length:p.quantity},(_,i)=>[100+i*300,100,350+i*300,400])}))};
+ const input={original:bytes,concept:bytes,design:{items},room:completeRoom,market:'KW',owner:'test',details:{request:url=>{const i=Number(url.split('/').at(-2));return {status:'ready',facts:[f('width',sizes[i][0]+' cm'),f('depth',sizes[i][1]+' cm')]};}},discover:async item=>{requests.push(item.id);return [];},progress:x=>phases.push(x),onSelection:(products,diagnostics,coverage)=>events.push({products,diagnostics,coverage})};
+ const deps={fetchImage:async()=>({bytes}),stock:async()=>({availability:'listed_available'}),audit:async(_,offers)=>offers,candidateReview:async item=>({units_per_offer:item.id==='4'?2:1}),generate:async(parts,options)=>{
+  if(options.image){renders.push(parts[0].text);return image;}
+  if(parts[0].text.startsWith('Act as'))return {selections:items.map(p=>({id:p.id,candidate:p.id==='1'?1:0})),design_direction:'Warm oak, ivory and olive; balanced layered lighting.'};
+  if(parts[0].text.startsWith('Audit'))return structuredClone(review);
+  return structuredClone(completeLayout);
+ }};
+ return {bytes,items,phases,events,requests,renders,review,input,deps};
+}
+test('complete pipeline coordinates real alternatives, preserves quantities and validates rug/table-lamp layers',async()=>{
+ const x=await fixture(),before=JSON.stringify(x.items),result=await furnishRoom(x.input,x.deps);
+ assert.equal(result.products.length,7);assert.equal(result.partial,false);assert.equal(result.version,2);assert.equal(result.layout.placements.length,8);
+ assert.equal(result.products[0].offer.link,'https://shop.example/product/0/1');
+ assert.equal(result.products[3].quantity,2);assert.equal(result.products[3].purchase_quantity,1);
+ assert.equal(result.coverage.quantity,8);assert.deepEqual(result.coverage.missing,[]);assert.equal(x.requests.length,0);
+ assert.equal(JSON.stringify(x.items),before);assert.deepEqual(x.phases,['products','curate','layout','render','verify']);
+ assert.ok(!result.products.some(p=>p.bytes));assert.match(x.renders[0],/Do not invent extra sofas/);
+ const instances=furnitureInstances(result.products);assert.equal(validateLayout(completeLayout,instances,completeRoom).placements.length,8);
+ const bad=structuredClone(completeLayout);bad.placements.at(-1).x=600;assert.throws(()=>validateLayout(bad,instances,completeRoom),/DOES_NOT_FIT/);
+});
+test('missing furniture triggers one fallback and blocks a misleading partial room',async()=>{
+ const x=await fixture();x.input.details.request=url=>url.includes('/2/')?{status:'ready',facts:[]}:{status:'ready',facts:[f('width','50 cm'),f('depth','50 cm')]};
+ await assert.rejects(furnishRoom(x.input,x.deps),/PRODUCTS_INCOMPLETE/);
+ assert.deepEqual(x.requests,['3']);assert.equal(x.renders.length,0);assert.deepEqual(x.events.at(-1).coverage.missing,[{id:'3',name:'Dining table'}]);
+ assert.equal(x.events.at(-1).products.length,6);
+});
+test('failed saved offers are replaced by a new authorized search before rendering',async()=>{
+ const x=await fixture(),old=x.input.details.request;
+ x.input.details.request=url=>url.includes('/2/')&&!url.endsWith('/fresh')?{status:'ready',facts:[]}:old(url);
+ x.input.discover=async item=>{x.requests.push(item.id);return [{...item.furnishing_offers.KW[0],link:'https://shop.example/product/2/fresh'}];};
+ const result=await furnishRoom(x.input,x.deps);assert.deepEqual(x.requests,['3']);assert.ok(result.products.find(p=>p.id==='3').offer.link.endsWith('/fresh'));
+});
+test('extra invented furniture is corrected once; persistent missing copies cannot pass',async()=>{
+ const x=await fixture(),base=x.deps.generate;let audits=0;
+ x.deps.generate=async(parts,opts)=>{if(parts[0].text.startsWith('Audit')&&audits++===0)return {...x.review,all_furniture_accounted_for:false,unlisted_furniture:['unlisted armchair']};return base(parts,opts);};
+ const result=await furnishRoom(x.input,x.deps);assert.equal(result.partial,false);assert.equal(x.renders.length,2);assert.match(x.renders[1],/unlisted armchair/);
+ const y=await fixture();y.review.products[3].quantity=1;
+ await assert.rejects(furnishRoom(y.input,y.deps),/PREVIEW_UNVERIFIED/);assert.equal(y.renders.length,2);
+});
+test('curation cannot omit, duplicate, or invent a product candidate',()=>{
+ const groups=[{item:{id:'1'},candidates:[{id:'1'}]},{item:{id:'2'},candidates:[{id:'2'}]}];
+ for(const selections of [[{id:'1',candidate:0}],[{id:'1',candidate:0},{id:'1',candidate:0}],[{id:'1',candidate:0},{id:'2',candidate:2}]])assert.throws(()=>chooseRoomSet(groups,{selections}),/SELECTION_UNVERIFIED/);
+});
+test('all supported languages explain the complete flow and quantities',()=>{
+ for(const lang of furnishingLanguages)for(const key of ['curate','completeNote','legacy','schedule','packs','unitsPerPack'])assert.notEqual(furnishingText(lang,key,4),key,lang+':'+key);
 });

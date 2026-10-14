@@ -1,3 +1,17 @@
+# Findzia Spaces 0.8.0 — complete store furniture redesign
+
+The optional **Design & furnish** flow now takes customer-entered length and width only. Image-reference measurement is retired (HTTP 410); old stored calibration never overrides the customer's dimensions. AI plans the furniture layout from the room photo and the entered rectangle, without claiming a surveyed floor plan.
+
+The chosen concept remains the starting point. Sourcing covers every recognized movable furniture group, including separate coffee/dining/side tables, repeated seating, storage, rugs and lighting; the old three-kind cap is removed. Up to two verified candidates per group are coordinated together before a new final design is rendered. Real product dimensions, stock checks and local-market scope remain required. The maximum new searches (one per inventory group, including fallback if saved offers fail) is displayed before starting; valid saved offers consume no new search credits.
+
+Each purchased SKU retains its quantity. Layout validates a separate footprint per copy; rugs can sit under furniture and table lamps must sit within a host table/cabinet footprint. Mixed furniture bundles are rejected without separate dimensions; explicit identical-item packs retain both displayed piece count and purchase-pack count.
+
+A missing furniture group stops final rendering with its name visible. The system no longer fills the image with unlisted imaginary furniture. The final room audit checks room preservation, product identity, quantities, coherent design and extra unsourced furniture; one image revision is permitted before reporting failure. Tiny decorative flowers, books and plain cushions remain styling, clearly described as such. Existing fixed fittings and explicitly kept furniture are exempt from sourcing.
+
+Validation uses deterministic integration fixtures, including seven product groups/eight physical pieces, fallback retrieval, repeated chairs, layered rugs/lamps, and rejection of incomplete or hallucinated rooms. These tests verify behavior, not real-world measurement accuracy or a guarantee that every market has suitable stock. New AI output quality still depends on the actual room photo and available catalog.
+
+---
+
 # Findzia Spaces — isolated trial
 
 English, touch-first private-invite experimental room redesign and shopping app. Supports all room types, three real photo edits, retained furniture preferences, budget/market selection, detected item hotspots, localized product-price searches, alternatives, quantities, partial totals, export and temporary history.

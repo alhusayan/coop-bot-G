@@ -20,8 +20,6 @@ import {updateDesignPicks} from './public/design-picks.js';
 import {createDetailsService} from './product-details.mjs';
 import {furnishingQuote,furnishingBusy,furnishRoom,furnishingRepairTarget} from './furnishing.mjs';
 import {roomMeasurements} from './room-fit.mjs';
-import sharp from 'sharp';
-import {measureReference} from './reference-measure.mjs';
 
 const ROOT=fileURLToPath(new URL('.',import.meta.url));
 const DATA=resolve(process.env.SPACES_DATA_DIR||resolve(ROOT,'data'));
@@ -50,8 +48,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function measurementPublic(j){const m=j.measurement;if(m?.method!=='reference_scale')return {status:'idle',method:'reference_scale',image:'/media/'+j.id+'/original.jpg',image_id:'original'};return {id:m.id,status:m.status,method:m.method,image:'/media/'+j.id+'/'+(m.photo||'original.jpg'),image_id:m.image_id||'original',result:m.result||null};}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,measurement:measurementPublic(j),original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 const productDetails=createDetailsService({directory:resolve(DATA,'product-details'),onStart:owner=>{
  // Separate bounded enrichment allowance. Does not touch the Findzia wallet,
@@ -173,15 +170,16 @@ function makeJob(owner,opt,buffer,idempotency=''){
 async function startFurnishing(j,index,input,billing){
  const d=j.designs[index],run=d.furnishing;let retrieval=Promise.resolve();
  try{
-  const result=await furnishRoom({original:readFileSync(resolve(DATA,j.id,'original.jpg')),concept:readFileSync(resolve(DATA,j.id,d.image)),measurementPhoto:run.room.measurement_photo&&run.room.measurement_photo!=='original.jpg'?readFileSync(resolve(DATA,j.id,run.room.measurement_photo)):null,design:d,room:run.room,market:run.market,owner:j.owner,details:productDetails,keep:j.options.keep,
-   onDepth:result=>{const file='room-depth.png';writeFileSync(resolve(DATA,j.id,file),result.png,{mode:0o600});Object.assign(run,{depth_image:'/media/'+j.id+'/'+file,depth_model:result.model,depth_kind:result.kind});persist();console.log('SPACES_DEPTH_READY',j.id,index,JSON.stringify({model:result.model,kind:result.kind,elapsed:Date.now()-run.started}));},
+  const result=await furnishRoom({original:readFileSync(resolve(DATA,j.id,'original.jpg')),concept:readFileSync(resolve(DATA,j.id,d.image)),design:d,room:run.room,market:run.market,owner:j.owner,details:productDetails,keep:j.options.keep,notes:j.options.notes,budget:j.options.budget,
    onLayout:(layout,products)=>{Object.assign(run,{layout,products});persist();},
-   onSelection:(products,diagnostics)=>{Object.assign(run,{products,diagnostics});persist();},
+   onSelection:(products,diagnostics,coverage)=>{Object.assign(run,{products,diagnostics,coverage});persist();},
+   onProgress:product_progress=>{run.product_progress=product_progress;persist();},
    progress:status=>{run.status=status;persist();},
    discover:item=>{const retrieve=async()=>{
     if(!billing||run.searches_used>=input.max_searches)throw Error('FURNISH_SEARCH_LIMIT');
     run.searches_used++;persist();
     const requestId=createHash('sha256').update([j.owner,j.id,index,run.request_id,item.id].join(':')).digest('hex').slice(0,32);
+    if(!item.crop){item.crop='crop-'+index+'-'+item.id+'-r'+Date.now()+'.jpg';writeFileSync(resolve(DATA,j.id,item.crop),await cropPiece(readFileSync(resolve(DATA,j.id,d.image)),item.box),{mode:0o600});}
     const result=await searchOriginalPiece(readFileSync(resolve(DATA,j.id,item.crop)),run.market,{room:j.id,language:searchLanguage(input.language),purpose:'furnishing',taskKey:'furnish:'+j.id+':'+item.id,interactive:true,billing:{...billing,requestId}});
     // New retrieval is stored separately, scoped to this furnishing run/market.
     const key=run.market;item.furnishing_offers={...item.furnishing_offers,[key]:result.alternatives};
@@ -204,7 +202,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
-  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.7.5',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.8.0',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -222,30 +220,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  }
  if(path==='/api/config'&&req.method==='GET')return send(res,200,{markets:MARKETS,styles:STYLES.map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
  const measurePath=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/measure$/);
- if(measurePath){
-  const j=ownerJob(measurePath[1],owner);
-  if(req.method==='GET')return send(res,200,measurementPublic(j)||{status:'idle',points:[]});
-  if(req.method!=='POST')throw error('NOT_FOUND',404);
-  mutateJob(j.id,owner);const b=await body(req);
-  if(b.action==='photo'){
-   const encoded=String(b.image||'');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(encoded))throw error('INVALID_IMAGE');
-   const buffer=Buffer.from(encoded.split(',')[1],'base64');if(buffer.length>12*1024*1024||buffer.length<200)throw error('INVALID_IMAGE');
-   let image;try{image=await sharp(buffer,{limitInputPixels:40e6}).rotate().resize({width:2400,height:2400,fit:'inside',withoutEnlargement:true}).jpeg({quality:94}).toBuffer();}catch{throw error('INVALID_IMAGE');}
-   consume(owner,'reference-photos',20);consume('all','reference-photos',150);
-   const imageId=randomBytes(12).toString('hex'),photo='reference-'+imageId+'.jpg';writeFileSync(resolve(DATA,j.id,photo),image,{mode:0o600});
-   j.measurement={id:randomBytes(12).toString('hex'),method:'reference_scale',status:'ready',image_id:imageId,photo};persist();return send(res,200,measurementPublic(j));
-  }
-  if(b.action==='reference'){
-   const imageId=b.image_id||'original',current=j.measurement;
-   if(imageId!=='original'&&(current?.method!=='reference_scale'||current.image_id!==imageId))throw error('REFERENCE_IMAGE_REQUIRED',409);
-   const photo=imageId==='original'?'original.jpg':current.photo;
-   const metadata=await sharp(readFileSync(resolve(DATA,j.id,photo))).metadata();
-   let result;try{result=measureReference({...b,source_width:metadata.width,source_height:metadata.height});}catch(e){console.log('SPACES_REFERENCE_REJECTED',j.id,JSON.stringify({error:e.message}));throw error(e.message);}
-   j.measurement={id:randomBytes(12).toString('hex'),method:'reference_scale',status:'ready',image_id:imageId,photo,result};persist();
-   console.log('SPACES_REFERENCE_READY',j.id,JSON.stringify({width:result.width,length:result.length,area:result.area_m2,quality:result.quality}));return send(res,200,measurementPublic(j));
-  }
-  throw error('INVALID_INPUT');
- }
+ if(measurePath){ownerJob(measurePath[1],owner);throw error('ROOM_MEASUREMENTS_REQUIRED',410);}
  const furnishPath=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/furnish\/(\d)$/);
  if(furnishPath){
   const j=ownerJob(furnishPath[1],owner),index=Number(furnishPath[2]),d=j.designs[index];if(!d?.image)throw error('NOT_FOUND',404);
@@ -256,10 +231,9 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
   if(d.furnishing?.request_id===b.request_id||furnishingBusy(d.furnishing))return send(res,202,publicJob(j));
   if(d.status==='adapting'||d.status==='analyzing'||[...tasks.keys()].some(k=>k.startsWith('furnish:')))throw error('JOB_BUSY',409);
   let room;try{room=roomMeasurements(b);}catch(e){console.log('SPACES_FURNISH_REJECTED',j.id,index,JSON.stringify({error:e.message,widthPresent:Number.isFinite(b.width),lengthPresent:Number.isFinite(b.length)}));throw error(e.message);}
-  if(b.measurement_id===j.measurement?.id&&j.measurement?.result&&Math.abs(room.width-j.measurement.result.width)<1&&Math.abs(room.length-j.measurement.result.length)<1)room={...room,source:j.measurement.result.source,measurement_id:j.measurement.id,scope:'selected_visible_area',measurement_points:j.measurement.result.points,measurement_photo:j.measurement.photo||'original.jpg',accuracy_validated:false};
   const quote=furnishingQuote(d,b.market);
   if(!quote.items.length)throw error('FURNISH_PRODUCTS_INCOMPLETE',409);
-  if(!Number.isInteger(b.max_searches)||b.max_searches<quote.searches||b.max_searches>3)throw error('FURNISH_SEARCH_LIMIT',409);
+  if(!Number.isInteger(b.max_searches)||b.max_searches<quote.searches||b.max_searches>28)throw error('FURNISH_SEARCH_LIMIT',409);
   let billing;
   if(quote.searches){
    const authorization=String(req.headers.authorization||''),origin=String(req.headers.origin||'');
@@ -268,7 +242,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    billing={authorization,origin};
   }
   consume(owner,'furnishing',3);consume('all','furnishing',12);
-  d.furnishing={status:'depth',request_id:b.request_id,started:Date.now(),room,market:b.market,searches_used:0,estimated:true};persist();
+  d.furnishing={version:2,status:'products',request_id:b.request_id,started:Date.now(),room,market:b.market,searches_used:0,estimated:true};persist();
   console.log('SPACES_FURNISH_STARTED',j.id,index,JSON.stringify({room,searches:quote.searches}));
   launch('furnish:'+j.id+':'+index,()=>startFurnishing(j,index,b,billing));return send(res,202,publicJob(j));
  }
@@ -402,7 +376,7 @@ async function selfTest(){
  const furnishingRepair=furnishingRepairTarget(state.jobs,process.env.SPACES_FURNISH_REPAIR_TARGET,process.env.SPACES_FURNISH_REPAIR_VERSION);
  if(furnishingRepair){
   const {job,index,design,version}=furnishingRepair,previous=design.furnishing;
-  design.furnishing={...previous,status:'depth',error:null,started:Date.now(),searches_used:0,repair_version:version};persist();
+  design.furnishing={...previous,version:2,status:'products',error:null,started:Date.now(),searches_used:0,repair_version:version};persist();
   console.log('SPACES_FURNISH_REPAIR',job.id,index,JSON.stringify({version,searches:0}));
   launch('furnish:'+job.id+':'+index,()=>startFurnishing(job,index,{max_searches:0,language:job.options.language},null));
  }
@@ -423,7 +397,7 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.7.5');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.8.0');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
 
