@@ -4,6 +4,31 @@ English, touch-first private-invite experimental room redesign and shopping app.
 
 ## Deployment
 
+### Optional design and furnishing trial
+
+The existing three-concept flow is unchanged. A separate **Design & furnish**
+action appears on a selected design. It asks for room width and length, reuses
+saved same-market searches, and discloses a maximum of three new one-credit
+piece searches before submission. Only explicit customer submission starts it.
+
+Depth Anything V2 Small runs in a bounded worker on the server using pinned
+Apache-2.0 ONNX weights. Only public model files are downloaded; room pixels are
+not sent to Hugging Face. The map is relative depth, not metric measurements.
+Customer dimensions calibrate the proposed floor layout. Gemini estimates room
+geometry and generates a proposal; deterministic checks reject overlaps, blocked
+openings and layouts without a 60cm route. These are checks against an estimated
+layout, not verified measurements of the physical room.
+
+Up to three furniture categories are sourced. Explicit overall merchant width
+and depth, confirmed stock and a visual check are required; ambiguous bare
+dimension triples and conflicting component sizes are excluded. Merchant facts
+never come from the generated picture. The rendered preview is saved separately
+only after room-preservation and product-identity checks pass. Failed runs leave
+the original image untouched. This trial has **no measured accuracy percentage**;
+physical dimensions and fit must be confirmed before purchase. Delivery and
+installation are not offered. Model cache is retained under the existing data
+directory; model execution concurrency is one, with a three-minute timeout.
+
 Deploy this folder as an independent Railway service from branch `experiment/findzia-spaces`, root `/spaces`. The existing Findzia backend and storefront are not changed.
 
 Set `GEMINI_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY` and `SEARCHAPI_API_KEY` as references to the existing Railway backend variables, not copied into code. Set `SPACES_TRIAL_TOKEN` to a high-entropy random value; opening `/trial/<token>` establishes an HttpOnly signed session and keeps the invitation URL, so moving from an in-app browser to Safari can establish a separate session. Reopening the invitation preserves the current session owner. The client checks access before photo selection and renews an expired session through the invitation on a 401, without replaying timed-out design requests. Set `SPACES_DATA_DIR=/data` on an isolated volume. Set `SPACES_PUBLIC_URL` to the service HTTPS URL. No provider keys are exposed to the browser.
