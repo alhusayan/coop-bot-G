@@ -199,3 +199,11 @@ test('prefix dimensions are not also misread as suffixes of the preceding axis',
   const dimensions=productDimensions([f('dimensions',value)]);assert.equal(dimensions.width,200,value);assert.equal(dimensions.depth,100,value);assert.equal(dimensions.height,75,value);
  }
 });
+
+test('a verified standalone merchant alternative completes the core set without another paid image search',async()=>{
+ const x=await fixture(),original=x.input.details.request,persisted=[];
+ x.input.details.request=url=>url.includes('/2/')?{status:'ready',facts:[]}:original(url);
+ x.input.onCatalogue=(item,rows)=>persisted.push([item.id,rows]);
+ x.deps.catalogue=async item=>item.id==='3'?[{...item.furnishing_offers.KW[0],link:'https://shop.example/standalone-table',merchant_facts:[f('width','180 cm'),f('depth','90 cm')]}]:[];
+ const result=await furnishRoom(x.input,x.deps);assert.equal(result.products.length,7);assert.equal(x.requests.length,0);assert.equal(persisted.length,1);assert.equal(result.products.find(p=>p.id==='3').offer.link,'https://shop.example/standalone-table');
+});
