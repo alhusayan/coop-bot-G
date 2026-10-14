@@ -4,6 +4,17 @@ import {productKey} from './design-picks.js';
 const clean=value=>typeof value==='string'||typeof value==='number'?String(value).replace(/\s+/g,' ').trim().slice(0,180):'';
 const kinds={color:'Colour',colour:'Colour',material:'Material',materials:'Material',dimensions:'Dimensions',size:'Size',width:'Width',height:'Height',depth:'Depth',length:'Length',diameter:'Diameter',finish:'Finish',brand:'Brand',shape:'Shape',pattern:'Pattern',configuration:'Configuration'};
 const absent=/^(?:unknown|none|null|n\/a|not specified|not stated|غير معروف|غير محدد)$/i;
+// Some store titles state measurements that were not promoted to key_specs.
+// Keep the exact written units and axis labels; do not estimate from the photo.
+export function listedDimensions(title){
+ const number=String.raw`\d+(?:[.,]\d+)?`,unit=String.raw`(?:mm|cm|m|inches|inch|in|ft|سم|مم|متر|بوصة|["″])`;
+ const part=number+String.raw`\s*(?:-\s*)?`+unit+String.raw`(?!\p{L})\.?(?:\s+[LWDH]\b)?`;
+ const repeated=new RegExp(String.raw`(?<![\p{L}\d])`+part+String.raw`\s*[x×]\s*`+part+String.raw`(?:\s*[x×]\s*`+part+')?','iu');
+ const shared=new RegExp(String.raw`(?<![\p{L}\d])`+number+String.raw`\s*[x×]\s*`+number+String.raw`(?:\s*[x×]\s*`+number+String.raw`)?\s*`+unit+String.raw`(?!\p{L})`,'iu');
+ const source=typeof title==='string'?title.slice(0,1200):'';
+ const match=source.match(repeated)||source.match(shared);
+ return match?match[0].trim():'';
+}
 export function productFacts(row={}){
  const values=new Map();
  const add=(kind,value)=>{kind=clean(kind).toLowerCase();value=clean(value);if(kinds[kind]&&value&&!absent.test(value)&&!values.has(kinds[kind]))values.set(kinds[kind],value);};
@@ -29,6 +40,7 @@ export function productFacts(row={}){
  }
  const colors=Array.isArray(candidate.colors)?candidate.colors.filter(value=>typeof value==='string'&&value.trim()&&title.includes(value.toLocaleLowerCase())):[];
  if(colors.length)add('color',colors.join(' / '));
+ if(!['Dimensions','Size','Width','Height','Depth','Length','Diameter'].some(key=>values.has(key)))add('dimensions',listedDimensions(row.card_evidence_title||row.raw_title||row.title));
  // Preserve axis labels and units; never invent an order, convert units or
  // treat image pixel dimensions as furniture measurements.
  const measured=['Dimensions','Size','Width','Height','Depth','Length','Diameter'].filter(key=>values.has(key)).map(key=>({label:key,value:values.get(key)}));

@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseHTML} from 'linkedom';
-import {productFacts,syncProductFacts} from '../public/product-facts.js';
+import {productFacts,listedDimensions,syncProductFacts} from '../public/product-facts.js';
+
+test('literal store measurements retain their stated units and do not consume pack counts or pixels',()=>{
+ assert.equal(listedDimensions('Cotton Polyfill Insert 13 in. L x 20 in. W Taupe'),'13 in. L x 20 in. W');
+ assert.equal(listedDimensions('Cotton Polyfill Insert 13 in L x 20 in W Taupe'),'13 in L x 20 in W');
+ assert.equal(listedDimensions('غطاء وسادة 45 × 45cm بيج'),'45 × 45cm');
+ assert.equal(listedDimensions('2 x 3 pcs, photo 800 x 600px, 13 ml x 20 ml'),'');
+ assert.equal(productFacts({raw_title:'Pillow 45 x 45 cm'}).find(x=>x.label==='Dimensions').value,'45 x 45 cm');
+});
 
 test('only offer evidence is used; dimensions retain their axes and units',()=>{
  const row={title:'Oak veneer console, beige',card_attributes:[{name:'color',value:'Beige'},{name:'width',value:'120 cm'},{name:'height',value:'65 cm'},{name:'material',value:'Oak veneer'}],key_specs:[{kind:'material',value:'Solid oak',source:'candidate_title'},{kind:'depth',value:'45 cm',source:'visual_inference'}],card_candidate_profile:{material:'Solid oak',dimensions:'150 x 50 cm',colors:['Beige','red']},image:{width:800,height:600},card_brand:'Example'};

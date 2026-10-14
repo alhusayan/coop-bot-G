@@ -81,3 +81,5 @@ html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-prod
 html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts .is-unspecified{color:#737b75!important;font-weight:400!important}
 html[data-findzia-spaces-results] #MainContent .fz-home[data-theme=dark] .spaces-product-facts dt,html[data-findzia-spaces-results] #MainContent .fz-home[data-theme=dark] .spaces-product-facts .is-unspecified{color:#b3bfb6!important}
 @media(max-width:400px){html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts>div{grid-template-columns:minmax(0,1fr)!important;gap:2px!important}}
+/* Native cards align children to the reading edge. Facts must span the body. */
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] :is(.spaces-product-name,.spaces-product-facts){width:100%!important;max-width:none!important;box-sizing:border-box!important;align-self:stretch!important;flex-shrink:0!important}
