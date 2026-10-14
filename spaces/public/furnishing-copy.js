@@ -58,7 +58,27 @@ const resultCopy={
  id:['Tidak ditemukan furnitur sesuai dengan ukuran dan ketersediaan terkonfirmasi.','Pratinjau memakai produk toko terverifikasi di bawah. Furnitur lain hanya inspirasi. Ukuran dan tata letak merupakan perkiraan.'],
  ms:['Tiada perabot sesuai dengan ukuran dan ketersediaan yang disahkan ditemui.','Pratonton menggunakan produk kedai yang disahkan di bawah. Perabot lain ialah inspirasi. Ukuran dan susun atur adalah anggaran.']
 };
+const incompatibleCopy={
+ en:'We found pieces with confirmed dimensions and availability, but could not verify their compatibility with this design. You can try another design.',
+ ar:'وجدنا قطعًا بمقاسات وتوفّر مؤكّدين، لكن لم نتمكّن من تأكيد توافقها مع هذا التصميم. يمكنك تجربة تصميم آخر.',
+ fr:'Des meubles aux dimensions et à la disponibilité confirmées ont été trouvés, mais leur compatibilité avec ce projet n’a pas pu être validée. Essayez un autre projet.',
+ de:'Möbel mit bestätigten Maßen und Verfügbarkeit wurden gefunden, passen aber nicht nachweislich zu diesem Entwurf. Versuchen Sie einen anderen Entwurf.',
+ es:'Encontramos muebles con medidas y disponibilidad confirmadas, pero no pudimos verificar su compatibilidad con este diseño. Prueba otro diseño.',
+ it:'Abbiamo trovato mobili con dimensioni e disponibilità confermate, ma non ne abbiamo verificato la compatibilità con questo progetto. Prova un altro progetto.',
+ pt:'Encontrámos móveis com medidas e disponibilidade confirmadas, mas não conseguimos verificar a compatibilidade com este projeto. Experimente outro projeto.',
+ nl:'We vonden meubels met bevestigde maten en beschikbaarheid, maar konden niet bevestigen dat ze bij dit ontwerp passen. Probeer een ander ontwerp.',
+ tr:'Ölçüleri ve bulunabilirliği doğrulanmış ürünler bulduk ancak bu tasarıma uygunluklarını doğrulayamadık. Başka bir tasarım deneyebilirsiniz.',
+ ru:'Найдены товары с подтверждёнными размерами и наличием, но их совместимость с этим дизайном не подтверждена. Попробуйте другой дизайн.',
+ zh:'已找到尺寸和库存均已确认的商品，但无法确认它们与此设计相配。您可以尝试其他设计。',
+ ja:'寸法と在庫が確認できる商品は見つかりましたが、このデザインとの適合性を確認できませんでした。別のデザインをお試しください。',
+ ko:'치수와 재고가 확인된 제품을 찾았지만 이 디자인과의 조화를 확인하지 못했습니다. 다른 디자인을 시도해 보세요.',
+ hi:'पुष्टि किए गए माप और उपलब्धता वाले उत्पाद मिले, लेकिन इस डिज़ाइन के साथ उनकी अनुकूलता की पुष्टि नहीं हो सकी। दूसरा डिज़ाइन आज़मा सकते हैं।',
+ ur:'تصدیق شدہ پیمائش اور دستیابی والی مصنوعات ملیں، مگر اس ڈیزائن کے ساتھ ان کی مناسبت کی تصدیق نہیں ہو سکی۔ دوسرا ڈیزائن آزما سکتے ہیں۔',
+ id:'Produk dengan ukuran dan ketersediaan terkonfirmasi ditemukan, tetapi kesesuaiannya dengan desain ini belum dapat dipastikan. Coba desain lain.',
+ ms:'Produk dengan ukuran dan ketersediaan yang disahkan ditemui, tetapi kesesuaiannya dengan reka bentuk ini tidak dapat dipastikan. Cuba reka bentuk lain.'
+};
 export function furnishingText(language,key,count){
+ if(key==='incompatible')return incompatibleCopy[language]||incompatibleCopy.en;
  const outcome=['missing','partial'].indexOf(key);
  const value=outcome>=0?(resultCopy[language]||resultCopy.en)[outcome]:measurementKeys.includes(key)?(measurements[language]||measurements.en).split('|')[measurementKeys.indexOf(key)]:(copy[language]||copy.en).split('|')[keys.indexOf(key)]||key;
  return value.replaceAll('{count}',String(count??''));

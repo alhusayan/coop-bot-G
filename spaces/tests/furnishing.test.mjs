@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import {centimetres,productDimensions,roomMeasurements,validateLayout,furnitureSlots,candidateMatchesKind} from '../room-fit.mjs';
+import {centimetres,productDimensions,roomMeasurements,validateLayout,fitFurnitureLayout,furnitureSlots,candidateMatchesKind} from '../room-fit.mjs';
 import {furnishingQuote,furnishRoom,furnishingRepairTarget} from '../furnishing.mjs';
 import {furnishingLanguages,furnishingText} from '../public/furnishing-copy.js';
-import {readFurnishingMeasurements,furnishingArea} from '../public/furnishing.js';
+import {readFurnishingMeasurements,furnishingArea,furnishingFailureKey} from '../public/furnishing.js';
 import {parseHTML} from 'linkedom';
 const f=(kind,value,label=kind)=>({kind,value,label,quote:label+': '+value,source:'merchant_page'});
 test('support recovery only targets the selected failed run once, with saved local offers',()=>{
@@ -45,6 +45,21 @@ test('floor layout checks real footprints, boundaries, openings and a 60 cm path
  assert.throws(()=>validateLayout({...layout,obstacles:[{x:120,z:20,width:50,depth:100,kind:'door'}]},products,room),/DOES_NOT_FIT/);
  assert.throws(()=>roomMeasurements({width:0,length:6}),/MEASUREMENTS/);
 });
+test('overlapping model positions are repaired without moving doors or changing product sizes',()=>{
+ const bad={...layout,placements:[layout.placements[0],{...layout.placements[1],z:30}]},before=JSON.stringify(bad);
+ const fixed=fitFurnitureLayout(bad,products,room);
+ assert.equal(fixed.positions_adjusted,true);assert.equal(fixed.placements.length,2);
+ assert.deepEqual(fixed.entry,bad.entry);assert.equal(fixed.obstacles[0].x,bad.obstacles[0].x);assert.equal(fixed.obstacles[0].w,bad.obstacles[0].width);assert.equal(JSON.stringify(bad),before);
+ assert.equal(validateLayout({...bad,placements:fixed.placements},products,room).estimated,true);
+ assert.throws(()=>fitFurnitureLayout({...bad,geometry_confidence:'low'},products,room),/UNCERTAIN/);
+ assert.throws(()=>fitFurnitureLayout(bad,[{...products[0],dimensions:{width:700,depth:700}},products[1]],room),/DOES_NOT_FIT/);
+});
+test('an appearance rejection is not described as missing dimensions or unavailable stock',()=>{
+ assert.equal(furnishingFailureKey({error:'FURNISH_PRODUCTS_INCOMPLETE',diagnostics:[{incompatible:4}]}),'incompatible');
+ assert.equal(furnishingFailureKey({error:'FURNISH_PRODUCTS_INCOMPLETE',diagnostics:[{missing_dimensions:2}]}),'missing');
+ assert.equal(furnishingFailureKey({error:'FURNITURE_DOES_NOT_FIT'}),'error');
+ for(const language of furnishingLanguages)assert.notEqual(furnishingText(language,'incompatible'),'incompatible');
+});
 test('optional sourcing is bounded, country-scoped and uses saved searches without another charge',()=>{
  const items=[{id:'1',name_en:'Sofa'},{id:'2',name_en:'Coffee table'},{id:'3',name_en:'Armchair'},{id:'4',name_en:'TV unit'},{id:'5',name_en:'Throw pillow'}];
  assert.equal(furnitureSlots(items).length,3);assert.equal(furnishingQuote({items},'KW').searches,3);
@@ -57,6 +72,10 @@ test('a desk chair cannot replace a desk, and bedding cannot replace a bed frame
  assert.equal(candidateMatchesKind('Textured throw blanket','bed'),false);
  assert.equal(candidateMatchesKind('Upholstered bed frame with storage','bed'),true);
  assert.equal(candidateMatchesKind('Kids desk chair','table'),false);
+ assert.equal(candidateMatchesKind('احصل على طاولة قهوة راقية خشبية مودرن','sofa'),false);
+ assert.equal(candidateMatchesKind('كرسي مكتب','table'),false);
+ assert.equal(candidateMatchesKind('بطانية سرير','bed'),false);
+ assert.equal(candidateMatchesKind('كنب زاوية مع وسائد','sofa'),true);
 });
 test('all supported locales include optional-flow copy and consistent search-credit placeholders',()=>{
  assert.equal(furnishingLanguages.length,17);
@@ -83,4 +102,11 @@ test('one broken merchant page does not discard another real piece; partial prev
  const items=['Sofa','Coffee table'].map((name,i)=>({id:String(i+1),name_en:name,box:[100,100,800,800],furnishing_offers:{KW:[{link:'https://shop.example/product/'+i,image:'https://shop.example/p.jpg',title:name,market_scope:'local',availability:'listed_available'}]}}));
  const result=await furnishRoom({original:bytes,concept:bytes,design:{items},room,market:'KW',owner:'test',details:{request:url=>{if(url.endsWith('/1'))throw Error('merchant unavailable');return {status:'ready',facts:[f('width','210 cm'),f('depth','90 cm')]};}},discover:()=>{throw Error('unwanted new search');},progress:()=>{}},{depth:async()=>({png:bytes,model:'test',kind:'relative_depth'}),fetchImage:async()=>({bytes}),stock:async()=>({availability:'listed_available'}),candidateReview:async()=>true,audit:async(_,offers)=>offers,generate:async(parts,options)=>options.image?image:parts[0].text.startsWith('Audit')?{room_preserved:true,scale_plausible:true,openings_clear:true,products:[{id:'1',identity_preserved:true,box:[100,100,800,800]}]}:{...layout,placements:[layout.placements[0]]}});
  assert.equal(result.products.length,1);assert.equal(result.partial,true);
+});
+
+test('the eighth saved candidate is examined without purchasing another search',async()=>{
+ const bytes=await sharp({create:{width:800,height:600,channels:3,background:'#baa995'}}).jpeg().toBuffer(),image={mimeType:'image/jpeg',data:bytes.toString('base64')},checked=[];
+ const offers=Array.from({length:8},(_,i)=>({title:'Coffee table',link:'https://shop.example/table/'+i,image:'https://shop.example/table.jpg',market_scope:'local',availability:'listed_available'}));
+ const result=await furnishRoom({original:bytes,concept:bytes,design:{items:[{id:'2',name_en:'Coffee table',box:[100,100,800,800],furnishing_offers:{SA:offers}}]},room,market:'SA',owner:'test',details:{request:url=>{checked.push(url);return {status:'ready',facts:url.endsWith('/7')?[f('width','100 cm'),f('depth','60 cm')]:[]};}},discover:()=>{throw Error('unwanted paid search');},progress:()=>{}},{depth:async()=>({png:bytes,model:'test',kind:'relative_depth'}),fetchImage:async()=>({bytes}),stock:async()=>({availability:'listed_available'}),candidateReview:async()=>true,audit:async(_,rows)=>rows,generate:async(parts,options)=>options.image?image:parts[0].text.startsWith('Audit')?{room_preserved:true,scale_plausible:true,openings_clear:true,products:[{id:'2',identity_preserved:true,box:[100,100,800,800]}]}:{...layout,placements:[layout.placements[1]]}});
+ assert.equal(checked.length,8);assert.equal(result.products[0].offer.link,offers[7].link);
 });

@@ -2,7 +2,7 @@ import sharp from 'sharp';
 import {gemini,safeImage} from './engine.mjs';
 import {originalOffer} from './findzia-engine.mjs';
 import {estimateDepth} from './depth.mjs';
-import {productDimensions,furnitureSlots,validateLayout,candidateMatchesKind,furnitureKind} from './room-fit.mjs';
+import {productDimensions,furnitureSlots,fitFurnitureLayout,candidateMatchesKind,furnitureKind} from './room-fit.mjs';
 import {auditVisual,cropPiece,pool} from './matching.mjs';
 import {checkStock} from './stock.mjs';
 
@@ -13,7 +13,7 @@ export function furnishingRepairTarget(jobs,target,version){
  const match=/^([a-f0-9]{24}):([0-2])$/.exec(target||'');
  if(!match||!version||!/^\d{1,4}$/.test(String(version)))return null;
  const job=jobs[match[1]],index=Number(match[2]),design=job?.designs?.[index],run=design?.furnishing;
- if(!job||job.owner==='demo'||!design?.image||run?.status!=='error'||run.error!=='FURNISH_PRODUCTS_INCOMPLETE'||Number(run.repair_version||0)>=Number(version)||!run.room||!run.market)return null;
+ if(!job||job.owner==='demo'||!design?.image||run?.status!=='error'||!['FURNISH_PRODUCTS_INCOMPLETE','FURNITURE_DOES_NOT_FIT'].includes(run.error)||Number(run.repair_version||0)>=Number(version)||!run.room||!run.market)return null;
  if(!furnitureSlots(design.items).some(({item})=>savedFurnitureOffers(item,run.market).length))return null;
  return {job,index,design,version:Number(version)};
 }
@@ -87,7 +87,7 @@ export async function furnishRoom({original,concept,design,room,market,owner,det
  let layout,lastError='';
  for(let attempt=0;attempt<2;attempt++){
   const proposal=await generate([{text:instructions+(lastError?' Correct the previous failed layout: '+lastError:'')},inline(original),depthImage,inline(concept)],{json:true,timeout:65000,maxTokens:3000});
-  try{layout=validateLayout(proposal,products,room);break;}catch(e){lastError=e.message;}
+  try{layout=fitFurnitureLayout(proposal,products,room);break;}catch(e){lastError=e.message;console.log('SPACES_FURNISH_LAYOUT_REJECTED',JSON.stringify({attempt,error:e.message,room:{width:room.width,length:room.length},products:productData,proposal}));}
  }
  if(!layout)throw Error(lastError||'ROOM_LAYOUT_UNCERTAIN');
  await onLayout(layout,products.map(({bytes,...p})=>p));

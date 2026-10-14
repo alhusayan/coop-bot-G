@@ -39,13 +39,13 @@ export function furnitureSlots(items=[]){
  return out.slice(0,3);
 }
 export function furnitureKind(value){
- const name=text(value).split(/\bwith\b/)[0];
- if(/\b(?:cover|throw|blanket|bedding|bedspread|pillow|cushion|duvet|mattress|rug|lamp|decor|organizer|headboard|footboard)\b|\bbed\s+(?:linen|sheet|skirt)/.test(name))return 'accessory';
- if(/sofa|sectional|settee/.test(name))return 'sofa';
- if(/\bbed\b|bedframe/.test(name)&&! /\bbedside\b/.test(name))return 'bed';
- if(/chair|stool/.test(name))return 'chair';
- if(/coffee table|dining table|writing desk|\bdesk\b/.test(name))return 'table';
- if(/tv unit|sideboard|console|cabinet|wardrobe/.test(name))return 'storage';
+ const name=text(value).replace(/[\u064b-\u065f\u0640]/g,'').split(/\bwith\b|\sمع\s/)[0];
+ if(/\b(?:cover|throw|blanket|bedding|bedspread|pillow|cushion|duvet|mattress|rug|lamp|decor|organizer|headboard|footboard)\b|\bbed\s+(?:linen|sheet|skirt)|بطاني|مفرش|مفارش|وساد|لحاف|غطاء|مرتبة|سجاد|مصباح/.test(name))return 'accessory';
+ if(/sofa|sectional|settee|كنب|أريكة|اريكة|صوفا/.test(name))return 'sofa';
+ if(/\bbed\b|bedframe|سرير/.test(name)&&! /\bbedside\b/.test(name))return 'bed';
+ if(/chair|stool|كرسي|كراسي/.test(name))return 'chair';
+ if(/coffee table|dining table|writing desk|\bdesk\b|طاول|طاوله|مكتب/.test(name))return 'table';
+ if(/tv unit|sideboard|console|cabinet|wardrobe|خزان|دولاب|بوفيه|وحدة تلفزيون/.test(name))return 'storage';
  return null;
 }
 export function candidateMatchesKind(title,kind){const actual=furnitureKind(title);return !actual||actual===kind;}
@@ -78,4 +78,41 @@ export function validateLayout(raw,products,room){
  while(queue.length){const [x,z]=queue.shift(),key=x+':'+z;if(x<0||z<0||x>=cols||z>=rows||seen.has(key)||blocked((x+.5)*step,(z+.5)*step))continue;seen.add(key);if(x>cols*.25&&x<cols*.75&&z>rows*.25&&z<rows*.75)reached=true;for(const d of [[1,0],[-1,0],[0,1],[0,-1]])queue.push([x+d[0],z+d[1]]);}
  if(!reached)throw Error('FURNITURE_DOES_NOT_FIT');
  return {placements,obstacles,entry,room,estimated:true,walkway_cm:60,margin_cm:10};
+}
+
+// Repair only furniture positions within the model's existing room geometry.
+// Doors, fixed obstacles, entry, product dimensions and confidence never change.
+export function fitFurnitureLayout(raw,products,room,{maxChecks=12000}={}){
+ try{return validateLayout(raw,products,room);}catch(e){if(e.message!=='FURNITURE_DOES_NOT_FIT')throw e;}
+ const obstacles=raw.obstacles.map(o=>({x:Number(o.x),z:Number(o.z),w:Number(o.width),d:Number(o.depth)}));
+ if(obstacles.some(o=>![o.x,o.z,o.w,o.d].every(Number.isFinite)||o.x<0||o.z<0||o.w<=0||o.d<=0||o.x+o.w>room.width+1||o.z+o.d>room.length+1))throw Error('ROOM_LAYOUT_UNCERTAIN');
+ const candidates=products.map(product=>{
+  const previous=raw.placements.find(p=>p.id===product.id),rows=[];
+  if(!previous||![previous.x,previous.z].every(Number.isFinite)||![0,90,180,270].includes(previous.rotation))throw Error('ROOM_LAYOUT_UNCERTAIN');
+  for(const rotation of [previous.rotation,(previous.rotation+90)%360]){
+   const rotated=rotation%180!==0,w=rotated?product.dimensions.depth:product.dimensions.width,d=rotated?product.dimensions.width:product.dimensions.depth;
+   const xs=[previous.x],zs=[previous.z];
+   for(let x=10;x<=room.width-w-10;x+=20)xs.push(x);
+   for(let z=10;z<=room.length-d-10;z+=20)zs.push(z);
+   for(const x of new Set(xs))for(const z of new Set(zs)){
+    const p={id:product.id,x,z,w,d,rotation};
+    if(x<10||z<10||x+w>room.width-10||z+d>room.length-10||obstacles.some(o=>overlap(o,p,10)))continue;
+    rows.push({...p,cost:Math.hypot(x-previous.x,z-previous.z)+(rotation===previous.rotation?0:40)});
+   }
+  }
+  return rows.sort((a,b)=>a.cost-b.cost);
+ });
+ let checks=0,found;const placed=[];
+ const visit=index=>{
+  if(found||checks>=maxChecks)return;
+  if(index===products.length){try{found=validateLayout({...raw,placements:placed},products,room);}catch{}return;}
+  for(const p of candidates[index]){
+   if(found||checks>=maxChecks)return;
+   checks++;
+   if(placed.some((q,i)=>overlap(q,p,products[index].kind==='table'&&products[i].kind==='sofa'||products[index].kind==='sofa'&&products[i].kind==='table'?40:20)))continue;
+   placed.push(p);visit(index+1);placed.pop();
+  }
+ };
+ visit(0);if(!found)throw Error('FURNITURE_DOES_NOT_FIT');
+ return {...found,positions_adjusted:true};
 }
