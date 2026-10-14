@@ -100,7 +100,7 @@ export function syncProductFacts(root,rows=[],translate=value=>value,details){
   if(!body||!row)continue;
   const page=details?.peek(row.url),title=clean(row.title||row.raw_title),facts=(details?displayedFacts(row,page):productFacts(row)).map(fact=>({...fact,label:translate(fact.label)||fact.label}));
   const state=details?(page?.status||'pending'):'';
-  const note=state==='pending'?'Reading store details…':state==='ready'?'From the product page':state==='partial'?'Some details could not be retrieved':state==='empty'?'No specifications found on this page':state?'Details could not be retrieved':'';
+  const note=state==='pending'?'Reading store details…':state==='ready'?(page?.retrieval==='indexed_merchant_page'?'Listed details':'From the product page'):state==='partial'?'Some details could not be retrieved':state==='empty'?'No specifications found on this page':state?'Details could not be retrieved':'';
   const missing=translate('Not listed'),label=translate('Listed details'),signature=JSON.stringify([title,facts,missing,label,translate(note),state]);
   const old=body.querySelector('.spaces-product-facts');
   if(old?.dataset.facts===signature&&body.querySelector('.spaces-product-name'))continue;

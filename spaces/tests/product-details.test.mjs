@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync,mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {pageEvidence,validateExtracted,extractPageDetails,createDetailsService,detailURL,factKind} from '../product-details.mjs';
+import {pageEvidence,validateExtracted,extractPageDetails,createDetailsService,detailURL,factKind,indexedEvidence,sameMerchantProduct} from '../product-details.mjs';
 const fixture=name=>readFileSync(new URL('./fixtures/'+name+'-specs.html',import.meta.url),'utf8');
 const darURL='https://dar-ezz.com/products/%D8%B7%D9%82%D9%85';
 const homeURL='https://www.homecentre.com/sa/ar/buy-rustic-comfort-marble-top-coffee-table/p/165438105';
@@ -73,5 +73,14 @@ test('page fetches coalesce, respect concurrency, cache across restarts and keep
 
 test('private targets are rejected and blocked pages are explicitly unavailable',async()=>{
  for(const url of ['http://store.example/products/x','https://localhost/x','https://127.0.0.1/x','https://169.254.169.254/x','https://10.1.2.3/x','https://user:password@store.example/x'])assert.throws(()=>detailURL(url));
- const service=createDetailsService({fetchPage:async()=>{throw Error('no_page')},log:()=>{}});const value=service.request(darURL,'ar','owner');await new Promise(r=>setImmediate(r));assert.equal(service.get(value.key).status,'unavailable');assert.deepEqual(service.get(value.key).facts,[]);
+ const service=createDetailsService({fetchPage:async()=>{throw Error('no_page')},lookup:null,log:()=>{}});const value=service.request(darURL,'ar','owner');await new Promise(r=>setImmediate(r));assert.equal(service.get(value.key).status,'unavailable');assert.deepEqual(service.get(value.key).facts,[]);
+});
+
+
+test('indexed fallback accepts only the exact merchant product, market and requested variant',()=>{
+ const evidence=indexedEvidence({organic:[{link:homeURL,title:'Rustic Comfort',snippet:'Width 100 cm, depth 100 cm, height 40 cm. Solid wood legs; marble top.'},{link:homeURL.replace('165438105','12345'),title:'Wrong product',snippet:'Width 55 cm'}]},homeURL);
+ assert.match(evidence.text,/100 cm/);assert.doesNotMatch(evidence.text,/55 cm/);assert.equal(evidence.retrieval,'indexed_merchant_page');
+ assert.equal(sameMerchantProduct(homeURL.replace('/sa/ar/','/kw/ar/'),homeURL),false);
+ assert.equal(sameMerchantProduct(darURL,darURL+'?variant=123'),false);
+ assert.throws(()=>indexedEvidence({organic:[{link:'https://other.example/p/165438105',snippet:'Marble'}]},homeURL));
 });
