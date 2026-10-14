@@ -33,3 +33,10 @@ test('repair is confined to one explicitly selected failed empty design and runs
  for(const [room,index] of [[id,'0'],[id,'2'],[id,''],['b'.repeat(24),'1']])assert.equal(inventoryRepairTarget(jobs,room,index),null);
  failed.inventory_repair_version=1;assert.equal(inventoryRepairTarget(jobs,id,'1'),null);
 });
+
+test('an explicitly retail-free architectural concept finishes immediately, but malformed detections still fail',async()=>{
+ let calls=0;
+ assert.deepEqual(await identifyPieces({}, {judge:async()=>{calls++;return {items:[],no_retail_items:true};}}),[]);
+ assert.equal(calls,1);
+ for(const response of [{no_retail_items:true},{items:[{name_en:'Lamp'}],no_retail_items:true}])await assert.rejects(identifyPieces({}, {judge:async()=>response}),/NO_ITEMS/);
+});

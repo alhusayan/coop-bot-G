@@ -2,7 +2,7 @@ import {gemini,sanitizeItems} from './engine.mjs';
 
 // Inventory describes pixels and crop coordinates. Search queries are not
 // required: the original Findzia engine searches the actual crop bytes.
-export const inventorySchema={type:'object',properties:{items:{type:'array',items:{type:'object',properties:{name_en:{type:'string'},description_en:{type:'string'},mode:{type:'string',enum:['ready','measure','quote','keep']},box:{type:'array',items:{type:'number'},minItems:4,maxItems:4}},required:['name_en','box']}}},required:['items']};
+export const inventorySchema={type:'object',properties:{no_retail_items:{type:'boolean'},items:{type:'array',items:{type:'object',properties:{name_en:{type:'string'},description_en:{type:'string'},mode:{type:'string',enum:['ready','measure','quote','keep']},box:{type:'array',items:{type:'number'},minItems:4,maxItems:4}},required:['name_en','box']}}},required:['items']};
 
 function rows(data){return Array.isArray(data)?data:Array.isArray(data?.items)?data.items:Array.isArray(data?.objects)?data.objects:[];}
 export function inventoryRepairTarget(jobs,room,design){
@@ -34,6 +34,9 @@ export async function identifyPieces(photo,{keep='',judge=gemini,onAttempt=()=>{
   const items=normalizeInventory(raw,{keep});
   onAttempt({attempt,shape:Array.isArray(raw)?'array':typeof raw,keys:raw&&typeof raw==='object'&&!Array.isArray(raw)?Object.keys(raw).slice(0,8):[],received:rows(raw).length,accepted:items.length});
   if(items.length)return items;
+  // A facade or landscape can be a complete design without retail objects.
+  // Invalid/missing boxes must still trigger correction, not a false empty success.
+  if(raw?.no_retail_items===true&&Array.isArray(raw.items)&&raw.items.length===0)return [];
  }
  throw Error('NO_ITEMS');
 }

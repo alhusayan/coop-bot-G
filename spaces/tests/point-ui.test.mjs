@@ -47,5 +47,12 @@ test('clean photo selection is free and opens the original layer without a Space
   assert.equal(document.querySelectorAll('.design-pick').length,1);assert.match(document.querySelector('#design-picks').textContent,/USD 99.00/);
   await vm.runInContext("saveDesignPick({key:keyFor(selected().items[0]),room:state.job.id,design:0,item:'1',readOnly:true},{url:'https://store.test/p'},true)",context);
   assert.equal(document.querySelectorAll('.design-pick').length,0);
+  job.designs[0].items=[];job.designs[0].inventory_complete=true;
+  await vm.runInContext('choose(0)',context);
+  assert.match(document.querySelector('.stage-hint').textContent,/Your design concept/);
+  assert.match(document.querySelector('#empty-items').textContent,/Your design is ready/);
+  assert.equal(document.querySelector('#empty-items .search-spinner'),null);
+  assert.equal(document.querySelector('.browse-pieces'),null);
+  assert.equal(document.querySelectorAll('.photo-touch-guide').length,0);
  }finally{for(const timer of timers)clearTimeout(timer);delete globalThis.document;delete globalThis.Image;}
 });

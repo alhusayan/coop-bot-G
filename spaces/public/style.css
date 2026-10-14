@@ -258,3 +258,8 @@ html[data-findzia-theme=dark] .piece-selection-media .piece-clear{background:#19
 .design-card .secondary[data-action="choose"]:not(:disabled):active{transform:translateY(1px)}
 .design-card .secondary[data-action="choose"]:focus-visible{outline:3px solid #779b85;outline-offset:4px}
 .design-card .secondary[data-action="choose"]:disabled{opacity:.5}
+
+/* Three clear scope choices also fit narrow phones and translated labels. */
+#design-form .segments{flex-wrap:wrap}
+#design-form .segments label{flex:1 1 110px;min-width:0}
+#design-request{line-height:1.6}
