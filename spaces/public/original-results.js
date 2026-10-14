@@ -4,7 +4,7 @@ import {productKey,hasSavedResults,savedPickImage} from './design-picks.js';
 import {reviewSimilarCards} from './similar-review.js';
 import {bindAccountNavigation,openAccountModal} from './account-navigation.js';
 import {searchBudget,SEARCH_BUDGET_MS} from './search-budget.js';
-import {syncProductFacts} from './product-facts.js';
+import {syncProductFacts,createProductDetailsLoader} from './product-facts.js';
 export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClose,onPick}){
  const sessions=new Map();let current=null,returnFocus=null;
  const layer=document.createElement('dialog');layer.className='original-results-layer';layer.setAttribute('aria-label','Findzia results');
@@ -89,7 +89,9 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(!session.root)return;
   const rows=session.root.fzRefineBridge.snapshot()?.view?.items||[];
   const review=reviewSimilarCards(session.root,rows);
-  syncProductFacts(session.root,rows,text);
+  session.details ||= createProductDetailsLoader({request,room:session.room,design:session.design,item:session.item,getLanguage,onUpdate:()=>syncPicks(session),isActive:()=>current===session&&layer.open});
+  session.details.scan(session.root);
+  syncProductFacts(session.root,rows,text,session.details);
   if(session.reviewNote){
    const visible=session.root.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
    const show=review.held>0&&!visible&&!session.busy&&!session.loading;
@@ -125,6 +127,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   session.reviewNote=root.ownerDocument.createElement('p');session.reviewNote.className='spaces-similar-note';session.reviewNote.hidden=true;session.reviewNote.setAttribute('role','status');root.querySelector('.fz-container')?.append(session.reviewNote);
   const Observer=session.frame.contentWindow.MutationObserver;
   if(Observer){session.pickObserver=new Observer(()=>syncPicks(session));session.pickObserver.observe(root.querySelector('[data-results-body]')||root,{childList:true,subtree:true});}
+  session.frame.contentWindow.addEventListener?.('scroll',()=>session.details?.scan(root),{passive:true});
   syncPicks(session);
  }
  function beginBudget(session){
@@ -228,5 +231,5 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(existing&&newSearch&&!session.busy&&!session.loading)await run(session);
  }
  return {open,close,refreshLanguage(){for(const session of sessions.values())if(session.root)syncLanguage(session);if(current)paint(current);},has:key=>sessions.has(key),busy:key=>sessions.get(key)?.busy===true,
-  destroy(){close();for(const session of sessions.values()){session.budget?.cancel();clearInterval(session.progressTimer);clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
+  destroy(){close();for(const session of sessions.values()){session.details?.destroy();session.budget?.cancel();clearInterval(session.progressTimer);clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
 }

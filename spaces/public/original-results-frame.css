@@ -83,3 +83,12 @@ html[data-findzia-spaces-results] #MainContent .fz-home[data-theme=dark] .spaces
 @media(max-width:400px){html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts>div{grid-template-columns:minmax(0,1fr)!important;gap:2px!important}}
 /* Native cards align children to the reading edge. Facts must span the body. */
 html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] :is(.spaces-product-name,.spaces-product-facts){width:100%!important;max-width:none!important;box-sizing:border-box!important;align-self:stretch!important;flex-shrink:0!important}
+/* Product-page specifications are independent of the original search stream. */
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-source{width:100%!important;box-sizing:border-box!important;margin:0 0 14px!important;font:inherit!important;font-size:11px!important;line-height:1.5!important;color:#647369!important;text-align:start!important;overflow-wrap:anywhere}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme=dark] .spaces-product-source{color:#bbc9bf!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-source[data-state=pending]::before{content:'';display:inline-block;width:10px;height:10px;margin-inline-end:6px;border:1.5px solid currentColor;border-inline-end-color:transparent;border-radius:50%;animation:spaces-facts-spin 1s linear infinite;vertical-align:-1px}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts:empty{display:none!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts>div{grid-template-columns:minmax(0,1fr)!important;gap:2px!important}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-facts dd{font-size:13px!important;line-height:1.6!important;white-space:pre-line!important}
+@keyframes spaces-facts-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .spaces-product-source[data-state=pending]::before{animation:none!important}}

@@ -17,6 +17,7 @@ import {detectRoom,roomBrief,verifyRoomFunction} from './room-function.mjs';
 import {identifyPieces,inventoryRepairTarget} from './inventory.mjs';
 import {originalPage,savedOriginalView} from './original-page.mjs';
 import {updateDesignPicks} from './public/design-picks.js';
+import {createDetailsService} from './product-details.mjs';
 
 const ROOT=fileURLToPath(new URL('.',import.meta.url));
 const DATA=resolve(process.env.SPACES_DATA_DIR||resolve(ROOT,'data'));
@@ -45,6 +46,11 @@ function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.own
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
 function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
+const productDetails=createDetailsService({directory:resolve(DATA,'product-details'),onStart:owner=>{
+ // Separate bounded enrichment allowance. Does not touch the Findzia wallet,
+ // launch another search, or read every piece in a room in the background.
+ consume(owner,'product-details',200);consume('all','product-details',2000);
+}});
 function reserveRoom(owner){
  const limit=(value,fallback)=>Number.isSafeInteger(Number(value))&&Number(value)>0?Math.min(1000,Number(value)):fallback;
  const prefix=new Date().toISOString().slice(0,10)+':',ownerKey=prefix+owner+':rooms',totalKey=prefix+'all:rooms';
@@ -185,6 +191,19 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    if(!['GET','HEAD'].includes(req.method)&&req.headers['sec-fetch-site']==='cross-site')throw error('FORBIDDEN',403);
  }
  if(path==='/api/config'&&req.method==='GET')return send(res,200,{markets:MARKETS,styles:STYLES.map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
+ const detailsPath=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/product-details(?:\/([a-f0-9]{64}))?$/);
+ if(detailsPath){
+  const j=ownerJob(detailsPath[1],owner);
+  if(req.method==='GET'&&detailsPath[2]){const value=productDetails.get(detailsPath[2]);if(!value)throw error('NOT_FOUND',404);return send(res,200,value);}
+  if(req.method==='POST'&&!detailsPath[2]){
+   const b=await body(req),d=j.designs[Number(b.design)];
+   if(!d?.items?.some(x=>String(x.id)===String(b.item)))throw error('NOT_FOUND',404);
+   if(typeof b.url!=='string'||b.url.length>4096)throw error('INVALID_INPUT');
+   let value;try{value=productDetails.request(b.url,b.language,owner);}catch(e){if(e.status)throw e;throw error('INVALID_INPUT');}
+   return send(res,value.status==='pending'?202:200,value);
+  }
+  throw error('NOT_FOUND',404);
+ }
  // Old account callbacks retain their fragment and render the Spaces shell.
  if(path==='/account'&&['GET','HEAD'].includes(req.method)){
    res.writeHead(200,{...headers,'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
