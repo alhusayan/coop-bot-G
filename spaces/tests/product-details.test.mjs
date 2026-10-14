@@ -84,3 +84,13 @@ test('indexed fallback accepts only the exact merchant product, market and reque
  assert.equal(sameMerchantProduct(darURL,darURL+'?variant=123'),false);
  assert.throws(()=>indexedEvidence({organic:[{link:'https://other.example/p/165438105',snippet:'Marble'}]},homeURL));
 });
+
+test('product description scope excludes store-wide promises and keeps quoted material context',()=>{
+ const html='<html><body><main><h1>Table</h1><div class="product__description"><p>Materials: solid oak legs and a marble top. This table measures 100 cm wide and 40 cm high.</p></div><section><h2>Made in Italy</h2><p>Store-wide promotional banner</p></section></main></body></html>';
+ const evidence=pageEvidence(html,'https://store.example/products/table');assert.match(evidence.text,/solid oak legs/);assert.doesNotMatch(evidence.text,/Made in Italy|promotional banner/);
+});
+
+test('two locales reuse one merchant retrieval while translating independently',async()=>{
+ let fetched=0,modeled=0;const service=createDetailsService({fetchPage:async url=>{fetched++;return {html:fixture('darezz'),url}},model:async()=>{modeled++;return {facts:[]}},log:()=>{}});
+ const ar=service.request(darURL,'ar','a'),en=service.request(darURL,'en','b');await new Promise(r=>setImmediate(r));assert.equal(fetched,1);assert.equal(modeled,2);assert.equal(service.get(ar.key).status,'ready');assert.equal(service.get(en.key).status,'ready');
+});

@@ -7,10 +7,11 @@ import {join} from 'node:path';
 import {safePage,gemini,serper,productPath,publicIP} from './engine.mjs';
 import net from 'node:net';
 
-export const DETAILS_VERSION=2;
+export const DETAILS_VERSION=3;
 const languages=new Set('en ar de fr it es pt tr ru ja zh ko hi ur id ms nl'.split(' '));
 const compact=v=>String(v??'').replace(/[\u200b-\u200f\u202a-\u202e]/g,'').replace(/\s+/g,' ').trim();
 const normalized=v=>compact(v).normalize('NFKC').toLocaleLowerCase().replace(/[٠-٩]/g,c=>String(c.charCodeAt(0)-1632)).replace(/[۰-۹]/g,c=>String(c.charCodeAt(0)-1776));
+const evidenceKey=v=>normalized(v).replace(/[^\p{L}\p{N}]/gu,'');
 const classifiers=[
  ['color',/colour|color|farbe|couleur|colore|cor\b|renk|цвет|颜色|顏色|色|색상|रंग|رنگ|warna|kleur|اللون|الألوان|الوان|ألوان/iu],
  ['material',/material|matière|matériau|werkstoff|stoff|malzeme|материал|材质|材質|素材|材料|소재|재질|सामग्री|مواد|bahan|materiaal|خامة|الخامات|خامات|المادة/iu],
@@ -78,7 +79,7 @@ export function pageEvidence(html,url){
   add(kind,label,display,label+' '+value);sources.push(label+' '+value);
  }
  for(const term of cleanMain.querySelectorAll('dt')){const next=term.nextElementSibling;if(next?.tagName==='DD'){const label=compact(term.textContent),value=compact(next.textContent);add(factKind(label),label,value,label+': '+value);sources.push(label+': '+value);}}
- const descriptionNodes=[...cleanMain.querySelectorAll('[itemprop="description"],[class*="description"],[id*="description"],[id*="specification"],[class*="specification"],[id*="product-details"],[class*="product-details"],.product__accordion')].filter(n=>n.textContent.length<30000);
+ const descriptionNodes=[...cleanMain.querySelectorAll('[itemprop="description"],[class*="description"],[id*="description"],[id*="specification"],[class*="specification"],[id*="product-details"],[class*="product-details"],#details-overview,.product__accordion')].filter(n=>n.textContent.length>80&&n.textContent.length<30000);
  for(const node of descriptionNodes)sources.push(blockText(node));
  const text=blockText(cleanMain);
  // Descriptive lines retain component names and axis ordering, not just regex values.
@@ -104,7 +105,8 @@ export function pageEvidence(html,url){
  }
  // Relevant sections first; a bounded page-text fallback also covers new layouts.
  const chunks=[...new Set(sources.map(x=>x.trim()).filter(Boolean))];
- const evidence=('PRODUCT: '+title+'\n'+chunks.join('\n')+'\nPAGE:\n'+text).slice(0,36000);
+ const scopedText=descriptionNodes.length?descriptionNodes.map(blockText).join('\n'):text;
+ const evidence=('PRODUCT: '+title+'\n'+chunks.join('\n')+'\nPAGE:\n'+scopedText).slice(0,36000);
  return {title,url,language:document.documentElement.lang||'',facts:facts.slice(0,32),text:evidence};
 }
 
@@ -127,8 +129,13 @@ export function sameMerchantProduct(candidate,target){
  try{
   const a=new URL(detailURL(candidate)),b=new URL(detailURL(target));
   if(a.hostname.replace(/^www\./,'')!==b.hostname.replace(/^www\./,''))return false;
-  if(b.searchParams.get('variant')&&a.searchParams.get('variant')!==b.searchParams.get('variant'))return false;
+  for(const key of b.searchParams.keys())if(JSON.stringify(a.searchParams.getAll(key).sort())!==JSON.stringify(b.searchParams.getAll(key).sort()))return false;
   if(decodeURIComponent(a.pathname).replace(/\/$/,'')===decodeURIComponent(b.pathname).replace(/\/$/,''))return true;
+  const host=b.hostname.replace(/^www\./,'');
+  if(['walmart.com','homedepot.com'].includes(host)){
+   const prefix=host==='walmart.com'?'ip':'p',pattern=new RegExp('^/'+prefix+'/(?:[^/]+/)?(\\d+)/?$');
+   const ai=a.pathname.match(pattern),bi=b.pathname.match(pattern);if(ai&&bi&&ai[1]===bi[1])return true;
+  }
   // Some merchants index both a translated slug and /buy-name/p/SKU. The SKU,
   // country and language must all agree; a different market is not evidence.
   const ac=a.pathname.match(/^\/([a-z]{2})\/([a-z]{2})\/.*\/p\/(\d+)\/?$/i),bc=b.pathname.match(/^\/([a-z]{2})\/([a-z]{2})\/.*\/p\/(\d+)\/?$/i);
@@ -151,7 +158,8 @@ export async function extractPageDetails(evidence,language,{model=gemini}={}){
   // are never overwritten by a broader claim for the whole piece.
   const facts=[...extracted];
   for(const original of evidence.facts){
-   const covered=facts.some(x=>x.kind===original.kind&&(normalized(x.quote).includes(normalized(original.quote))||normalized(original.quote).includes(normalized(x.quote))));
+   if(original.kind==='color'&&facts.some(x=>x.kind==='color'))continue;
+   const covered=facts.some(x=>x.kind===original.kind&&(evidenceKey(x.quote).includes(evidenceKey(original.quote))||evidenceKey(original.quote).includes(evidenceKey(x.quote))));
    // Axis rows may have been combined into a named Dimensions entry.
    const axisCovered=['width','height','depth','length','diameter'].includes(original.kind)&&facts.some(x=>x.kind==='dimensions'&&normalized(x.quote).includes(normalized(original.quote)));
    if(!covered&&!axisCovered&&!facts.some(x=>x.kind===original.kind&&normalized(x.value)===normalized(original.value)))facts.push(original);
@@ -163,12 +171,13 @@ export async function extractPageDetails(evidence,language,{model=gemini}={}){
 }
 
 export function createDetailsService({directory,fetchPage=safePage,model=gemini,lookup=serper,concurrency=4,onStart=()=>{},log=console.log,now=Date.now}={}){
- const cache=new Map(),pending=new Map(),queue=[];let active=0;
+ const cache=new Map(),pending=new Map(),queue=[],sourceTasks=new Map(),sources=new Map();let active=0;
  if(directory){mkdirSync(directory,{recursive:true,mode:0o700});for(const name of readdirSync(directory)){if(!/^[a-f0-9]{64}\.json$/.test(name))continue;try{const value=JSON.parse(readFileSync(join(directory,name),'utf8'));if(value.expires>now())cache.set(name.slice(0,-5),value);else rmSync(join(directory,name));}catch{}}}
  function put(key,value){cache.set(key,value);if(directory){const file=join(directory,key+'.json');writeFileSync(file+'.tmp',JSON.stringify(value),{mode:0o600});renameSync(file+'.tmp',file);}if(cache.size>2000){const [old]=cache.keys();cache.delete(old);if(directory)rmSync(join(directory,old+'.json'),{force:true});}}
- async function execute(task){
-  const start=now();let result;
-  try{
+ async function readSource(task){
+  const cached=sources.get(task.url);if(cached?.expires>now())return cached.evidence;
+  if(sourceTasks.has(task.url))return sourceTasks.get(task.url);
+  const promise=(async()=>{
    let evidence;
    try{const page=await fetchPage(task.url,{timeout:6500});evidence=pageEvidence(page.html,page.url||task.url);}
    catch(e){
@@ -177,9 +186,20 @@ export function createDetailsService({directory,fetchPage=safePage,model=gemini,
     // sent. One bounded exact-product lookup; other products are rejected.
     if(!lookup||!['no_page','timeout','page_large','not_product'].includes(e.message))throw e;
     const u=new URL(task.url),market=(u.pathname.match(/^\/(sa|kw|ae|qa|bh|om|uk|us|de|fr|it|es)\//i)?.[1]||'us').toUpperCase();
-    const query='site:'+u.hostname+decodeURIComponent(u.pathname)+' dimensions material color المقاسات الخامة اللون';
-    evidence=indexedEvidence(await lookup(query.slice(0,1500),market==='UK'?'GB':market,{lang:task.language}),task.url);
+    const sku=u.pathname.match(/(?:\/|\.)(\d{5,})(?:\.html)?\/?$/)?.[1];
+    const query='site:'+u.hostname+(sku?' "'+sku+'"':' '+decodeURIComponent(u.pathname))+' (dimensions OR material OR width OR المقاسات OR الخامات)';
+    const data=await lookup(query.slice(0,1500),market==='UK'?'GB':market,{lang:task.language});
+    log('SPACES_PRODUCT_DETAILS_INDEX',JSON.stringify({host:u.hostname,results:data?.organic?.length||0,matched:(data?.organic||[]).filter(x=>sameMerchantProduct(x.link,task.url)).length}));
+    evidence=indexedEvidence(data,task.url);
    }
+   sources.set(task.url,{evidence,expires:now()+3600000});if(sources.size>200)sources.delete(sources.keys().next().value);
+   return evidence;
+  })().finally(()=>sourceTasks.delete(task.url));sourceTasks.set(task.url,promise);return promise;
+ }
+ async function execute(task){
+  const start=now();let result;
+  try{
+   const evidence=await readSource(task);
    const extracted=await extractPageDetails(evidence,task.language,{model});
    result={...extracted,title:evidence.title,source_url:evidence.url,retrieval:evidence.retrieval||'merchant_page'};
   }catch(e){result={status:'unavailable',facts:[],source_url:task.url,reason:String(e.message).slice(0,60)};}
