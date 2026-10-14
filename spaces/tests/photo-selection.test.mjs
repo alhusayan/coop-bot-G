@@ -18,3 +18,22 @@ test('a repeated product selects its tapped occurrence without creating a second
 test('invalid detections never create an invented full-photo selection',()=>{
  assert.deepEqual(pieceViews([{id:'bad',box:[0,0,NaN,40]},{id:'flat',box:[50,50,50,60]},{id:'none'}]),[]);
 });
+
+test('overlapping desk and chair remain separate choices, excluding a background rug',async()=>{
+ const {pickPhotoCandidates}=await import('../public/hotspots.js');
+ const items=[{id:'rug',name_en:'Area rug',box:[100,100,990,990]},{id:'desk',name_en:'Desk',box:[300,200,750,850]},{id:'chair',name_en:'Desk chair',box:[450,420,800,650]}];
+ assert.deepEqual(pickPhotoCandidates(items,500,600).map(x=>x.id),['chair','desk']);
+ assert.equal(pickPhotoCandidates(items,120,900)[0].id,'rug');
+});
+
+test('visible selection patches do not select the occluded sofa through a desk and chair',async()=>{
+ const {pickPhotoCandidates}=await import('../public/hotspots.js');
+ const items=[
+  {id:'sofa',box:[300,250,650,800],selection_boxes:[[300,250,360,700]]},
+  {id:'desk',box:[350,200,700,850],selection_boxes:[[360,200,410,850],[410,250,700,350]]},
+  {id:'chair',box:[400,420,720,650],selection_boxes:[[420,430,650,630]]}
+ ];
+ assert.deepEqual(pickPhotoCandidates(items,500,500).map(x=>x.id),['chair']);
+ assert.deepEqual(pickPhotoCandidates(items,300,500).map(x=>x.id),['desk']);
+ assert.deepEqual(pickPhotoCandidates(items,500,330).map(x=>x.id),['sofa']);
+});

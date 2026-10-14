@@ -40,3 +40,28 @@ test('an explicitly retail-free architectural concept finishes immediately, but 
  assert.equal(calls,1);
  for(const response of [{no_retail_items:true},{items:[{name_en:'Lamp'}],no_retail_items:true}])await assert.rejects(identifyPieces({}, {judge:async()=>response}),/NO_ITEMS/);
 });
+
+test('visible patches are validated and clipped to the named product instead of using an adjacent object',()=>{
+ const [item]=normalizeInventory({items:[{name_en:'Desk',box:[200,200,800,800],selection_boxes:[[100,100,250,300],[300,300,500,500],[850,850,950,950],[NaN,0,1,2]]}]});
+ assert.equal(item.category,'desk');assert.deepEqual(item.selection_boxes,[[200,200,250,300],[300,300,500,500]]);
+});
+
+test('inventory review corrects a sofa box and adds its separate desk without duplicate additions',async()=>{
+ const {applyInventoryReview}=await import('../inventory.mjs');
+ const items=normalizeInventory({items:[{name_en:'Sofa',box:[300,200,700,800]},{name_en:'Desk chair',box:[400,420,700,650]}]});
+ const desk={name_en:'Desk',category:'desk',box:[350,200,700,850]};
+ const revised=applyInventoryReview(items,{corrections:[{id:'1',box:[300,250,350,750],selection_boxes:[[300,250,350,750]]}],additions:[desk,desk]});
+ assert.equal(revised.length,3);assert.deepEqual(revised[0].box,[300,250,350,750]);assert.equal(revised[1].name_en,'Desk chair');assert.equal(revised[2].name_en,'Desk');assert.equal(new Set(revised.map(x=>x.id)).size,3);
+});
+
+test('refresh keeps valid paid results and identifiers but cannot reuse a corrected wrong-object search',async()=>{
+ const {retainInventoryResults}=await import('../inventory.mjs');
+ const previous=normalizeInventory({items:[{name_en:'Sofa',box:[300,200,700,800]},{name_en:'Desk chair',box:[400,420,700,650]}]});
+ previous[0].original_view={items:[{title:'wrong crop result'}]};previous[1].original_view={items:[{title:'Chair result'}]};
+ previous[1].design_picks=[{url:'https://store.test/chair'}];
+ const next=normalizeInventory({items:[{name_en:'Sofa',box:[300,250,350,750]},{name_en:'Desk chair',box:[400,420,700,650]},{name_en:'Desk',box:[350,200,700,850]}]});
+ const result=retainInventoryResults(previous,next);
+ assert.notEqual(result[0].id,'1');assert.equal(result[0].original_view,undefined);
+ assert.equal(result[1].id,'2');assert.deepEqual(result[1].original_view,previous[1].original_view);assert.deepEqual(result[1].design_picks,previous[1].design_picks);
+ assert.equal(new Set(result.map(x=>x.id)).size,3);
+});

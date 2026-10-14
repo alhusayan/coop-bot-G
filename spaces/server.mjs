@@ -14,7 +14,7 @@ import {cropPiece,pool} from './matching.mjs';
 import {adaptPiece} from './adaptation.mjs';
 import {groupIdenticalPieces,occurrences} from './identity.mjs';
 import {detectRoom,designPrompt,verifyRoomFunction} from './room-function.mjs';
-import {identifyPieces,inventoryRepairTarget} from './inventory.mjs';
+import {identifyPieces,inventoryRepairTarget,INVENTORY_VERSION,retainInventoryResults} from './inventory.mjs';
 import {originalPage,savedOriginalView} from './original-page.mjs';
 import {updateDesignPicks} from './public/design-picks.js';
 import {createDetailsService} from './product-details.mjs';
@@ -31,7 +31,7 @@ const secret=trial||'development-only';
 const secure=process.env.NODE_ENV==='production';
 function persist(){state.revision=(state.revision||0)+1;writeFileSync(STATE+'.tmp',JSON.stringify(state),{mode:0o600});renameSync(STATE+'.tmp',STATE);}
 function cleanup(){for(const [id,j] of Object.entries(state.jobs)){if(j.owner!=='demo'&&Date.now()-j.created>86400000){delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});}}for(const k of Object.keys(state.quota)){if(!k.startsWith(new Date().toISOString().slice(0,10)))delete state.quota[k];}persist();}
-for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting'].includes(d.status)){d.status=d.image?'ready':'error';d.error='INTERRUPTED';}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
+for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting'].includes(d.status)){if(d.status==='analyzing'&&d.inventory_version!==INVENTORY_VERSION&&d.inventory_backup?.items?.length)d.items=d.inventory_backup.items;d.status=d.image?'ready':'error';d.error='INTERRUPTED';}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
 cleanup();
 for(const j of Object.values(state.jobs))if(j.measurement?.status==='analyzing'){j.measurement.status='error';j.measurement.error='INTERRUPTED';}
 setInterval(cleanup,3600000).unref();
@@ -45,7 +45,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({furnishing,...d},i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(({furnishing_offers,...x})=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({furnishing,inventory_backup,...d},i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3||d.inventory_version!==INVENTORY_VERSION,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(({furnishing_offers,...x})=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 const productDetails=createDetailsService({directory:resolve(DATA,'product-details'),onStart:owner=>{
  // Separate bounded enrichment allowance. Does not touch the Findzia wallet,
@@ -114,24 +114,30 @@ async function searchOne(j,d,item,{key,interactive,billing}){
  }catch(e){if(!item.offers?.length&&!item.alternatives?.length)Object.assign(item,saved);item.status='error';item.error=e.message;console.error('SPACES_SEARCH_ERROR',e.message);}persist();
 }
 async function identifyAndShop(j,index){
- const d=j.designs[index];d.status='analyzing';d.error=null;d.items=[];d.inventory_complete=false;d.inventory_revision=Date.now();d.matching_version=3;d.search_revision=SEARCH_REVISION;d.search_language=searchLanguage(j.options.language);d.grouping_version=0;persist();
+ const d=j.designs[index],previous=d.items||[];if(previous.length&&!d.inventory_backup)d.inventory_backup={version:d.inventory_version||1,items:previous};d.status='analyzing';d.error=null;d.items=[];d.inventory_complete=false;d.inventory_revision=Date.now();d.matching_version=3;d.search_revision=SEARCH_REVISION;d.search_language=searchLanguage(j.options.language);d.grouping_version=0;persist();
  try{
  d.items=await identifyPieces(fileImage(j,d.image),{keep:j.options.keep,onAttempt:details=>console.log('SPACES_INVENTORY_PARSE',j.id,index,JSON.stringify(details))});
- d.inventory_complete=true;
  console.log('SPACES_INVENTORY_READY',j.id,index,JSON.stringify({items:d.items.length,image:d.image}));
- const bytes=readFileSync(resolve(DATA,j.id,d.image));
- await pool(d.items,4,async item=>{try{const crop=await cropPiece(bytes,item.box);item.crop='crop-'+index+'-'+item.id+'-r'+(d.inventory_revision||Date.now())+'.jpg';writeFileSync(resolve(DATA,j.id,item.crop),crop,{mode:0o600});}catch{item.status='error';item.error='INVALID_CROP';}});
  await reconcilePieces(j,index);
+ d.items=retainInventoryResults(previous,d.items);
+ const bytes=readFileSync(resolve(DATA,j.id,d.image));
+ await pool(d.items,4,async item=>{
+  try{
+   const views=await pool(occurrences(item),3,async view=>{const crop=await cropPiece(bytes,view.box),name='crop-'+index+'-'+view.id+'-r'+d.inventory_revision+'.jpg';writeFileSync(resolve(DATA,j.id,name),crop,{mode:0o600});return {...view,crop:name};});
+   item.crop=views[0].crop;if(item.occurrences?.length)item.occurrences=views;
+  }catch{item.status='error';item.error='INVALID_CROP';}
+ });
+ d.inventory_complete=true;d.inventory_version=INVENTORY_VERSION;
  // Inventory only. Paid retrieval starts exclusively from a customer's point tap.
  d.status='ready';
- }catch(e){d.status=d.items?.length?'complete':'ready';d.error=e.message;console.error('SPACES_IDENTIFY_ERROR',j.id,index,e.message);}persist();
+ }catch(e){if(!d.items?.length)d.items=previous;d.status=d.items?.length?'complete':'ready';d.error=e.message;console.error('SPACES_IDENTIFY_ERROR',j.id,index,e.message);}persist();
 }
 async function reconcilePieces(j,index){
- const d=j.designs[index];if(d.grouping_version===1||!d.items?.length)return;
+ const d=j.designs[index];if(d.grouping_version===2||!d.items?.length)return;
  const before=d.items.length;
  try{
-   const grouped=await groupIdenticalPieces(d.items,fileImage(j,d.image));
-   d.items=grouped;d.grouping_version=1;
+   const grouped=await groupIdenticalPieces(d.items,fileImage(j,d.image),{keep:j.options.keep});
+   d.items=grouped;d.grouping_version=2;
    for(const item of grouped.filter(x=>x.identity_verified))console.log('SPACES_IDENTICAL_GROUP',j.id,index,JSON.stringify({ids:item.grouped_ids,quantity:item.quantity,views:occurrences(item).length,matches:item.offers.length,options:item.alternatives.length,top:item.alternatives[0]?.title,score:item.alternatives[0]?.visual_score}));
    console.log('SPACES_GROUPING_DONE',j.id,index,JSON.stringify({before,after:d.items.length}));
  }catch(e){console.log('SPACES_GROUPING_UNAVAILABLE',j.id,index,e.message);}
@@ -152,7 +158,7 @@ async function replacePiece(j,index,item,offer){
    const name='design-'+index+'-r'+revision+(result.mimeType==='image/jpeg'?'.jpg':'.png');
    writeFileSync(resolve(DATA,j.id,name),result.output,{mode:0o600});
    const updates=await pool(d.items,4,async piece=>{
-     const views=await pool(occurrences(piece),3,async(v,k)=>{const box=piece.id===item.id?result.boxes[k]:v.box,crop=await cropPiece(result.output,box),file='crop-'+index+'-'+v.id+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,file),crop,{mode:0o600});return {...v,box,crop:file};});
+     const views=await pool(occurrences(piece),3,async(v,k)=>{const box=piece.id===item.id?result.boxes[k]:v.box,crop=await cropPiece(result.output,box),file='crop-'+index+'-'+v.id+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,file),crop,{mode:0o600});return {...v,box,crop:file,...(piece.id===item.id?{selection_boxes:[]}: {})};});
      return {piece,box:views[0].box,crop:views[0].crop,occurrences:views};
    });
    // Publish all copies of a repeated product in one atomic update.
@@ -176,7 +182,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
-  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.10.0',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.10.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -259,8 +265,8 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      if(action==='select'){
        j.selected_design=i;
        if(!d.image)throw error('DESIGN_NOT_READY',409);
-       if(!['analyzing','adapting'].includes(d.status)&&((!d.items.length&&!d.inventory_complete)||d.matching_version!==3)&&!tasks.has('shop:'+id+':'+i)){
-         consume(owner,'select',12);d.status='analyzing';d.items=[];persist();launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));
+       if(!['analyzing','adapting'].includes(d.status)&&!d.items.some(item=>item.status==='searching')&&((!d.items.length&&!d.inventory_complete)||d.matching_version!==3||d.inventory_version!==INVENTORY_VERSION)&&!tasks.has('shop:'+id+':'+i)){
+         consume(owner,'select',12);d.status='analyzing';persist();launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));
        }
        // Opening a design, changing language, or polling never starts retrieval.
        return send(res,202,publicJob(j));
@@ -337,7 +343,7 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.9.0');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.10.1');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
 

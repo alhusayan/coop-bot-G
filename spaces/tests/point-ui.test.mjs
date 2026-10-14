@@ -6,7 +6,7 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {parseHTML} from 'linkedom';
-import {pieceViews,pickPhotoPiece} from '../public/hotspots.js';
+import {pieceViews,pickPhotoCandidates} from '../public/hotspots.js';
 import {createLocalCatalog} from '../public/local-catalog.js';
 import {request} from '../public/request.js';
 import {patchHTML,updateImage,pieceActivity} from '../public/live-view.js';
@@ -22,7 +22,7 @@ test('clean photo selection is free and opens the original layer without a Space
  document.querySelector('.fz-home').fzBilling={authorizePiece:async()=>{authorizations++;},refresh(){}};
  const fetch=async(path,options={})=>{if(path==='/api/config')return Response.json({markets:{US:{currency:'USD',en:'United States',flag:'US'},KW:{currency:'KWD',en:'Kuwait',flag:'KW'}},demo:job.id});if(/\/(focus|search)\//.test(path))searches++;return Response.json(structuredClone(job));};
  globalThis.fetch=fetch;const storage={getItem:()=>null,setItem:()=>{}};
- const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoPiece,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
+ const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
  try{
   vm.runInContext(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),context);
   vm.runInContext("state.market='US'",context);await vm.runInContext('demo()',context);await vm.runInContext('choose(0)',context);
@@ -47,6 +47,13 @@ test('clean photo selection is free and opens the original layer without a Space
   assert.equal(document.querySelectorAll('.design-pick').length,1);assert.match(document.querySelector('#design-picks').textContent,/USD 99.00/);
   await vm.runInContext("saveDesignPick({key:keyFor(selected().items[0]),room:state.job.id,design:0,item:'1',readOnly:true},{url:'https://store.test/p'},true)",context);
   assert.equal(document.querySelectorAll('.design-pick').length,0);
+  job.designs[0].items.push({id:'2',name_en:'Desk',box:[100,100,900,900],status:'idle',offers:[],alternatives:[]});
+  await vm.runInContext('choose(0)',context);
+  vm.runInContext('pickFromPhoto({detail:1,clientX:195,clientY:146},document.querySelector(".photo-pick-target"))',context);
+  assert.equal(dialog.open,true);assert.equal(document.querySelectorAll('.piece-picker-row').length,2);
+  assert.equal(searches,0);assert.equal(authorizations,0);
+  vm.runInContext("selectPiece('2')",context);
+  assert.equal(dialog.open,false);assert.match(document.querySelector('#piece-feedback').textContent,/Desk/);
   job.designs[0].items=[];job.designs[0].inventory_complete=true;
   await vm.runInContext('choose(0)',context);
   assert.match(document.querySelector('.stage-hint').textContent,/Your design concept/);

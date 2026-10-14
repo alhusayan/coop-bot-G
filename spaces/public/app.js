@@ -2,7 +2,7 @@ import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
 import {createOriginalLayer} from './original-results.js';
 import {mountFindzia} from './findzia-shell.js';
-import {pieceViews,pickPhotoPiece} from './hotspots.js';
+import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
@@ -132,12 +132,13 @@ function selectPiece(id,marker){
 function pickFromPhoto(event,button){
  if(event.detail===0)return browsePieces();
  const rect=button.getBoundingClientRect();if(!rect.width||!rect.height)return;
- const hit=pickPhotoPiece(selected()?.items||[],(event.clientX-rect.left)/rect.width*1000,(event.clientY-rect.top)/rect.height*1000);
- if(hit)selectPiece(hit.id,hit.marker);else toast(translate('Tap closer to a piece, or choose from All pieces.','اضغط بالقرب من القطعة، أو اخترها من «جميع القطع».'));
+ const hits=pickPhotoCandidates(selected()?.items||[],(event.clientX-rect.left)/rect.width*1000,(event.clientY-rect.top)/rect.height*1000);
+ if(hits.length>1)return browsePieces(hits);
+ const hit=hits[0];if(hit)selectPiece(hit.id,hit.marker);else toast(translate('Tap closer to a piece, or choose from All pieces.','اضغط بالقرب من القطعة، أو اخترها من «جميع القطع».'));
 }
-function browsePieces(){
- const items=selected()?.items||[];
- showSheet(`<div class="sheet-body"><h2>${esc(translate('Pieces in your room','قطع غرفتك'))}</h2><p class="pieces-note">${esc(translate('Choose a piece to see it in your room.','اختر قطعة لتحديد موقعها في الصورة.'))}</p><div class="piece-picker-list">${items.map(item=>`<button class="piece-picker-row" data-action="select-piece" data-id="${item.id}"><img src="${esc(item.crop||selected().image)}" alt="" loading="lazy"><span><strong>${esc(item.name_en)}</strong><small>${esc(pieceBusy(item)?searchCopy(item):resultView(item)?translate('Saved options','خيارات محفوظة'):translate('Select piece','اختيار القطعة'))}</small></span>${icon('forward',true)}</button>`).join('')}</div></div>`,'pieces');
+function browsePieces(candidates=null){
+ const all=selected()?.items||[],items=candidates?candidates.map(hit=>{const item=all.find(x=>x.id===hit.id),view=item?.occurrences?.find(v=>String(v.id)===hit.marker);return item?{...item,marker:hit.marker,crop:view?.crop||item.crop}:null;}).filter(Boolean):all;
+ showSheet(`<div class="sheet-body"><h2>${esc(translate('Pieces in your room','قطع غرفتك'))}</h2><p class="pieces-note">${esc(translate('Choose a piece to see it in your room.','اختر قطعة لتحديد موقعها في الصورة.'))}</p><div class="piece-picker-list">${items.map(item=>`<button class="piece-picker-row" data-action="select-piece" data-id="${item.id}" data-marker="${esc(item.marker||item.id)}"><img src="${esc(item.crop||selected().image)}" alt="" loading="lazy"><span><strong>${esc(item.name_en)}</strong><small>${esc(pieceBusy(item)?searchCopy(item):resultView(item)?translate('Saved options','خيارات محفوظة'):translate('Select piece','اختيار القطعة'))}</small></span>${icon('forward',true)}</button>`).join('')}</div></div>`,'pieces');
 }
 function renderShop(){
  const d=selected();if(!d)return;
@@ -235,7 +236,7 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'compare':state.compare=!state.compare;renderShop();break;
  case 'photo-pick':pickFromPhoto(e,el);break;
  case 'pieces':browsePieces();break;
- case 'select-piece':selectPiece(id);break;
+ case 'select-piece':selectPiece(id,el.dataset.marker);break;
  case 'clear-piece':pointFocus=null;renderShop();break;
  case 'start-piece':await openItem(id);break;
  case 'item':openItem(id);break;
@@ -272,7 +273,7 @@ init().then(async allowed=>{
  if(!saved||Date.now()-saved.at>86400000||!state.config.markets[saved.market])return;
  state.market=saved.market;marketChosen=true;syncMarket();shell?.setMarketLanguage();
  if(!/^[a-f0-9]{24}$/.test(saved.job||''))return;
- try{const token=roomContext.capture(),job=await api('/api/jobs/'+saved.job);if(!applyJob(job,token))return;state.design=Math.max(0,Math.min(job.designs.length-1,Number(saved.design)||0));view(saved.view==='shopping'?'shopping':'designs');if(active())poll();}catch{toast('Your room is no longer available.');}
+ try{const token=roomContext.capture(),job=await api('/api/jobs/'+saved.job);if(!applyJob(job,token))return;state.design=Math.max(0,Math.min(job.designs.length-1,Number(saved.design)||0));if(saved.view==='shopping'&&job.designs[state.design].needs_rescan)await choose(state.design);else{view(saved.view==='shopping'?'shopping':'designs');if(active())poll();}}catch{toast('Your room is no longer available.');}
 });
 
 

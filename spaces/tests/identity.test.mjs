@@ -35,3 +35,15 @@ test('visual grouping requires the room evidence as well as the item inventory',
 });
 
 test('legacy pair quantity is not counted again when both physical copies have their own boxes',()=>{const [merged]=mergeIdentityGroups([{...chairs[0],quantity:2},chairs[1]],verdict);assert.equal(merged.quantity,2);assert.equal(merged.occurrences.length,2);});
+
+
+test('a high-confidence model verdict cannot merge a desk chair with an armchair',()=>{
+ const rows=[{...chairs[0],name_en:'Desk chair',category:'desk_chair'},{...chairs[1],name_en:'Armchair',category:'armchair'}];
+ assert.equal(mergeIdentityGroups(rows,verdict).length,2);
+});
+
+test('the same review repairs wrong boxes before identity grouping and never merges corrected IDs',async()=>{
+ const rows=[{...chairs[0],name_en:'Sofa',box:[300,200,700,800]},{...chairs[1],name_en:'Desk Chair',box:[400,420,700,650]}];
+ const result=await groupIdenticalPieces(rows,{}, {judge:async()=>({corrections:[{id:'1',name_en:'Sofa',category:'sofa',box:[300,250,350,750],selection_boxes:[[300,250,350,750]]}],additions:[{name_en:'Desk',category:'desk',box:[350,200,700,850]}],groups:verdict.groups})});
+ assert.equal(result.length,3);assert.deepEqual(result[0].box,[300,250,350,750]);assert.equal(result[2].name_en,'Desk');
+});
