@@ -33,11 +33,22 @@ export function productDimensions(facts=[]){
  return {width:result.width,depth:result.depth,height:result.height||null,unit:'cm',evidence:[...new Set(evidence)]};
 }
 export function furnitureSlots(items=[]){
- const kinds=[['sofa',/sofa|sectional|settee/],['bed',/\bbed\b/],['table',/coffee table|dining table|writing desk|\bdesk\b/],['chair',/armchair|accent chair|lounge chair/],['storage',/tv unit|sideboard|console|cabinet/]];
+ const kinds=['sofa','bed','table','chair','storage'];
  const seen=new Set(),out=[];
- for(const [kind,pattern] of kinds){const item=items.find(x=>x.mode!=='keep'&&x.status!=='kept'&&pattern.test(text(x.name_en))&&!seen.has(x.id));if(item){seen.add(item.id);out.push({item,kind});}}
+ for(const kind of kinds){const item=items.find(x=>x.mode!=='keep'&&x.status!=='kept'&&furnitureKind(x.name_en)===kind&&!seen.has(x.id));if(item){seen.add(item.id);out.push({item,kind});}}
  return out.slice(0,3);
 }
+export function furnitureKind(value){
+ const name=text(value).split(/\bwith\b/)[0];
+ if(/\b(?:cover|throw|blanket|bedding|bedspread|pillow|cushion|duvet|mattress|rug|lamp|decor|organizer|headboard|footboard)\b|\bbed\s+(?:linen|sheet|skirt)/.test(name))return 'accessory';
+ if(/sofa|sectional|settee/.test(name))return 'sofa';
+ if(/\bbed\b|bedframe/.test(name)&&! /\bbedside\b/.test(name))return 'bed';
+ if(/chair|stool/.test(name))return 'chair';
+ if(/coffee table|dining table|writing desk|\bdesk\b/.test(name))return 'table';
+ if(/tv unit|sideboard|console|cabinet|wardrobe/.test(name))return 'storage';
+ return null;
+}
+export function candidateMatchesKind(title,kind){const actual=furnitureKind(title);return !actual||actual===kind;}
 export function roomMeasurements(raw){
  const width=Number(raw.width),length=Number(raw.length);
  if(![width,length].every(n=>Number.isFinite(n)&&n>=1.5&&n<=15))throw Error('ROOM_MEASUREMENTS_REQUIRED');

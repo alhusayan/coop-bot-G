@@ -39,4 +39,27 @@ const measurements={
  id:'Luas berdasarkan ukuran Anda|Masukkan kedua ukuran dalam meter, antara 1,5 dan 15.|Lihat analisis kedalaman AI|AI mengenali permukaan yang dekat dan jauh. Ukuran dalam meter berasal dari dimensi yang Anda masukkan, bukan dari gambar kedalaman ini.|Perkiraan tata letak furnitur',
  ms:'Luas berdasarkan ukuran anda|Masukkan kedua-dua ukuran dalam meter, antara 1.5 hingga 15.|Lihat analisis kedalaman AI|AI mengenal pasti permukaan dekat dan jauh. Ukuran dalam meter berasal daripada dimensi yang anda masukkan, bukan imej kedalaman ini.|Anggaran susun atur perabot'
 };
-export function furnishingText(language,key,count){const value=measurementKeys.includes(key)?(measurements[language]||measurements.en).split('|')[measurementKeys.indexOf(key)]:(copy[language]||copy.en).split('|')[keys.indexOf(key)]||key;return value.replaceAll('{count}',String(count??''));}
+const resultCopy={
+ en:['No suitable store furniture with confirmed dimensions and availability was found.','Preview using the verified store pieces listed below. Other furniture is inspiration. Measurements and fit are approximate.'],
+ ar:['لم نعثر على أثاث مناسب بمقاسات وتوفّر مؤكّدين لدى المتاجر.','التصور مبني على قطع المتاجر الموثقة أدناه. بقية الأثاث للاستلهام، والمقاسات والتوزيع تقريبيان.'],
+ fr:['Aucun meuble adapté avec dimensions et disponibilité confirmées n’a été trouvé.','Aperçu avec les meubles vérifiés ci-dessous. Les autres meubles sont une inspiration. Dimensions et disposition approximatives.'],
+ de:['Keine passenden Möbel mit bestätigten Maßen und Verfügbarkeit gefunden.','Vorschau mit den unten geprüften Möbeln. Weitere Möbel dienen als Inspiration. Maße und Platzierung sind ungefähr.'],
+ es:['No se encontraron muebles adecuados con medidas y disponibilidad confirmadas.','Vista previa con los muebles verificados de abajo. El resto sirve de inspiración. Medidas y distribución aproximadas.'],
+ it:['Nessun mobile adatto con dimensioni e disponibilità confermate.','Anteprima con i mobili verificati elencati sotto. Gli altri sono d’ispirazione. Misure e disposizione approssimative.'],
+ pt:['Não foram encontrados móveis adequados com medidas e disponibilidade confirmadas.','Prévia com os móveis verificados abaixo. Os demais servem de inspiração. Medidas e disposição aproximadas.'],
+ nl:['Geen geschikte meubels met bevestigde maten en beschikbaarheid gevonden.','Voorbeeld met de gecontroleerde meubels hieronder. Overige meubels zijn inspiratie. Maten en plaatsing zijn bij benadering.'],
+ tr:['Ölçüleri ve bulunabilirliği doğrulanmış uygun mobilya bulunamadı.','Aşağıdaki doğrulanmış mağaza ürünleriyle önizleme. Diğer mobilyalar fikir amaçlıdır. Ölçüler ve yerleşim yaklaşıktır.'],
+ ru:['Подходящая мебель с подтверждёнными размерами и наличием не найдена.','Предпросмотр с проверенными товарами ниже. Остальная мебель — для вдохновения. Размеры и расстановка приблизительные.'],
+ zh:['未找到尺寸和库存均已确认的合适家具。','预览采用下方已核实的商店商品。其他家具仅供灵感参考，尺寸与布局均为估算。'],
+ ja:['寸法と在庫が確認できる適切な家具が見つかりませんでした。','下記の確認済み商品を使ったイメージです。他の家具は参考です。寸法と配置は概算です。'],
+ ko:['치수와 재고가 확인된 적합한 가구를 찾지 못했습니다.','아래 확인된 매장 상품으로 만든 미리보기입니다. 다른 가구는 참고용이며 치수와 배치는 대략적입니다.'],
+ hi:['पुष्टि किए गए माप और उपलब्धता वाला उपयुक्त फ़र्नीचर नहीं मिला।','नीचे दिए गए सत्यापित उत्पादों का पूर्वावलोकन। अन्य फ़र्नीचर प्रेरणा के लिए है। माप और व्यवस्था अनुमानित हैं।'],
+ ur:['تصدیق شدہ پیمائش اور دستیابی والا مناسب فرنیچر نہیں ملا۔','نیچے درج تصدیق شدہ مصنوعات کا پیش منظر۔ باقی فرنیچر صرف ترغیب کے لیے ہے۔ پیمائش اور ترتیب اندازاً ہیں۔'],
+ id:['Tidak ditemukan furnitur sesuai dengan ukuran dan ketersediaan terkonfirmasi.','Pratinjau memakai produk toko terverifikasi di bawah. Furnitur lain hanya inspirasi. Ukuran dan tata letak merupakan perkiraan.'],
+ ms:['Tiada perabot sesuai dengan ukuran dan ketersediaan yang disahkan ditemui.','Pratonton menggunakan produk kedai yang disahkan di bawah. Perabot lain ialah inspirasi. Ukuran dan susun atur adalah anggaran.']
+};
+export function furnishingText(language,key,count){
+ const outcome=['missing','partial'].indexOf(key);
+ const value=outcome>=0?(resultCopy[language]||resultCopy.en)[outcome]:measurementKeys.includes(key)?(measurements[language]||measurements.en).split('|')[measurementKeys.indexOf(key)]:(copy[language]||copy.en).split('|')[keys.indexOf(key)]||key;
+ return value.replaceAll('{count}',String(count??''));
+}

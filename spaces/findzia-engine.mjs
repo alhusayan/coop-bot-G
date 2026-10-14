@@ -29,8 +29,14 @@ export function closeVisualDecision(row,group){
  return {ok:true,reason:'original_visual_review'};
 }
 
-function adaptOffer({row,money,images,group,key,priceAtStore},market){
- const decision=closeVisualDecision(row,group);
+export function furnishingDecision(row){
+ if(row.hidden||row.photo_match_status==='rejected'||row.alternative_visual_status==='rejected')return {ok:false,reason:'rejected'};
+ if(row.classification_final!==true||row.identity_review_status!=='completed')return {ok:false,reason:'visual_review_pending'};
+ if(row.visual_axes?.category!=='same'||!row.audited_media_path&&!row.audited_image)return {ok:false,reason:'visual_evidence_missing'};
+ return {ok:true,reason:'furnishing_candidate'};
+}
+function adaptOffer({row,money,images,group,key,priceAtStore},market,{purpose='matching'}={}){
+ const decision=purpose==='furnishing'?furnishingDecision(row):closeVisualDecision(row,group);
  if(!decision.ok)return null;
  const link=safeUrl(row.url),image=images.map(safeUrl).find(Boolean);
  if(!link||!image)return null;
@@ -47,12 +53,12 @@ function adaptOffer({row,money,images,group,key,priceAtStore},market){
   stock_evidence:row.stock_evidence||'findzia_original',stock_checked_at:row.stock_checked_at||new Date().toISOString(),
   evidence:row.price_source||'findzia_original',match_reason:clean(row.match_reason||row.identity_reason),differences:row.differences||[]};
 }
-export function originalOffer(row,market){const client=createFindziaClient(market);client.accept({event:'result',item:row});const entry=client.rows()[0];return entry?adaptOffer(entry,market):null;}
+export function originalOffer(row,market,options){const client=createFindziaClient(market);client.accept({event:'result',item:row});const entry=client.rows()[0];return entry?adaptOffer(entry,market,options):null;}
 
-export function createOriginalResults(market,onProgress=()=>{}){
+export function createOriginalResults(market,onProgress=()=>{},options={}){
  const client=createFindziaClient(market);let complete=false,failed=false;
- function snapshot(){return client.rows().map(entry=>adaptOffer(entry,market)).filter(Boolean);}
- function diagnostics(){const entries=client.rows(),hidden={};for(const entry of entries){const d=closeVisualDecision(entry.row,entry.group);if(!d.ok)hidden[d.reason]=(hidden[d.reason]||0)+1;else if(!entry.images.length)hidden.image_unavailable=(hidden.image_unavailable||0)+1;}
+ function snapshot(){return client.rows().map(entry=>adaptOffer(entry,market,options)).filter(Boolean);}
+ function diagnostics(){const entries=client.rows(),hidden={};for(const entry of entries){const d=options.purpose==='furnishing'?furnishingDecision(entry.row):closeVisualDecision(entry.row,entry.group);if(!d.ok)hidden[d.reason]=(hidden[d.reason]||0)+1;else if(!entry.images.length)hidden.image_unavailable=(hidden.image_unavailable||0)+1;}
   return {original_candidates:entries.length,original_with_images:entries.filter(x=>x.images.length).length,displayed:snapshot().length,held:hidden};}
  return {get complete(){return complete;},get failed(){return failed;},snapshot,diagnostics,
   accept(event){
@@ -65,7 +71,7 @@ export function createOriginalResults(market,onProgress=()=>{}){
  };
 }
 
-export async function searchOriginalPiece(bytes,market,{room,language='en',taskKey=randomBytes(8).toString('hex'),interactive=false,billing,env=process.env,fetcher=fetch,onProgress=()=>{}}={}){
+export async function searchOriginalPiece(bytes,market,{room,language='en',purpose='matching',taskKey=randomBytes(8).toString('hex'),interactive=false,billing,env=process.env,fetcher=fetch,onProgress=()=>{}}={}){
  if(!MARKETS[market]||!Buffer.isBuffer(bytes)||!bytes.length||!(/^[a-f0-9]{24}$/).test(room||''))throw Error('INVALID_INPUT');
  const secret=env.FINDZIA_SPACES_ENGINE_KEY;if(!secret||secret.length<32)throw Error('ENGINE_UNAVAILABLE');
  return scheduler.run(taskKey,async({queue_ms})=>{
@@ -75,7 +81,7 @@ export async function searchOriginalPiece(bytes,market,{room,language='en',taskK
   const results=createOriginalResults(market,update=>{
    if(update.alternatives.length&&timing.first_verified_ms===null){timing.first_verified_ms=Date.now()-started;timing.provider_first_verified_ms=providerElapsed;}
    onProgress({...update,search_timing:{...timing}});
-  });
+  },{purpose});
   const accept=event=>{providerElapsed=event.elapsed_ms??providerElapsed;results.accept(event);};
   const body=JSON.stringify({image_base64:bytes.toString('base64'),mime_type:'image/jpeg',country:market,lang:language,spaces_room:room});
   const stamp=String(Math.floor(Date.now()/1000)),nonce=randomBytes(16).toString('hex');

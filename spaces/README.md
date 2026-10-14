@@ -4,6 +4,30 @@ English, touch-first private-invite experimental room redesign and shopping app.
 
 ## Deployment
 
+### 0.7.4 — calibrated AI area and furnishing recovery
+
+The optional **AI measurements** action runs Depth Anything V2 Metric Indoor
+Small (fixed Kornia ONNX export, SHA-256 checked) on the original photograph.
+The visitor confirms three visible floor corners in an L and supplies only the
+real length of the first edge. The second edge and area are calculated from the
+metric depth field and that reference. Results are approximate, use assumed
+camera intrinsics, and cover only the selected visible rectangle. Poor edge
+samples, nonrectangular geometry and strong focal-length sensitivity are
+rejected. No measured error percentage has been established. The estimate
+prefills the optional furnishing form; manually edited values become customer
+measurements. Calibration points remain attached to the layout so a partial
+floor area is not treated as the whole room.
+
+Furnishing excludes accessories and distinguishes a desk from a desk chair.
+It can source a compatible real product with different legs or silhouette; the
+ordinary close-match search policy is unchanged. Merchant dimensions, stock,
+function and style are still checked, followed by verification of the generated
+preview against the actual product photos. Up to six existing candidate pages
+per piece are inspected with bounded concurrency. A partial selection is labelled
+explicitly; unlisted furniture is inspiration. Saved searches retain their
+market scope and no additional search is silently charged. A failed candidate
+cannot abort the other pieces. All new UI copy is available in 17 languages.
+
 ### Optional design and furnishing trial
 
 The existing three-concept flow is unchanged. A separate **Design & furnish**
