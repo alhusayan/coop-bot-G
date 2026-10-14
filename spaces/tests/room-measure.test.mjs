@@ -30,7 +30,7 @@ test('no hidden room corners are fabricated when vision cannot see the boundarie
  const result=await suggestMeasurementPoints(Buffer.from('image'),{generate:async()=>({points:[]})});assert.deepEqual(result,[]);
 });
 test('measurement instructions are present in all supported languages',()=>{
- for(const lang of furnishingLanguages)for(const key of ['title','intro','reference','loading','calculate','use','reset','note','problem','unavailable','area'])assert.notEqual(measurementText(lang,key),key);
+ for(const lang of furnishingLanguages)for(const key of ['title','intro','reference','loading','calculate','use','reset','note','problem','unavailable','area','ready'])assert.notEqual(measurementText(lang,key),key);
 });
 
 test('measurement UI sends one reference, applies server dimensions, and ignores a stale calculation after editing',async()=>{

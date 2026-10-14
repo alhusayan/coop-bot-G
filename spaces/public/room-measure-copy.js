@@ -18,4 +18,23 @@ const copy={
  id:'Pengukuran AI|Tandai tiga sudut lantai yang terlihat secara berurutan membentuk L. Masukkan jarak sebenarnya dari 1 ke 2.|Jarak 1–2 (m)|Menganalisis kedalaman foto…|Perkirakan ukuran|Gunakan ukuran ini|Atur ulang titik|Perkiraan yang dikalibrasi dengan acuan Anda. Area tersembunyi tidak diukur. Periksa ukuran sebelum membeli.|Pilih tiga sudut lantai yang jelas membentuk L dan masukkan jarak terukur dari 1 ke 2.|Analisis kedalaman belum tersedia. Anda dapat memasukkan ukuran secara manual.|Perkiraan luas yang terlihat',
  ms:'Pengukuran AI|Tandakan tiga penjuru lantai yang kelihatan secara berturutan membentuk L. Masukkan jarak sebenar dari 1 ke 2.|Jarak 1–2 (m)|Menganalisis kedalaman foto…|Anggarkan ukuran|Gunakan ukuran ini|Tetapkan semula titik|Anggaran ditentukur dengan ukuran rujukan anda. Kawasan tersembunyi tidak diukur. Sahkan ukuran sebelum membeli.|Pilih tiga penjuru lantai yang jelas membentuk L dan masukkan jarak yang diukur dari 1 ke 2.|Analisis kedalaman tidak tersedia. Anda boleh memasukkan ukuran secara manual.|Anggaran kawasan yang kelihatan'
 };
-export function measurementText(lang,key){return (copy[lang]||copy.en).split('|')[keys.indexOf(key)]||key;}
+const ready={
+ en:'Depth analysis is ready. Check the three points and enter the reference distance.',
+ ar:'تحليل العمق جاهز. حدّد النقاط الثلاث أو راجعها، ثم أدخل المسافة المرجعية.',
+ fr:'Analyse de profondeur terminée. Vérifiez les trois points et saisissez la distance de référence.',
+ de:'Tiefenanalyse fertig. Prüfen Sie die drei Punkte und geben Sie den Referenzabstand ein.',
+ es:'Análisis de profundidad listo. Revisa los tres puntos e introduce la distancia de referencia.',
+ it:'Analisi della profondità pronta. Controlla i tre punti e inserisci la distanza di riferimento.',
+ pt:'Análise de profundidade pronta. Confirme os três pontos e introduza a distância de referência.',
+ nl:'Diepteanalyse gereed. Controleer de drie punten en vul de referentieafstand in.',
+ tr:'Derinlik analizi hazır. Üç noktayı kontrol edin ve referans mesafeyi girin.',
+ ru:'Анализ глубины завершён. Проверьте три точки и введите опорное расстояние.',
+ zh:'深度分析完成。请确认三个点并输入参考距离。',
+ ja:'奥行きの解析が完了しました。3つの点を確認し、基準距離を入力してください。',
+ ko:'깊이 분석이 완료되었습니다. 세 점을 확인하고 기준 거리를 입력하세요.',
+ hi:'गहराई का विश्लेषण तैयार है। तीन बिंदु जाँचें और संदर्भ दूरी दर्ज करें।',
+ ur:'گہرائی کا تجزیہ مکمل ہے۔ تین نقاط کی جانچ کریں اور حوالہ فاصلہ درج کریں۔',
+ id:'Analisis kedalaman selesai. Periksa tiga titik dan masukkan jarak acuan.',
+ ms:'Analisis kedalaman siap. Semak tiga titik dan masukkan jarak rujukan.'
+};
+export function measurementText(lang,key){return key==='ready'?(ready[lang]||ready.en):(copy[lang]||copy.en).split('|')[keys.indexOf(key)]||key;}

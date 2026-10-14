@@ -1,4 +1,5 @@
 import {measurementText} from './room-measure-copy.js';
+import {furnishingText} from './furnishing-copy.js';
 export function createRoomMeasure({context,language,api,showSheet,escape:esc,safe,onUse}){
  let epoch=0;
  return async function openMeasurement(){
@@ -41,7 +42,9 @@ export function createRoomMeasure({context,language,api,showSheet,escape:esc,saf
    if(state.status!=='ready')throw Error('MEASUREMENT_UNAVAILABLE');
    if(!points.length){points=state.result?.points?.map(p=>[...p])||state.points||[];active=Math.min(points.length,2);}
    if(state.result?.reference_m)input.value=state.result.reference_m;
-   status.textContent='';refresh();
+   status.textContent=t('ready');
+   if(state.image){const map=document.createElement('details');map.className='furnish-depth measure-depth';map.innerHTML=`<summary>${esc(furnishingText(language(),'depthTitle'))}</summary><img src="${esc(safe(state.image))}" alt="${esc(furnishingText(language(),'depthTitle'))}">`;status.after(map);}
+   refresh();
   }catch{if(alive()){state.status='error';status.textContent=t('unavailable');calc.disabled=true;}}
  };
 }
