@@ -4,7 +4,7 @@ import sharp from 'sharp';
 import {centimetres,productDimensions,roomMeasurements,validateLayout,fitFurnitureLayout,layoutFeedback,furnitureSlots,candidateMatchesKind,furnitureInstances} from '../room-fit.mjs';
 import {furnishingQuote,furnishRoom,furnishingRepairTarget,chooseRoomSet,previewProblems,furnishingPlan} from '../furnishing.mjs';
 import {furnishingLanguages,furnishingText} from '../public/furnishing-copy.js';
-import {readFurnishingMeasurements,furnishingArea,furnishingFailureKey} from '../public/furnishing.js';
+import {readFurnishingMeasurements,furnishingArea,furnishingFailureKey,furnishingHasPlan} from '../public/furnishing.js';
 import {parseHTML} from 'linkedom';
 const f=(kind,value,label=kind)=>({kind,value,label,quote:label+': '+value,source:'merchant_page'});
 test('support recovery only targets the selected failed run once, with saved local offers',()=>{
@@ -215,4 +215,13 @@ test('whole-room chair clearance is corrected locally without scattering the din
  const fixed=fitFurnitureLayout(raw,products,room);assert.equal(fixed.positions_adjusted,true);assert.equal(fixed.placements.length,6);
  for(const p of fixed.placements){const old=raw.placements.find(x=>x.id===p.id);assert.equal(p.rotation,old.rotation);assert.ok(Math.abs(p.x-old.x)<=40&&Math.abs(p.z-old.z)<=40);}
  assert.deepEqual(fixed.entry,raw.entry);assert.equal(validateLayout({...raw,placements:fixed.placements},products,room).estimated,true);
+});
+
+test('a complete saved plan remains usable when only the room visualization fails',()=>{
+ const run={status:'error',error:'FURNISH_PREVIEW_UNVERIFIED',version:2,coverage:{missing:[]},products:[{id:'chair',quantity:4}],layout:{placements:[{},{},{},{}]}};
+ assert.equal(furnishingHasPlan(run),true);
+ assert.equal(furnishingHasPlan({...run,coverage:{missing:[{id:'table'}]}}),false);
+ assert.equal(furnishingHasPlan({...run,error:'FURNITURE_DOES_NOT_FIT'}),false);
+ assert.equal(furnishingHasPlan({...run,layout:{placements:[{}]}}),false);
+ for(const lang of furnishingLanguages){assert.notEqual(furnishingText(lang,'planReady'),'planReady');assert.notEqual(furnishingText(lang,'planNote'),'planNote');}
 });
