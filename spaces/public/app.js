@@ -1,6 +1,7 @@
 import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
 import {createOriginalLayer} from './original-results.js';
+import {bindStoreLinks} from './store-links.js';
 import {mountFindzia} from './findzia-shell.js';
 import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {createLocalCatalog} from './local-catalog.js';
@@ -8,6 +9,7 @@ import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
+bindStoreLinks(document);
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const paths={checkCircle:'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M8 12l3 3 5-6',camera:'M4 7h4l2-3h4l2 3h4v13H4z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',plus:'M12 5v14M5 12h14',back:'M19 12H5m6-6-6 6 6 6',forward:'M5 12h14m-6-6 6 6-6 6',chevron:'m7 10 5 5 5-5',folder:'M3 6h7l2 3h9v12H3z',close:'m6 6 12 12M6 18 18 6',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4',compare:'M12 2v20M3 5h7v14H3zm11 0h7v14h-7',check:'m5 12 4 4L19 6',external:'M14 3h7v7M21 3l-11 11M9 5H3v16h16v-6',expand:'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5',more:'M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2'};
 const icon=(name,small=false)=>`<span class="icon${small?' small':''}" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${paths[name]||paths.spark}"/></svg></span>`;

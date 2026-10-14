@@ -1,6 +1,7 @@
 // The frame runs findzia.com's current page, including the original photo
 // entry point, wallet, media checks, cards, groups and sorting. No offer adapter.
 import {productKey,hasSavedResults,savedPickImage} from './design-picks.js';
+import {bindStoreLinks} from './store-links.js';
 import {reviewSimilarCards} from './similar-review.js';
 import {bindAccountNavigation,openAccountModal} from './account-navigation.js';
 import {searchBudget,SEARCH_BUDGET_MS} from './search-budget.js';
@@ -186,6 +187,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(session.budget?.expired)return;
   if(!session.root)throw Error('Original page unavailable');
   const win=session.frame.contentWindow,root=session.root;
+  bindStoreLinks(session.frame.contentDocument);
   bindAccountNavigation(root,view=>{close();openAccountModal(view);});
   const beforeSearch=win.FindziaBeforeSearch;
   if(beforeSearch)win.FindziaBeforeSearch=async(...args)=>{
