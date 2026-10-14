@@ -53,22 +53,30 @@ export function productFacts(row={}){
  ];
 }
 export function createProductDetailsLoader({request,room,design,item,getLanguage,onUpdate,isActive=()=>true}){
- const entries=new Map(),timers=new Set(),controllers=new Set();let active=0,destroyed=false;
+ const entries=new Map(),controllers=new Set();let active=0,destroyed=false;
  const path='/api/jobs/'+room+'/product-details';
  const key=url=>getLanguage()+':'+productKey(url);
- const pause=ms=>new Promise(resolve=>{const id=setTimeout(()=>{timers.delete(id);resolve();},ms);timers.add(id);});
+ const pause=(ms,signal)=>new Promise((resolve,reject)=>{
+  signal.throwIfAborted();
+  const abort=()=>{clearTimeout(timer);reject(signal.reason);};
+  const timer=setTimeout(()=>{signal.removeEventListener('abort',abort);resolve();},ms);
+  signal.addEventListener('abort',abort,{once:true});
+ });
  async function load(url){
   const language=getLanguage(),id=key(url),controller=new AbortController();active++;controllers.add(controller);
+  // An absolute limit includes the initial request, polling and connection time.
+  // Results remain usable while each visible product's specifications arrive.
+  const deadline=setTimeout(()=>controller.abort(),60000);
   entries.set(id,{status:'pending',facts:[]});
   try{
    let value=await request(path,{method:'POST',body:JSON.stringify({url,language,design,item}),signal:controller.signal});
-   for(let count=0;value.status==='pending'&&count<60&&!destroyed;count++){
-    await pause(1200);if(destroyed)break;
+   while(value.status==='pending'&&!destroyed){
+    await pause(1200,controller.signal);if(destroyed)break;
     const next=await request(path+'/'+value.key,{signal:controller.signal});value={...next,key:value.key};
    }
    if(!destroyed)entries.set(id,value.status==='pending'||value.status==='busy'?{status:'unavailable',facts:[]}:value);
   }catch{if(!destroyed)entries.set(id,{status:'unavailable',facts:[]});}
-  finally{active--;controllers.delete(controller);if(!destroyed)onUpdate?.();}
+  finally{clearTimeout(deadline);active--;controllers.delete(controller);if(!destroyed)onUpdate?.();}
  }
  return {
   peek:url=>entries.get(key(url)),
@@ -83,7 +91,7 @@ export function createProductDetailsLoader({request,room,design,item,getLanguage
     void load(url);
    }
   },
-  destroy(){destroyed=true;for(const timer of timers)clearTimeout(timer);for(const controller of controllers)controller.abort();}
+  destroy(){destroyed=true;for(const controller of controllers)controller.abort();}
  };
 }
 export function displayedFacts(row,page){

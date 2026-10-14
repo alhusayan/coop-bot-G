@@ -4,7 +4,7 @@ import {parseHTML} from 'linkedom';
 import {createOriginalLayer} from '../public/original-results.js';
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 
-for(const mode of ['stream','credit-check','page-boot'])test('23-second deadline cancels '+mode+' without a second paid search',async t=>{
+for(const mode of ['stream','credit-check','page-boot'])test('35-second deadline cancels '+mode+' without a second paid search',async t=>{
  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});
  const savedDocument=globalThis.document,savedFetch=globalThis.fetch;
  const {document,window}=parseHTML('<html><body></body></html>');globalThis.document=document;
@@ -28,13 +28,13 @@ for(const mode of ['stream','credit-check','page-boot'])test('23-second deadline
    };
    Object.defineProperty(frame,'contentDocument',{value:child.document});Object.defineProperty(frame,'contentWindow',{value:win});
    frame.dispatchEvent(new window.Event('load'));await settle();await settle();
-   t.mock.timers.tick(11500);assert.equal(layer.busy(crop.key),true);assert.equal(document.querySelector('[role=progressbar]').getAttribute('aria-valuenow'),'50');
-   t.mock.timers.tick(11499);assert.equal(layer.busy(crop.key),true);
+   t.mock.timers.tick(17500);assert.equal(layer.busy(crop.key),true);assert.equal(document.querySelector('[role=progressbar]').getAttribute('aria-valuenow'),'50');
+   t.mock.timers.tick(17499);assert.equal(layer.busy(crop.key),true);
    t.mock.timers.tick(1);await settle();assert.equal(layer.busy(crop.key),false);
    assert.equal(restored.photos,photos,'the native verified image map is preserved');
    if(mode==='stream'){assert.equal(requests,1);assert.equal(restored.view.items[0],row);assert.equal(document.querySelector('.original-results-status').textContent,'');assert.equal(document.querySelector('[role=progressbar]').getAttribute('aria-valuenow'),'100');}
    else{releaseCredit(true);await settle();assert.equal(requests,0,'a credit response after the deadline cannot start a search');}
-  }else{t.mock.timers.tick(23000);assert.equal(layer.busy(crop.key),false);assert.equal(requests,0);}
+  }else{t.mock.timers.tick(35000);assert.equal(layer.busy(crop.key),false);assert.equal(requests,0);}
   assert.equal(document.querySelector('.original-results-status').getAttribute('aria-busy'),'false');
   t.mock.timers.tick(30000);await settle();assert.equal(requests,mode==='stream'?1:0,'no automatic retry');
  }finally{layer.destroy();globalThis.document=savedDocument;globalThis.fetch=savedFetch;t.mock.timers.reset();}

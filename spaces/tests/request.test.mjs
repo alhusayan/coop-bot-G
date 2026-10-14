@@ -29,3 +29,17 @@ test('temporary connection failures do not latch authentication or replay paid o
  let failures=0;const response=await request('/api/jobs',{method:'POST'},{pathname:runtime.pathname,fetch:async()=>{failures++;return new Response(null,{status:503});}});
  assert.equal(response.status,503);assert.equal(failures,1);
 });
+
+test('caller cancellation stops in-flight requests and cannot renew or replay an aborted operation',async()=>{
+ const controller=new AbortController();let seen;
+ const pending=request('/api/jobs',{method:'POST',signal:controller.signal},{pathname:'/trial/test-invite',fetch:async(path,opts)=>{
+  seen=opts.signal;return new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(opts.signal.reason),{once:true}));
+ }});
+ controller.abort();await assert.rejects(pending,{name:'AbortError'});assert.equal(seen.aborted,true);
+ let calls=0;const cancelled=new AbortController();
+ await assert.rejects(request('/api/jobs',{method:'POST',signal:cancelled.signal},{pathname:'/trial/test-invite',fetch:async()=>{
+  calls++;cancelled.abort();return new Response(null,{status:401});
+ }}),{name:'AbortError'});
+ assert.equal(calls,1,'an aborted authentication response must not renew or repeat the request');
+});
+

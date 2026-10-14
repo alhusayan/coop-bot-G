@@ -1,4 +1,4 @@
-export const SEARCH_BUDGET_MS=23000;
+export const SEARCH_BUDGET_MS=35000;
 export function searchBudget(onExpire,{now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout}={}){
  const started=now(),controller=new AbortController();let active=true;
  const budget={signal:controller.signal,started,expired:false,
