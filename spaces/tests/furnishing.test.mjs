@@ -225,3 +225,9 @@ test('a complete saved plan remains usable when only the room visualization fail
  assert.equal(furnishingHasPlan({...run,layout:{placements:[{}]}}),false);
  for(const lang of furnishingLanguages){assert.notEqual(furnishingText(lang,'planReady'),'planReady');assert.notEqual(furnishingText(lang,'planNote'),'planNote');}
 });
+test('independent fabric mismatch reaches the render correction instead of a generic identity error',async()=>{
+ const x=await fixture(),base=x.deps.generate;let sofaAudits=0;
+ x.deps.generate=async(parts,opts)=>parts[0].text==='independent-fabric-check'?{results:[{material:'mismatch',differences:['Use textured boucle upholstery, not smooth fabric'],reason:'The sofa fabric is visibly smoother than the merchant reference.'}]}:base(parts,opts);
+ x.deps.audit=async(item,offers,target,{judge})=>{if(item.id==='1'&&sofaAudits++===0){await judge([{text:'independent-fabric-check'}],{json:true});return [];}return offers;};
+ const result=await furnishRoom(x.input,x.deps);assert.equal(result.products.length,7);assert.equal(x.renders.length,2);assert.match(x.renders[1],/Use textured boucle upholstery, not smooth fabric/);assert.match(x.renders[1],/Close-up corrections override/);
+});
