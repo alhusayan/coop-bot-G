@@ -123,7 +123,7 @@ export async function furnishRoom({original,concept,design,room,market,owner,det
  async function inspectCatalogue(group,offers){
   if(!group.required||group.candidates.length||!offers.length||group.catalogue_checked)return;
   group.catalogue_checked=true;
-  try{const rows=await catalogue(group.item,offers,market);if(rows.length){await onCatalogue(group.item,rows);await inspect(group,rows);}}catch(e){group.stats.catalogue_error=e.message;}
+  try{const rows=await catalogue(group.item,offers,market,{skipLinks:[...group.seen]});if(rows.length){await onCatalogue(group.item,rows);await inspect(group,rows);}}catch(e){group.stats.catalogue_error=e.message;}
  }
  await pool(groups.filter(g=>g.required&&!g.candidates.length),2,async group=>{await inspectCatalogue(group,group.members.flatMap(item=>savedFurnitureOffers(item,market)));report();});
  let searches=0,stopReason='';

@@ -6,7 +6,7 @@ const root='https://furniture.example.co.uk';
 const product=(title,{currency='GBP',stock='InStock'}={})=>`<html><body><h1>${title}</h1><script type="application/ld+json">${JSON.stringify({'@type':'Product',name:title,image:root+'/table.jpg',offers:{'@type':'Offer',price:'339.95',priceCurrency:currency,availability:'https://schema.org/'+stock},width:{value:180,unitText:'cm'},depth:{value:90,unitText:'cm'},height:{value:75,unitText:'cm'}})}</script></body></html>`;
 test('merchant catalogue follows observed same-store links and validates standalone product stock/price/dimensions',async()=>{
  const pages={
-  '/bundle':'<a href="/dining-tables">Dining Tables</a><a href="https://elsewhere.example/products/x">Cheap dining tables elsewhere</a>',
+  '/bundle':'<a href="/media/table.jpeg"><img alt="Mango Wood Dining Table 8 Seater"></a><a href="/media/table.png">Mango Wood Dining Table 8 Seater</a><a href="/dining-tables">Dining Tables</a><a href="https://elsewhere.example/products/x">Cheap dining tables elsewhere</a>',
   '/furniture/dining-tables':['Oak 180cm standalone Dining Table','Mango Dining Table with 8 Chairs','Walnut 180cm sold-out Dining Table','Imported USD walnut Dining Table'].map((n,i)=>`<a href="/products/${i}">${n}</a>`).join(''),
   '/products/0':product('Oak 180cm standalone Dining Table'),
   '/products/1':product('Mango Dining Table with 8 Chairs'),
@@ -18,6 +18,12 @@ test('merchant catalogue follows observed same-store links and validates standal
  assert.equal(result.length,1);assert.equal(result[0].price,339.95);assert.equal(result[0].currency,'GBP');assert.equal(result[0].search_engine,'merchant-catalogue');
  assert.equal(productDimensions(result[0].merchant_facts).width,180);assert.equal(result[0].availability,'listed_available');assert.equal(calls.length,6);assert.ok(calls.every(x=>x.startsWith(root)));
  assert.deepEqual(await merchantCatalogue({name_en:'dining table'},[{title:'Dining Table',link:root+'/bundle',search_market:'GB',market_scope:'local'}],'KW',{page}),[]);
+});
+test('catalogue continues past previously inspected candidates to another merchant',async()=>{
+ const seeds=['one','two'].map(name=>({title:'Oak Dining Table',link:`https://${name}.co.uk/products/seed`,search_market:'GB',market_scope:'local'}));
+ const page=async url=>({url,html:url.endsWith('seed')?'<a href="/products/table">Standalone Oak 180cm Dining Table</a>':product('Standalone Oak 180cm Dining Table')});
+ const result=await merchantCatalogue({id:'9',name_en:'dining table'},seeds,'GB',{page,skipLinks:['https://one.co.uk/products/table']});
+ assert.equal(result.length,1);assert.equal(new URL(result[0].link).hostname,'two.co.uk');
 });
 test('catalogue traversal ignores unrelated furniture, external links, account actions and duplicate URLs',()=>{
  const html='<a href="/products/oak">Oak dining table</a><a href="/products/oak">Same dining table</a><a href="/cart/add">Add dining table</a><a href="//evil.example/x">Oak dining table</a><a href="javascript:alert(1)">Oak dining table</a><a href="/chair">Dining chair</a>';

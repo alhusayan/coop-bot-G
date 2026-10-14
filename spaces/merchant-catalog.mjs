@@ -23,14 +23,15 @@ export function catalogueLinks(html,url,role){
   const name=(a.textContent||a.getAttribute('title')||a.querySelector('img')?.getAttribute('alt')||'').replace(/\s+/g,' ').trim();
   if(!role.test(name)||name.length>200)continue;
   let link;try{link=safeUrl(new URL(a.getAttribute('href'),url).href);}catch{continue;}
-  if(!link||new URL(link).origin!==origin||new URL(link).hash||/cart|checkout|account|login|wishlist|compare|remove|delete|logout/i.test(new URL(link).pathname)||seen.has(link)||link===url)continue;
+  if(!link||new URL(link).origin!==origin||new URL(link).hash||/cart|checkout|account|login|wishlist|compare|remove|delete|logout/i.test(new URL(link).pathname)||/\.(?:jpe?g|png|webp|gif|svg|avif|pdf|mp4|webm)$/i.test(new URL(link).pathname)||seen.has(link)||link===url)continue;
   seen.add(link);links.push({name,link});
  }
  // Product names rank above broad navigation labels when both are present.
  return links.sort((a,b)=>Number(b.name.length>24)-Number(a.name.length>24));
 }
-export async function merchantCatalogue(item,offers,market,{page=safePage}={}){
+export async function merchantCatalogue(item,offers,market,{page=safePage,skipLinks=[]}={}){
  const role=catalogueRole(item.name_en);if(!role)return [];
+ const skipped=new Set(skipLinks);
  const hosts=new Set(),seeds=offers.filter(o=>o.market_scope==='local'&&o.search_market===market&&role.test(o.title||'')&&sourceDetails(o.link,market)?.market_scope==='local'&&!hosts.has(new URL(o.link).origin)&&hosts.add(new URL(o.link).origin)).slice(0,4);
  for(const seed of seeds){try{
   const original=await page(seed.link,{timeout:5000});if(new URL(original.url).origin!==new URL(seed.link).origin)continue;
@@ -42,7 +43,7 @@ export async function merchantCatalogue(item,offers,market,{page=safePage}={}){
    if(new URL(category.url).origin!==new URL(seed.link).origin)continue;
    links=catalogueLinks(category.html,category.url,role).filter(x=>x.name.length>=25).slice(0,4);
   }
-  const products=(await pool(links,2,async({link})=>{try{
+  const products=(await pool(links.filter(x=>!skipped.has(x.link)),2,async({link})=>{try{
    const result=await page(link,{timeout:5000});if(new URL(result.url).origin!==new URL(seed.link).origin)return null;
    const product=productFromPage(result.html,result.url,MARKETS[market].currency),scope=sourceDetails(result.url,market);
    if(!product||!role.test(product.title)||scope?.market_scope!=='local'||product.availability!=='listed_available'||product.currency!==MARKETS[market].currency||!(product.price>0))return null;
