@@ -193,3 +193,9 @@ test('credit failures are explained accurately and optional adaptation is transl
  assert.equal(furnishingFailureKey({error:'FURNISH_PRODUCTS_INCOMPLETE',coverage:{stop_reason:'credits_exhausted'}}),'credits');
  for(const lang of furnishingLanguages)for(const key of ['adaptivePlan','adapted','credits'])assert.notEqual(furnishingText(lang,key),key);
 });
+
+test('prefix dimensions are not also misread as suffixes of the preceding axis',()=>{
+ for(const value of ['W200 cm D100 cm H75 cm','Width: 200 cm Depth: 100 cm Height: 75 cm','W200 D100 H75cm']){
+  const dimensions=productDimensions([f('dimensions',value)]);assert.equal(dimensions.width,200,value);assert.equal(dimensions.depth,100,value);assert.equal(dimensions.height,75,value);
+ }
+});

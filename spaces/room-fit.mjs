@@ -22,7 +22,7 @@ export function productDimensions(facts=[],kind=''){
   if(f.kind==='dimensions'||f.kind==='size'){
    const axes='width|depth|height|length|diameter|w|d|h|l';
    for(const m of value.matchAll(new RegExp('\\b('+axes+')\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)\\s*('+unit+')?(?![a-z])','gi')))put(axis[m[1]],centimetres(m[2],m[3]||fallback),f.quote);
-   for(const m of value.matchAll(new RegExp('(\\d+(?:[.,]\\d+)?)\\s*('+unit+')?\\s*\\(?('+axes+')\\b','gi')))put(axis[m[3]],centimetres(m[1],m[2]||fallback),f.quote);
+   for(const m of value.matchAll(new RegExp('(\\d+(?:[.,]\\d+)?)\\s*('+unit+')?\\s*\\(?('+axes+')\\b(?!\\s*[:=]?\\s*\\d)','gi')))put(axis[m[3]],centimetres(m[1],m[2]||fallback),f.quote);
    // An explicit axis order is required. Never guess what a bare 80x50x40 means.
    const order=(label+' '+value).match(new RegExp('\\b('+axes+')\\s*[x×/]\\s*('+axes+')\\s*[x×/]\\s*('+axes+')\\b'));
    const nums=value.match(new RegExp('(\\d+(?:[.,]\\d+)?)\\s*[x×]\\s*(\\d+(?:[.,]\\d+)?)\\s*[x×]\\s*(\\d+(?:[.,]\\d+)?)\\s*('+unit+')','i'));

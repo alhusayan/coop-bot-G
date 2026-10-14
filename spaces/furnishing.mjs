@@ -85,7 +85,7 @@ export async function furnishRoom({original,concept,design,room,market,owner,det
  progress('products');const groups=slots.map(slot=>({...slot,candidates:[],seen:new Set(),stats:{id:String(slot.item.id),name:slot.item.name_en,kind:slot.kind,quantity:slot.quantity,required:slot.required,offers:0,missing_dimensions:0,too_large:0,stock_unknown:0,unavailable:0,photo_unavailable:0,incompatible:0,selected:0}}));
  let completed=0;
  const report=()=>onProgress({completed,total:groups.length,found:groups.filter(g=>g.candidates.length).length});
- async function inspect(group,offers,{limit=6,maxMs=25000}={}){
+ async function inspect(group,offers,{limit=group.required?8:6,maxMs=25000}={}){
   const {item,kind,quantity,layer,stats,candidates,seen}=group,until=Math.min(deadline,Date.now()+maxMs);
   const rows=offers.filter(o=>o.market_scope==='local'&&o.availability!=='out_of_stock'&&candidateMatchesKind(o.title,kind)&&!seen.has(o.link)&&seen.add(o.link)).slice(0,limit);
   stats.offers+=rows.length;
@@ -93,7 +93,7 @@ export async function furnishRoom({original,concept,design,room,market,owner,det
   for(let batch=0;batch<rows.length&&!candidates.length&&Date.now()<until;batch+=2){
    const checked=await Promise.all(rows.slice(batch,batch+2).map(async offer=>{try{
     const facts=await detailFacts(details,offer.link,owner,Math.min(until,Date.now()+18000)),dimensions=productDimensions(facts,kind);
-    if(!dimensions){stats.missing_dimensions++;return null;}
+    if(!dimensions){stats.missing_dimensions++;if(stats.missing_dimensions===1)console.log('SPACES_FURNISH_DIMENSIONS',JSON.stringify({id:String(item.id),title:offer.title,facts:facts.filter(f=>/dimensions|size|width|depth|length|height|diameter/.test(f.kind)).map(({kind,label,value})=>({kind,label,value})).slice(0,8)}));return null;}
     if(!((dimensions.width<room.width-20&&dimensions.depth<room.length-20)||(dimensions.depth<room.width-20&&dimensions.width<room.length-20))){stats.too_large++;return null;}
     // Do not discard the engine's fresh stock result by fetching the same
     // merchant again. Older/unknown stock still requires a merchant check.
