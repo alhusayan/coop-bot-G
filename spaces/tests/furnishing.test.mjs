@@ -231,3 +231,7 @@ test('independent fabric mismatch reaches the render correction instead of a gen
  x.deps.audit=async(item,offers,target,{judge})=>{if(item.id==='1'&&sofaAudits++===0){await judge([{text:'independent-fabric-check'}],{json:true});return [];}return offers;};
  const result=await furnishRoom(x.input,x.deps);assert.equal(result.products.length,7);assert.equal(x.renders.length,2);assert.match(x.renders[1],/Use textured boucle upholstery, not smooth fabric/);assert.match(x.renders[1],/Close-up corrections override/);
 });
+test('a final targeted correction is bounded and cannot bypass product identity checks',async()=>{
+ const x=await fixture();x.deps.audit=async(item,offers)=>item.id==='1'?[]:offers;
+ await assert.rejects(furnishRoom(x.input,x.deps),/PREVIEW_UNVERIFIED/);assert.equal(x.renders.length,3);assert.match(x.renders[1],/^EDIT THE FIRST IMAGE IN PLACE/);assert.match(x.renders[2],/^EDIT THE FIRST IMAGE IN PLACE/);
+});
