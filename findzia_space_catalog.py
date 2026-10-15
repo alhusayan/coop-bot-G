@@ -8,6 +8,12 @@ from urllib.parse import urlencode
 from findzia_plans import SPACE_PLANS
 
 VERSION='findzia-space-flexible-v1'
+EXISTING_PACKS={'space_starter':'pack','space_plus':'pack50','space_pro':'pack100'}
+
+def matches_plan(price, plan, product):
+    return (price.get('product_id')==product and price.get('status')=='active'
+            and price.get('billing_cycle') is None and price.get('trial_period') is None
+            and price.get('unit_price')=={'amount':str(plan['amount_cents']),'currency_code':'USD'})
 
 def ensure_catalog(service):
     if not service.ready:return
@@ -34,6 +40,15 @@ def ensure_catalog(service):
         if configured and not price:price=service.api('GET','/prices/'+configured)
         if not price and saved and saved['price']:price=service.api('GET','/prices/'+saved['price'])
         if not price:
+            # The owner may edit existing packs or add prices in the dashboard,
+            # where our custom_data tags are absent. Resolve only the same product,
+            # exact approved USD amount, and one-time billing before enabling it.
+            candidates=[p for p in found if matches_plan(p,plan,product)]
+            existing=service.prices.get(EXISTING_PACKS[plan['id']])
+            price=next((p for p in candidates if p.get('id')==existing),None)
+            if not price and len(candidates)==1:price=candidates[0]
+            if not price and len(candidates)>1:raise RuntimeError('catalog_price_ambiguous')
+        if not price:
             # After an ambiguous create, list-only retries avoid duplicate prices.
             if saved and saved['state']=='creating':raise RuntimeError('catalog_creation_uncertain')
             with service.accounts.connect() as db:
@@ -46,8 +61,7 @@ def ensure_catalog(service):
               'unit_price':{'amount':str(plan['amount_cents']),'currency_code':'USD'},
               'quantity':{'minimum':1,'maximum':1},
               'custom_data':{'findzia_catalog':VERSION,'findzia_plan':plan['id']}})
-        if (price.get('product_id')!=product or price.get('status')!='active' or price.get('billing_cycle') is not None
-            or price.get('trial_period') is not None or price.get('unit_price')!={'amount':str(plan['amount_cents']),'currency_code':'USD'}):
+        if not matches_plan(price,plan,product):
             raise RuntimeError('catalog_price_mismatch')
         with service.accounts.connect() as db:
             db.execute('INSERT INTO fz_space_paddle_catalog VALUES(?,?,?,?,?) ON CONFLICT(mode,plan) DO UPDATE SET price=excluded.price,state=excluded.state,updated=excluded.updated',
