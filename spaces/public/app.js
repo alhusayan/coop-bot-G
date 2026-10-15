@@ -2,7 +2,7 @@ import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
 import {createOriginalLayer} from './original-results.js';
 import {bindStoreLinks} from './store-links.js';
-import {mountFindzia} from './findzia-shell.js';
+import {mountFindzia} from './findzia-shell.js?v=20261015-packs';
 import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
