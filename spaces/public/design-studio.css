@@ -36,7 +36,7 @@
 .studio-pending-title{display:flex;gap:9px;align-items:center;color:var(--muted);font-size:13px;margin-bottom:6px}
 .studio-pending .studio-concept{min-height:34px;border:0}.studio-pending .studio-concept-name{font-size:13px}
 #designs:not(.is-creating){display:flex;flex-direction:column}#designs:not(.is-creating).hidden{display:none}
-#designs .design-toolbar{order:0}#designs .design-status{order:1}#designs .design-grid{order:2}#designs .swipe-hint{order:3}#designs:not(.is-creating) #design-studio{order:4}
+#designs .design-toolbar{order:0}#designs .design-status{order:1}#designs .design-grid{order:2}#designs .design-gallery-nav{order:3}#designs:not(.is-creating) #design-studio{order:4}
 #designs .design-card.is-ready{animation:studio-reveal .6s cubic-bezier(.16,1,.3,1) both}
 #designs .design-failed{align-self:start}.design-failed .error-copy{margin:12px 0 18px}
 #setup #generate-button{margin-top:24px}
@@ -57,9 +57,97 @@ html[lang=ar] #shopping .design-toolbar .room-title,html[lang=ar] .design-toolba
  .studio-photo>img{aspect-ratio:16/10;max-height:26svh;min-height:140px}
  .studio-heading{margin:20px 0 14px;gap:9px}.studio-heading h2{font-size:20px;letter-spacing:-.4px}
  .studio-concept{min-height:44px}.studio-concept-name{font-size:14px}.studio-note{font-size:12px;margin-top:12px}
- #designs .design-image{aspect-ratio:4/3;max-height:46svh}
+ #designs .design-image{aspect-ratio:auto;max-height:none}
  #designs .design-card-body{padding:14px}#designs .design-card-body h3{font-size:20px;margin-bottom:12px}
  #designs .design-card .secondary{font-size:14px;min-height:48px;padding:11px 14px}
  #shopping .shopping-layout{margin-top:4px}
 }
 @media(prefers-reduced-motion:reduce){.studio-workspace *,.studio-pending *,#designs .design-card.is-ready{animation:none!important}.studio-activity i{transform:none;opacity:.65}}
+
+/* Preserve the whole design, with the same image geometry as the shop view. */
+#designs .design-grid{align-items:start}
+#designs .design-image{aspect-ratio:auto;max-height:none}
+#designs .design-image>img{display:block;width:100%;height:auto;max-height:none;object-fit:contain}
+#designs .design-card-body h3{overflow-wrap:anywhere;line-height:1.4}
+#designs .design-card .secondary{white-space:normal;overflow-wrap:anywhere}
+#design-gallery-nav{display:none;justify-content:center;gap:8px;margin:0 0 20px}
+#design-gallery-nav[hidden]{display:none!important}
+#design-gallery-nav button{min-width:44px;min-height:44px;padding:8px 12px;border-radius:50%;font-size:13px;border:1px solid var(--line);font-variant-numeric:tabular-nums}
+#design-gallery-nav button[aria-current=true]{background:var(--green);border-color:var(--green);color:#fff}
+/* Style palettes are inspiration, never a fake generated-room preview. */
+.studio-mood-head{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;color:var(--muted);min-height:44px}
+.studio-play{display:grid;place-items:center;min-width:44px;min-height:44px;border-radius:50%;background:var(--light)}
+.studio-play svg{width:16px;height:16px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.studio-style-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:4px 0 16px}
+.studio-style-tabs button{min-height:48px;display:flex;align-items:center;justify-content:space-between;gap:6px;padding:8px 10px;border:1px solid var(--line);border-radius:12px;font-size:12px;font-variant-numeric:tabular-nums;background:var(--paper)}
+.studio-style-tabs button[aria-pressed=true]{border-color:var(--green);box-shadow:inset 0 0 0 1px var(--green)}
+.studio-style-tabs .studio-palette i{width:11px;height:11px}
+.studio-mood{animation:studio-reveal .6s cubic-bezier(.16,1,.3,1) both;min-width:0}
+.studio-materials{position:relative;display:flex;align-items:center;justify-content:center;min-height:160px;isolation:isolate;margin:0 0 20px}
+.studio-materials i{display:block;position:relative;width:34%;height:134px;border-radius:12px;background:var(--swatch);box-shadow:0 10px 18px #16362918,inset 0 0 0 1px #ffffff70;transform:rotate(-10deg) translateY(5px);animation:studio-sample 6.5s ease-in-out infinite}
+.studio-materials i+i{margin-inline-start:-11%;z-index:1;transform:rotate(4deg) translateY(-6px);animation-delay:-1.6s}
+.studio-materials i:last-child{transform:rotate(13deg) translateY(10px);z-index:2;animation-delay:-3.2s}
+.studio-materials i::after{content:"";position:absolute;inset:0;border-radius:inherit;background:repeating-linear-gradient(15deg,#ffffff1c 0 1px,transparent 1px 4px);opacity:.55}
+.studio-materials i:nth-child(2)::after{background:repeating-linear-gradient(90deg,#ffffff25 0 1px,transparent 1px 3px),repeating-linear-gradient(0deg,#00000010 0 1px,transparent 1px 3px)}
+.studio-materials i:last-child::after{background:linear-gradient(135deg,#ffffff45,transparent 60%,#00000010)}
+.studio-mood h3{font-size:23px;line-height:1.4;overflow-wrap:anywhere;margin-bottom:6px}
+.studio-mood>p{font-size:14px;line-height:1.6;min-height:3.2em;color:var(--muted);max-width:38ch}
+.studio-workspace.is-paused :is(.studio-paper,.studio-materials i,.studio-frame){animation-play-state:paused}
+@keyframes studio-sample{0%,100%{translate:0 0}50%{translate:0 -9px}}
+/* Keep entire form controls reachable above browser chrome and the native dock. */
+html{scroll-padding-block:20px calc(120px + env(safe-area-inset-bottom,0px))}
+main .view{min-width:0}
+#setup{padding-bottom:24px}
+#design-form{min-width:0}
+#design-form :is(label,legend,button,textarea){max-width:100%;white-space:normal;overflow-wrap:anywhere}
+#design-form fieldset,#generate-button{scroll-margin-block:24px 140px}
+#design-form .segments{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:stretch}
+#design-form .segments label{min-width:0;display:flex}
+#design-form .segments span{width:100%;height:auto;white-space:normal;line-height:1.5;overflow:visible}
+html.findzia-native body main{padding-bottom:calc(112px + env(safe-area-inset-bottom,0px))!important}
+@media(max-width:760px){
+ #designs .design-grid{margin:0 0 12px;padding:0 0 10px;gap:16px;scroll-padding-inline:0;scroll-snap-type:x mandatory}
+ #designs .design-card{flex:0 0 100%;width:100%;min-width:0;scroll-snap-align:start;scroll-snap-stop:always}
+ #designs .design-card:hover{transform:none}
+ #design-gallery-nav:not([hidden]){display:flex}
+ #shopping .design-canvas{margin-inline:0;width:100%}
+ #setup>.back{min-height:44px;margin-bottom:6px}
+ #setup .setup-layout{gap:18px;margin:0 0 20px}
+ #setup .setup-photo{display:flex;align-items:center;gap:16px;padding:10px;border-radius:18px;min-height:0;position:static;width:100%}
+ #setup .setup-photo>img{width:76px;height:68px;max-height:none;object-fit:contain;border-radius:10px;background:var(--paper);flex:0 0 auto}
+ #setup .setup-photo .floating-button{position:static;min-height:44px;max-width:calc(100% - 92px);margin-inline-start:auto;box-shadow:none;padding:8px 12px;font-size:14px;white-space:normal}
+ #setup #design-form h1{font-size:26px;line-height:1.4;margin:0 0 16px;letter-spacing:-.6px}
+ #design-form>label,#design-form legend{font-size:16px;line-height:1.6;margin:0 0 9px}
+ #design-form textarea{font-size:16px;line-height:1.6;min-height:86px;padding:12px;resize:vertical}
+ #design-form fieldset{margin:20px 0}
+ #design-form .segments span{font-size:14px;min-height:56px;padding:8px 6px}
+ #setup #generate-button{margin-top:4px;min-height:54px;padding:13px 15px;font-size:16px}
+ #setup .form-note{margin-top:16px;font-size:12px}
+ .studio-workspace{display:grid;grid-template-columns:78px minmax(0,1fr);gap:12px 14px;padding:18px}
+ .studio-photo-wrap{grid-area:1/1;padding:4px;width:78px;margin:0;align-self:center}
+ .studio-photo{border-radius:10px}
+ .studio-paper{inset:1px;border-radius:10px}
+ .studio-photo>img{width:100%;height:64px;min-height:0;max-height:none;aspect-ratio:auto;object-fit:contain}
+ .studio-photo figcaption,.studio-frame{display:none}
+ .studio-copy{display:contents}
+ .studio-heading{grid-area:1/2;margin:0;gap:8px}.studio-heading h2{font-size:18px;line-height:1.5}
+ .studio-mood-head,.studio-style-tabs,.studio-mood,.studio-note{grid-column:1/-1}
+ .studio-mood-head{margin:0}.studio-style-tabs{margin:0}
+ .studio-materials{min-height:155px;margin:4px 0 8px}
+ .studio-materials i{height:126px}
+ .studio-mood h3{font-size:22px}.studio-mood>p{font-size:14px;min-height:3.2em}
+ .studio-note{margin:0;font-size:12px;min-height:0}
+}
+@media(max-width:359px){
+ #design-form .segments{grid-template-columns:1fr;gap:5px}
+ #design-form .segments span{min-height:44px}
+ .studio-style-tabs button{flex-wrap:wrap;justify-content:center}
+ .studio-materials i{height:110px}
+}
+@media(prefers-reduced-motion:reduce){.studio-workspace *,.studio-mood{animation:none!important;transition:none!important}}
+
+#setup .setup-photo>img{object-fit:contain}
+/* Long translations and product names grow with their content. */
+main :is(.item-copy h3,.design-pick-piece,.piece-selection-summary strong){display:block;-webkit-line-clamp:unset;overflow:visible;overflow-wrap:anywhere}
+main :is(.photo-search-status>span:nth-child(2),.design-pick-store>span:first-child){white-space:normal;text-overflow:clip;overflow:visible;overflow-wrap:anywhere}
+body:has(#setup:not(.hidden))>footer,body:has(#designs:not(.hidden))>footer,body:has(#shopping:not(.hidden))>footer{display:none}

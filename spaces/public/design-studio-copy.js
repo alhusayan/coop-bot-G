@@ -1,122 +1,224 @@
-// Reviewed waiting-state copy for all 17 supported languages.
+// Waiting and style-tour copy for all 17 supported languages.
 export const studioCopy={
   "en": {
     "Your designs appear here as they’re ready.": "Your designs appear here as they’re ready.",
     "Explore each design as soon as it’s ready.": "Explore each design as soon as it’s ready.",
     "Still creating. No need to start again.": "Still creating. No need to start again.",
     "Reconnecting… Your designs are safe.": "Reconnecting… Your designs are safe.",
-    "Choose a design to explore.": "Choose a design to explore."
+    "Choose a design to explore.": "Choose a design to explore.",
+    "Explore the styles": "Explore the styles",
+    "Pause slideshow": "Pause slideshow",
+    "Play slideshow": "Play slideshow",
+    "Soft tones. Clean lines. Room to breathe.": "Soft tones. Clean lines. Room to breathe.",
+    "Earthy colours. Natural textures. A warmer feel.": "Earthy colours. Natural textures. A warmer feel.",
+    "Rich textures. Quiet contrast. Refined details.": "Rich textures. Quiet contrast. Refined details."
   },
   "ar": {
     "Your designs appear here as they’re ready.": "تظهر تصاميمك هنا فور جاهزيتها.",
     "Explore each design as soon as it’s ready.": "استكشف كل تصميم فور جاهزيته.",
     "Still creating. No need to start again.": "ما زلنا نجهّز تصاميمك. لا حاجة للبدء مجددًا.",
     "Reconnecting… Your designs are safe.": "نعيد الاتصال… تصاميمك محفوظة.",
-    "Choose a design to explore.": "اختر تصميمًا لاستكشافه."
+    "Choose a design to explore.": "اختر تصميمًا لاستكشافه.",
+    "Explore the styles": "استكشف الأنماط",
+    "Pause slideshow": "إيقاف العرض مؤقتًا",
+    "Play slideshow": "تشغيل العرض",
+    "Soft tones. Clean lines. Room to breathe.": "درجات هادئة وخطوط بسيطة ومساحة تتنفس.",
+    "Earthy colours. Natural textures. A warmer feel.": "ألوان ترابية وخامات طبيعية وإحساس بالدفء.",
+    "Rich textures. Quiet contrast. Refined details.": "خامات غنية وتباين هادئ وتفاصيل أنيقة."
   },
   "de": {
     "Your designs appear here as they’re ready.": "Deine Entwürfe erscheinen hier, sobald sie fertig sind.",
     "Explore each design as soon as it’s ready.": "Entdecke jeden Entwurf, sobald er fertig ist.",
     "Still creating. No need to start again.": "Deine Entwürfe werden noch erstellt. Du musst nicht neu starten.",
     "Reconnecting… Your designs are safe.": "Verbindung wird wiederhergestellt… Deine Entwürfe sind sicher.",
-    "Choose a design to explore.": "Wähle einen Entwurf zum Entdecken."
+    "Choose a design to explore.": "Wähle einen Entwurf zum Entdecken.",
+    "Explore the styles": "Entdecke die Stile",
+    "Pause slideshow": "Diashow anhalten",
+    "Play slideshow": "Diashow starten",
+    "Soft tones. Clean lines. Room to breathe.": "Sanfte Töne. Klare Linien. Raum zum Durchatmen.",
+    "Earthy colours. Natural textures. A warmer feel.": "Erdige Farben. Natürliche Texturen. Mehr Wärme.",
+    "Rich textures. Quiet contrast. Refined details.": "Edle Texturen. Sanfte Kontraste. Feine Details."
   },
   "fr": {
     "Your designs appear here as they’re ready.": "Vos créations apparaîtront ici dès qu’elles seront prêtes.",
     "Explore each design as soon as it’s ready.": "Explorez chaque création dès qu’elle est prête.",
     "Still creating. No need to start again.": "La création continue. Inutile de recommencer.",
     "Reconnecting… Your designs are safe.": "Reconnexion… Vos créations sont sauvegardées.",
-    "Choose a design to explore.": "Choisissez une création à explorer."
+    "Choose a design to explore.": "Choisissez une création à explorer.",
+    "Explore the styles": "Explorez les styles",
+    "Pause slideshow": "Mettre le diaporama en pause",
+    "Play slideshow": "Lancer le diaporama",
+    "Soft tones. Clean lines. Room to breathe.": "Tons doux. Lignes épurées. Un espace qui respire.",
+    "Earthy colours. Natural textures. A warmer feel.": "Couleurs terreuses. Textures naturelles. Une ambiance chaleureuse.",
+    "Rich textures. Quiet contrast. Refined details.": "Textures riches. Contrastes subtils. Détails raffinés."
   },
   "it": {
     "Your designs appear here as they’re ready.": "I tuoi progetti appariranno qui appena pronti.",
     "Explore each design as soon as it’s ready.": "Esplora ogni progetto appena è pronto.",
     "Still creating. No need to start again.": "La creazione è ancora in corso. Non serve ricominciare.",
     "Reconnecting… Your designs are safe.": "Riconnessione… I tuoi progetti sono al sicuro.",
-    "Choose a design to explore.": "Scegli un progetto da esplorare."
+    "Choose a design to explore.": "Scegli un progetto da esplorare.",
+    "Explore the styles": "Esplora gli stili",
+    "Pause slideshow": "Metti in pausa la presentazione",
+    "Play slideshow": "Avvia la presentazione",
+    "Soft tones. Clean lines. Room to breathe.": "Toni delicati. Linee pulite. Spazio per respirare.",
+    "Earthy colours. Natural textures. A warmer feel.": "Colori della terra. Texture naturali. Un’atmosfera più calda.",
+    "Rich textures. Quiet contrast. Refined details.": "Texture ricche. Contrasti delicati. Dettagli raffinati."
   },
   "es": {
     "Your designs appear here as they’re ready.": "Tus diseños aparecerán aquí en cuanto estén listos.",
     "Explore each design as soon as it’s ready.": "Explora cada diseño en cuanto esté listo.",
     "Still creating. No need to start again.": "Seguimos creando. No hace falta empezar de nuevo.",
     "Reconnecting… Your designs are safe.": "Reconectando… Tus diseños están guardados.",
-    "Choose a design to explore.": "Elige un diseño para explorar."
+    "Choose a design to explore.": "Elige un diseño para explorar.",
+    "Explore the styles": "Explora los estilos",
+    "Pause slideshow": "Pausar presentación",
+    "Play slideshow": "Reproducir presentación",
+    "Soft tones. Clean lines. Room to breathe.": "Tonos suaves. Líneas limpias. Espacio para respirar.",
+    "Earthy colours. Natural textures. A warmer feel.": "Colores tierra. Texturas naturales. Un ambiente más cálido.",
+    "Rich textures. Quiet contrast. Refined details.": "Texturas ricas. Contrastes sutiles. Detalles refinados."
   },
   "pt": {
     "Your designs appear here as they’re ready.": "Os seus projetos aparecem aqui assim que estiverem prontos.",
     "Explore each design as soon as it’s ready.": "Explore cada projeto assim que estiver pronto.",
     "Still creating. No need to start again.": "A criação continua. Não precisa de recomeçar.",
     "Reconnecting… Your designs are safe.": "A restabelecer ligação… Os seus projetos estão guardados.",
-    "Choose a design to explore.": "Escolha um projeto para explorar."
+    "Choose a design to explore.": "Escolha um projeto para explorar.",
+    "Explore the styles": "Explore os estilos",
+    "Pause slideshow": "Pausar apresentação",
+    "Play slideshow": "Reproduzir apresentação",
+    "Soft tones. Clean lines. Room to breathe.": "Tons suaves. Linhas simples. Espaço para respirar.",
+    "Earthy colours. Natural textures. A warmer feel.": "Cores terrosas. Texturas naturais. Um ambiente mais acolhedor.",
+    "Rich textures. Quiet contrast. Refined details.": "Texturas ricas. Contrastes subtis. Detalhes refinados."
   },
   "tr": {
     "Your designs appear here as they’re ready.": "Tasarımlarınız hazır oldukça burada görünür.",
     "Explore each design as soon as it’s ready.": "Her tasarımı hazır olur olmaz keşfedin.",
     "Still creating. No need to start again.": "Tasarım devam ediyor. Yeniden başlamanıza gerek yok.",
     "Reconnecting… Your designs are safe.": "Yeniden bağlanılıyor… Tasarımlarınız güvende.",
-    "Choose a design to explore.": "Keşfetmek için bir tasarım seçin."
+    "Choose a design to explore.": "Keşfetmek için bir tasarım seçin.",
+    "Explore the styles": "Stilleri keşfedin",
+    "Pause slideshow": "Slayt gösterisini duraklat",
+    "Play slideshow": "Slayt gösterisini başlat",
+    "Soft tones. Clean lines. Room to breathe.": "Yumuşak tonlar. Sade çizgiler. Ferah bir alan.",
+    "Earthy colours. Natural textures. A warmer feel.": "Toprak renkleri. Doğal dokular. Daha sıcak bir his.",
+    "Rich textures. Quiet contrast. Refined details.": "Zengin dokular. Yumuşak kontrastlar. Zarif detaylar."
   },
   "ru": {
     "Your designs appear here as they’re ready.": "Ваши дизайны появятся здесь по мере готовности.",
     "Explore each design as soon as it’s ready.": "Изучайте каждый дизайн сразу после его готовности.",
     "Still creating. No need to start again.": "Создание продолжается. Не нужно начинать заново.",
     "Reconnecting… Your designs are safe.": "Восстанавливаем соединение… Ваши дизайны сохранены.",
-    "Choose a design to explore.": "Выберите дизайн для просмотра."
+    "Choose a design to explore.": "Выберите дизайн для просмотра.",
+    "Explore the styles": "Изучите стили",
+    "Pause slideshow": "Приостановить слайд-шоу",
+    "Play slideshow": "Запустить слайд-шоу",
+    "Soft tones. Clean lines. Room to breathe.": "Мягкие тона. Чёткие линии. Больше воздуха.",
+    "Earthy colours. Natural textures. A warmer feel.": "Землистые цвета. Природные текстуры. Ощущение тепла.",
+    "Rich textures. Quiet contrast. Refined details.": "Богатые текстуры. Мягкие контрасты. Изысканные детали."
   },
   "ja": {
     "Your designs appear here as they’re ready.": "デザインは完成次第、ここに表示されます。",
     "Explore each design as soon as it’s ready.": "完成したデザインからすぐにチェックできます。",
     "Still creating. No need to start again.": "引き続き作成中です。やり直す必要はありません。",
     "Reconnecting… Your designs are safe.": "再接続中…デザインは保存されています。",
-    "Choose a design to explore.": "気になるデザインを選んでください。"
+    "Choose a design to explore.": "気になるデザインを選んでください。",
+    "Explore the styles": "スタイルを見る",
+    "Pause slideshow": "スライドショーを一時停止",
+    "Play slideshow": "スライドショーを再生",
+    "Soft tones. Clean lines. Room to breathe.": "柔らかな色調。すっきりしたライン。ゆとりある空間。",
+    "Earthy colours. Natural textures. A warmer feel.": "アースカラー。自然な質感。温かみのある雰囲気。",
+    "Rich textures. Quiet contrast. Refined details.": "豊かな質感。穏やかなコントラスト。洗練されたディテール。"
   },
   "zh": {
     "Your designs appear here as they’re ready.": "设计完成后会陆续显示在这里。",
     "Explore each design as soon as it’s ready.": "每个设计完成后即可查看。",
     "Still creating. No need to start again.": "仍在生成中，无需重新开始。",
     "Reconnecting… Your designs are safe.": "正在重新连接…您的设计已保存。",
-    "Choose a design to explore.": "选择一个设计进行探索。"
+    "Choose a design to explore.": "选择一个设计进行探索。",
+    "Explore the styles": "探索风格",
+    "Pause slideshow": "暂停幻灯片",
+    "Play slideshow": "播放幻灯片",
+    "Soft tones. Clean lines. Room to breathe.": "柔和色调，简洁线条，让空间自由呼吸。",
+    "Earthy colours. Natural textures. A warmer feel.": "大地色彩，自然质感，营造温暖氛围。",
+    "Rich textures. Quiet contrast. Refined details.": "丰富质感，柔和对比，精致细节。"
   },
   "ko": {
     "Your designs appear here as they’re ready.": "디자인이 완성되는 대로 여기에 표시됩니다.",
     "Explore each design as soon as it’s ready.": "완성된 디자인부터 바로 살펴보세요.",
     "Still creating. No need to start again.": "계속 디자인을 만들고 있어요. 다시 시작할 필요 없어요.",
     "Reconnecting… Your designs are safe.": "다시 연결하는 중… 디자인은 안전하게 저장되어 있어요.",
-    "Choose a design to explore.": "살펴볼 디자인을 선택하세요."
+    "Choose a design to explore.": "살펴볼 디자인을 선택하세요.",
+    "Explore the styles": "스타일 살펴보기",
+    "Pause slideshow": "슬라이드 쇼 일시 정지",
+    "Play slideshow": "슬라이드 쇼 재생",
+    "Soft tones. Clean lines. Room to breathe.": "부드러운 색감. 깔끔한 선. 여유로운 공간.",
+    "Earthy colours. Natural textures. A warmer feel.": "대지의 색. 자연스러운 질감. 따뜻한 분위기.",
+    "Rich textures. Quiet contrast. Refined details.": "풍부한 질감. 은은한 대비. 세련된 디테일."
   },
   "hi": {
     "Your designs appear here as they’re ready.": "आपके डिज़ाइन तैयार होते ही यहाँ दिखाई देंगे।",
     "Explore each design as soon as it’s ready.": "हर डिज़ाइन तैयार होते ही देखें।",
     "Still creating. No need to start again.": "डिज़ाइन अभी बन रहे हैं। दोबारा शुरू करने की ज़रूरत नहीं है।",
     "Reconnecting… Your designs are safe.": "फिर से जुड़ रहे हैं… आपके डिज़ाइन सुरक्षित हैं।",
-    "Choose a design to explore.": "देखने के लिए एक डिज़ाइन चुनें।"
+    "Choose a design to explore.": "देखने के लिए एक डिज़ाइन चुनें।",
+    "Explore the styles": "शैलियाँ देखें",
+    "Pause slideshow": "स्लाइड शो रोकें",
+    "Play slideshow": "स्लाइड शो चलाएँ",
+    "Soft tones. Clean lines. Room to breathe.": "हल्के रंग। साफ़ रेखाएँ। खुली-खुली जगह।",
+    "Earthy colours. Natural textures. A warmer feel.": "मिट्टी के रंग। प्राकृतिक बनावट। गर्मजोशी का एहसास।",
+    "Rich textures. Quiet contrast. Refined details.": "समृद्ध बनावट। हल्का रंग-विरोध। नफ़ीस बारीकियाँ।"
   },
   "ur": {
     "Your designs appear here as they’re ready.": "آپ کے ڈیزائن تیار ہوتے ہی یہاں نظر آئیں گے۔",
     "Explore each design as soon as it’s ready.": "ہر ڈیزائن تیار ہوتے ہی دیکھیں۔",
     "Still creating. No need to start again.": "ڈیزائن ابھی بن رہے ہیں۔ دوبارہ شروع کرنے کی ضرورت نہیں۔",
     "Reconnecting… Your designs are safe.": "دوبارہ رابطہ ہو رہا ہے… آپ کے ڈیزائن محفوظ ہیں۔",
-    "Choose a design to explore.": "دیکھنے کے لیے ایک ڈیزائن منتخب کریں۔"
+    "Choose a design to explore.": "دیکھنے کے لیے ایک ڈیزائن منتخب کریں۔",
+    "Explore the styles": "انداز دیکھیں",
+    "Pause slideshow": "سلائیڈ شو روکیں",
+    "Play slideshow": "سلائیڈ شو چلائیں",
+    "Soft tones. Clean lines. Room to breathe.": "نرم رنگ۔ سادہ لکیریں۔ کشادہ جگہ۔",
+    "Earthy colours. Natural textures. A warmer feel.": "مٹیالے رنگ۔ قدرتی بناوٹ۔ گرم جوشی کا احساس۔",
+    "Rich textures. Quiet contrast. Refined details.": "بھرپور بناوٹ۔ ہلکا تضاد۔ نفیس جزئیات۔"
   },
   "id": {
     "Your designs appear here as they’re ready.": "Desain Anda akan muncul di sini begitu siap.",
     "Explore each design as soon as it’s ready.": "Jelajahi setiap desain begitu siap.",
     "Still creating. No need to start again.": "Masih membuat desain. Tidak perlu memulai lagi.",
     "Reconnecting… Your designs are safe.": "Menghubungkan kembali… Desain Anda tersimpan aman.",
-    "Choose a design to explore.": "Pilih desain untuk dijelajahi."
+    "Choose a design to explore.": "Pilih desain untuk dijelajahi.",
+    "Explore the styles": "Jelajahi gaya",
+    "Pause slideshow": "Jeda tayangan slide",
+    "Play slideshow": "Putar tayangan slide",
+    "Soft tones. Clean lines. Room to breathe.": "Warna lembut. Garis bersih. Ruang yang lega.",
+    "Earthy colours. Natural textures. A warmer feel.": "Warna bumi. Tekstur alami. Nuansa lebih hangat.",
+    "Rich textures. Quiet contrast. Refined details.": "Tekstur kaya. Kontras lembut. Detail elegan."
   },
   "ms": {
     "Your designs appear here as they’re ready.": "Reka bentuk anda akan muncul di sini sebaik sahaja siap.",
     "Explore each design as soon as it’s ready.": "Terokai setiap reka bentuk sebaik sahaja siap.",
     "Still creating. No need to start again.": "Masih menghasilkan reka bentuk. Tidak perlu mula semula.",
     "Reconnecting… Your designs are safe.": "Menyambung semula… Reka bentuk anda selamat.",
-    "Choose a design to explore.": "Pilih reka bentuk untuk diterokai."
+    "Choose a design to explore.": "Pilih reka bentuk untuk diterokai.",
+    "Explore the styles": "Terokai gaya",
+    "Pause slideshow": "Jeda tayangan slaid",
+    "Play slideshow": "Mainkan tayangan slaid",
+    "Soft tones. Clean lines. Room to breathe.": "Tona lembut. Garisan ringkas. Ruang yang lapang.",
+    "Earthy colours. Natural textures. A warmer feel.": "Warna bumi. Tekstur semula jadi. Suasana lebih hangat.",
+    "Rich textures. Quiet contrast. Refined details.": "Tekstur mewah. Kontras lembut. Perincian halus."
   },
   "nl": {
     "Your designs appear here as they’re ready.": "Je ontwerpen verschijnen hier zodra ze klaar zijn.",
     "Explore each design as soon as it’s ready.": "Bekijk elk ontwerp zodra het klaar is.",
     "Still creating. No need to start again.": "We werken nog aan je ontwerpen. Opnieuw beginnen is niet nodig.",
     "Reconnecting… Your designs are safe.": "Opnieuw verbinden… Je ontwerpen zijn veilig.",
-    "Choose a design to explore.": "Kies een ontwerp om te bekijken."
+    "Choose a design to explore.": "Kies een ontwerp om te bekijken.",
+    "Explore the styles": "Ontdek de stijlen",
+    "Pause slideshow": "Diavoorstelling pauzeren",
+    "Play slideshow": "Diavoorstelling afspelen",
+    "Soft tones. Clean lines. Room to breathe.": "Zachte tinten. Strakke lijnen. Ruimte om te ademen.",
+    "Earthy colours. Natural textures. A warmer feel.": "Aardetinten. Natuurlijke texturen. Een warmere sfeer.",
+    "Rich textures. Quiet contrast. Refined details.": "Rijke texturen. Zachte contrasten. Verfijnde details."
   }
 };
