@@ -269,6 +269,7 @@
       if(paymentState==='success'||paymentState==='restored'){paymentMessage='';paymentState='pending';}
     }
     async function startPayment(automatic=false){
+      if(window.FindziaNative?.openStore){window.FindziaNative.openStore();return;}
       if(paymentBusy||mfView||checkoutView||!selectedPlan())return;
       if(!account.member()){account.open('signin');return;}
       clearTimeout(recoveryTimer);recoveryTimer=null;
@@ -324,6 +325,7 @@
       summary.append(el('strong','',tf('{count} credits',{count:p.credits},'{count} عملية بحث')),amount,el('p','',tf('Searches: {count}',{count:p.credits},'الرصيد: {count}')));body.append(summary);
     }
     async function paymentConfig(){
+      if(window.FindziaNative?.openStore)return;
       if(paymentConfigFlight)return paymentConfigFlight;
       if(paymentConfigAt&&Date.now()-paymentConfigAt<30000)return;
       const rev=revision;
@@ -870,6 +872,7 @@
       }
     });
     function viewPurchases(){
+      if(window.FindziaNative?.openStore){window.FindziaNative.openStore();return;}
       const manager=window.FindziaPurchaseManager?.mount(root,{
         rpc:json
       });
@@ -877,6 +880,7 @@
       paymentMessage=paymentCopy('error',tr('Please refresh the page to load your purchases.','حدّث الصفحة لعرض مشترياتك.'));account.open('checkout');
     }
     async function restorePurchases(){
+      if(window.FindziaNative?.openStore){window.FindziaNative.openStore();return;}
       if(!account.member()){account.open('signin');return;}
       if(paymentBusy)return;
       const rev=revision;paymentBusy=true;paymentMessage=paymentCopy('pending',tr('Checking your purchases…','نتحقق من مشترياتك…'));account.open('usage');
@@ -1023,6 +1027,9 @@
       return list;
     }
     function renderPlans(body){
+      if(window.FindziaNative?.openStore){
+        body.append(el('h2','',tr('Credit packs','باقات الرصيد')),el('p','fza-caption',tr('One-time payment. Paid credits never expire.','دفعة واحدة. الرصيد المدفوع لا تنتهي صلاحيته.')),button(tr('View credit packs','عرض باقات الرصيد'),()=>window.FindziaNative.openStore()));return;
+      }
       // Warm the SDK when the customer opens plans. Never create an order here.
       if(account.member())paymentConfig().then(()=>{if(paddleConfig?.checkout_available)loadPaddle().catch(()=>{});});
       const plans=config?.plans||status?.plans||[];
@@ -1076,6 +1083,7 @@
     root.fzBilling={authorizeDesign:async(count=3)=>{if(!await beforeSearch({kind:'design',units:count}))return null;return {Authorization:'Bearer '+credential()};},authorizePiece:async()=>{if(!await beforeSearch({kind:'image'}))return null;return {Authorization:'Bearer '+credential()};},renderStamp,viewPurchases,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Credits remaining: {count}',{count:status.remaining},'الرصيد المتبقي: {count}'):tr('3 free designs + 2 free product searches','3 تصاميم مجانية + بحثان مجانيان عن المنتجات')};
     root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;feedbackEpoch++;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
     root.addEventListener('fz:account-view',e=>{
+      if(e.detail.to==='plans'&&window.FindziaNative?.openStore)window.FindziaNative.openStore();
       if(e.detail.to!=='checkout')clearCompletedFeedback();
       if(e.detail.to!=='plans'&&startingPayment&&!checkoutView?.revealed&&!mfView){
         paymentFlow++;paymentBusy=false;startingPayment=false;closeWallet();
