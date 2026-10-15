@@ -32,7 +32,7 @@ test('a prolonged disconnect keeps visible status and resumes GET polling withou
  let callback,calls=0,paints=0,done=false;const delays=[],context=createRoomContext();context.begin();
  const runtime={pollTimer:null,pollErrors:0,roomContext:context,state:{job:{id:'room'},view:'shopping'},clearTimeout(){},setTimeout(fn,ms){callback=fn;delays.push(ms);return delays.length;},
  api:async(path,options)=>{assert.equal(path,'/api/jobs/room');assert.equal(options,undefined);if(++calls<=7)throw Error('offline');return {id:'room'};},
- applyJob:()=>{done=true;return true;},active:()=>!done,renderShop:()=>paints++,toast(){},translate:x=>x};
+ applyJob:()=>{done=true;return true;},active:()=>!done,renderShop:()=>paints++,toast(){},translate:x=>x,document:{querySelector:()=>null}};
  runInNewContext(fn+';poll();',runtime);for(let i=0;i<8;i++)await callback();
  assert.equal(calls,8);assert.equal(paints,8);assert.equal(runtime.pollErrors,0);assert.equal(done,true);assert.ok(delays.every(x=>x>=1500&&x<=10000));
 });
