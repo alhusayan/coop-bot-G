@@ -1,5 +1,6 @@
 // Dedicated static storefront. Never install this server in the existing API service.
 import http from 'node:http';
+import https from 'node:https';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +58,7 @@ function encodingFor(header) {
 }
 
 export function createServer(env=process.env) {
+  const spaces=env.SPACES_PUBLIC_LAUNCH==='true';
   const provider = String(env.FINDZIA_PAYMENT_PROVIDER ?? 'paddle').trim().toLowerCase();
   if (!applePayFiles.has(provider)) throw Error('FINDZIA_PAYMENT_PROVIDER must be paddle or myfatoorah');
   const measurementId=String(env.FINDZIA_GA4_MEASUREMENT_ID||'').trim();
@@ -65,17 +67,29 @@ export function createServer(env=process.env) {
   const analyticsEntry={body:analyticsBody,hash:createHash('sha256').update(analyticsBody).digest('hex'),type:types.json,immutable:false};
   const selectedFile = applePayFiles.get(provider);
   const health = Buffer.from(JSON.stringify({...JSON.parse(routes.get('/healthz').body),
-    payment_provider:provider,apple_pay_file_sha256:selectedFile.hash,apple_pay_switch:'railway-variable-v1'}));
+    spaces_public:spaces,original_url:'/trial/original',payment_provider:provider,apple_pay_file_sha256:selectedFile.hash,apple_pay_switch:'railway-variable-v1'}));
   const healthEntry = {body:health,hash:createHash('sha256').update(health).digest('hex'),type:types.json,immutable:false};
   console.log(`FINDZIA_APPLE_PAY_FILE provider=${provider} sha256=${selectedFile.hash}`);
   return http.createServer({maxHeaderSize: 16384, requestTimeout: 15000, headersTimeout: 10000}, (req, res) => {
+    const requestPath=(req.url||'/').split('?')[0];
+    if(spaces&&(requestPath==='/'||requestPath==='/account'||(!routes.has(requestPath)&&requestPath!=='/trial/original'&&requestPath!=='/trial/original/'&&requestPath!=='/analytics-config.json'))){
+      // Fixed owned upstream. Preserve streaming uploads, cookies and origin;
+      // never accept a client supplied proxy destination or forwarding identity.
+      const pass={};for(const name of ['accept','accept-language','content-type','content-length','cookie','authorization','origin','idempotency-key','if-none-match','sec-fetch-site','sec-fetch-mode'])if(req.headers[name])pass[name]=req.headers[name];
+      const upstream=https.request({hostname:'findzia-spaces-production.up.railway.app',port:443,method:req.method,path:req.url,headers:pass,timeout:180000},reply=>{
+        const out={...reply.headers};for(const key of ['connection','keep-alive','transfer-encoding','upgrade'])delete out[key];
+        res.writeHead(reply.statusCode||502,out);reply.pipe(res);
+      });
+      const fail=()=>{if(!res.headersSent)res.writeHead(502,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store'});res.end('Temporarily unavailable. Please try again.');};
+      upstream.on('error',fail);upstream.on('timeout',()=>upstream.destroy());req.on('aborted',()=>upstream.destroy());res.on('close',()=>{if(!res.writableEnded)upstream.destroy();});req.pipe(upstream);return;
+    }
     if (!['GET', 'HEAD'].includes(req.method)) {
       res.writeHead(405, {...common, Allow:'GET, HEAD', 'Cache-Control':'no-store'}); res.end(); return;
     }
     // No canonical-domain, slash or HTTPS redirects here: the provider must
     // receive the file itself on each HTTPS host, not a redirected document.
     const path = (req.url || '/').split('?')[0];
-    const entry = path==='/analytics-config.json' ? analyticsEntry : path===association ? selectedFile : path==='/healthz' ? healthEntry : routes.get(path);
+    const entry = path==='/analytics-config.json' ? analyticsEntry : path===association ? selectedFile : path==='/healthz' ? healthEntry : ['/trial/original','/trial/original/'].includes(path) ? {...routes.get('/'),preview:true} : routes.get(path);
     if (!entry) {
       const page = routes.get('/404.html');
       res.writeHead(404, {...common, 'Content-Type':types.html, 'Cache-Control':'no-store', 'Content-Length':page.body.length});

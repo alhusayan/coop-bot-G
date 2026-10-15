@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packLocales } from './locales.mjs';
+import { applyCreditCopy } from './credit-locales.mjs';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
@@ -36,7 +37,7 @@ sourceReleases.photoIntake=read('findzia-home.liquid').toString().match(/FINDZIA
 sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.choiceTrial=read('findzia-choice-trial.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
 if(sourceReleases.choiceTrial!=='157.0.16')throw Error('Findzia One release mismatch.');
-const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
+const uiLocales = packLocales(applyCreditCopy(JSON.parse(read('findzia-locales.json').toString('utf8')),JSON.parse(read('findzia-credit-copy.json').toString('utf8'))));
 if(uiLocales.version!==version || sourceReleases.i18n!==version)throw Error('UI translation release mismatch.');
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];
 if(JSON.parse(read('findzia-support.json').toString('utf8')).version!=='156.7.62')throw Error('Support knowledge release mismatch.');

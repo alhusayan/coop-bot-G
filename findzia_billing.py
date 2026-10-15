@@ -19,7 +19,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from findzia_credit_runtime import CreditRuntime
 
-from findzia_plans import PLANS, LEGACY_PLANS, PREPAID_PLANS
+from findzia_plans import PLANS, LEGACY_PLANS, PREPAID_PLANS, SPACE_PLANS
 SEARCH_PATHS = frozenset(('/api/search', '/api/search/stream', '/api/search/image',
     '/api/search/image/stream', '/api/search/more', '/api/search/more/stream',
     '/api/search/markets/stream', '/api/refine/search/stream'))
@@ -80,7 +80,9 @@ class Credits:
         self.payment_provider = str(env.get('FINDZIA_PAYMENT_PROVIDER', default_provider)).strip().lower()
         if self.payment_provider not in ('paddle', 'myfatoorah'):
             self.payment_provider = default_provider
-        self.sale_plans = PREPAID_PLANS if self.prepaid_enabled else LEGACY_PLANS
+        self.spaces_pricing = str(env.get('FINDZIA_SPACES_PRICING_ENABLED','false')).lower() in ('true','1','yes')
+        if self.spaces_pricing:self.prepaid_enabled=True
+        self.sale_plans = SPACE_PLANS if self.spaces_pricing else PREPAID_PLANS if self.prepaid_enabled else LEGACY_PLANS
         self.available = accounts.available
         self.runtime = CreditRuntime(self)
         if self.available:
@@ -128,6 +130,9 @@ class Credits:
             except (OSError, sqlite3.Error):
                 self.available = False
                 print('BILLING: database unavailable; protected requests fail closed')
+        if self.available and self.spaces_pricing:
+            from findzia_space_credits import SpaceCreditPolicy
+            self.space_policy=SpaceCreditPolicy(self)
         if self.available:
             print('FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False', flush=True)
 
@@ -136,7 +141,7 @@ class Credits:
             raise HTTPException(503, 'credits_unavailable')
 
     def public_config(self):
-        return dict(build='156.7.73-photo-retry', pricing_build='156.7.54', enabled=self.enabled, available=self.available, trial_credits=10,
+        return dict(build='156.7.73-photo-retry', pricing_build='156.7.54', enabled=self.enabled, available=self.available, trial_credits=7 if self.spaces_pricing else 10, credit_unit='flexible' if self.spaces_pricing else 'search', design_cost=1, search_cost=2 if self.spaces_pricing else 1, free_designs=3 if self.spaces_pricing else 0, free_searches=2 if self.spaces_pricing else 10,
                     guest_trial=True,prepaid_enabled=self.prepaid_enabled,payment_provider=self.payment_provider,checkout_available=False, restore_available=False, plans=list(self.sale_plans))
 
     def ledger(self, db, member, grant, request, delta, reason, now):
@@ -146,7 +151,7 @@ class Credits:
     def recover(self, db, now):
         # Middleware limits requests to 180 seconds. A crash lease lives 10 minutes;
         # recovery never races a still-authorized search in another worker.
-        for row in db.execute("SELECT * FROM fz_credit_requests WHERE state='reserved' AND created<? ORDER BY created LIMIT 64", (now-600,)).fetchall():
+        for row in db.execute("SELECT * FROM fz_credit_requests WHERE state='reserved' AND created<? AND (path!='/internal/spaces/design' OR created<?) ORDER BY created LIMIT 64", (now-600,now-3600)).fetchall():
             # A completed search awaiting a busy SQLite writer must not be
             # refunded by crash recovery. Its server-owned outcome is durable.
             record = self.runtime.journal.read(row['member'], row['request'])
@@ -180,7 +185,7 @@ class Credits:
         # Rotating its identifier later cannot regrant this account's trial.
         used = db.execute('SELECT 1 FROM fz_trial_claims WHERE device=?', (key,)).fetchone()
         allocated = db.execute("SELECT COALESCE(SUM(quantity),0) FROM fz_credit_grants WHERE kind='trial'").fetchone()[0]
-        if not used and allocated + 10 > self.trial_budget:
+        if not used and allocated + (7 if self.spaces_pricing else 10) > self.trial_budget:
             # Pausing new trials must never lock a paying member out of
             # an existing balance. Leave their trial eligibility intact.
             paid = db.execute("SELECT 1 FROM fz_credit_grants WHERE member=? AND kind!='trial' AND remaining>0 AND revoked=0 AND starts<=? AND (expires IS NULL OR expires>?)", (member, now, now)).fetchone()
@@ -189,6 +194,9 @@ class Credits:
             raise HTTPException(429, 'trial_budget_reached')
         db.execute('INSERT INTO fz_trial_claims VALUES(?,?,?)', (member, key, now))
         if not used:
+            if self.spaces_pricing:
+                self.space_policy.claim(db,member,now)
+                return
             gid = 'trial:' + member
             db.execute('INSERT INTO fz_credit_grants VALUES(?,?,?,?,?,?,?,?,0)',
                        (gid, member, 'trial', 'trial', 10, 10, now, None))
@@ -280,10 +288,18 @@ class Credits:
                 db.execute('UPDATE fz_credit_grants SET member=? WHERE id=?',(member,grant['id']))
                 db.execute('UPDATE fz_credit_ledger SET member=? WHERE grant_id=?',(member,grant['id']))
             elif grant:
-                # Combine consumed usage, not two ten-search allocations.
+                # Link category-limited trials without granting another trial.
+                guest_trial=db.execute('SELECT * FROM fz_space_trial WHERE grant_id=?',(grant['id'],)).fetchone() if self.spaces_pricing else None
                 consumed=grant['quantity']-grant['remaining']
                 for prior in db.execute("SELECT * FROM fz_credit_grants WHERE member=? AND kind='trial' AND revoked=0",(member,)).fetchall():
-                    debit=min(consumed,prior['remaining']);consumed-=debit
+                    own_trial=db.execute('SELECT * FROM fz_space_trial WHERE grant_id=?',(prior['id'],)).fetchone() if self.spaces_pricing else None
+                    if guest_trial and own_trial:
+                        design=max(0,own_trial['design']-(3-guest_trial['design']))
+                        search=max(0,own_trial['search']-(4-guest_trial['search']))
+                        debit=prior['remaining']-design-search
+                        db.execute('UPDATE fz_space_trial SET design=?,search=? WHERE grant_id=?',(design,search,prior['id']))
+                    else:
+                        debit=min(consumed,prior['remaining']);consumed-=debit
                     db.execute('UPDATE fz_credit_grants SET remaining=remaining-? WHERE id=?',(debit,prior['id']))
                     if debit:self.ledger(db,member,prior['id'],None,-debit,'guest_usage_merge',now)
                 db.execute('UPDATE fz_credit_grants SET revoked=1 WHERE id=?',(grant['id'],))
@@ -302,11 +318,12 @@ class Credits:
         active = db.execute('SELECT * FROM fz_subscriptions WHERE member=? AND period_end>?', (member, now)).fetchone()
         counts = {r['kind']: r['n'] for r in db.execute("SELECT r.kind,COUNT(*) n FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='spent' GROUP BY r.kind", (member,))}
         reserved = db.execute("SELECT COUNT(*) FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='reserved'", (member,)).fetchone()[0]
-        return dict(ok=True, remaining=sum(balances.values()), balances=balances, reserved=reserved,
+        data = dict(ok=True, remaining=sum(balances.values()), balances=balances, reserved=reserved,
                     used=counts, subscription=dict(active) if active else None,
                     trial_claimed=bool(db.execute('SELECT 1 FROM fz_trial_claims WHERE member=?',(member,)).fetchone()),
                     plans=list(self.sale_plans), checkout_available=False, restore_available=False,
                     helper_limits={'guide_per_search':4,'insights_per_search':5})
+        return self.space_policy.snapshot(db,member,data) if self.spaces_pricing else data
 
     def status(self, member):
         self.check(); now=int(time.time())
@@ -317,6 +334,7 @@ class Credits:
 
     def reserve(self, member, request_id, path):
         self.check()
+        if self.spaces_pricing:return self.space_policy.reserve(member,[request_id],path)
         if not REQUEST_ID.fullmatch(request_id or ''):raise HTTPException(400,'request_id_required')
         now=int(time.time()); day=now//86400*86400
         with self.accounts.connect() as db:
@@ -372,6 +390,9 @@ class Credits:
         db.execute('UPDATE fz_credit_requests SET state=?,finished=? WHERE member=? AND request=?',
                    ('spent' if success else 'refunded',now,row['member'],row['request']))
         if not success:
+            if self.spaces_pricing:
+                self.space_policy.refund(db,row,now,reason)
+                return
             db.execute('UPDATE fz_credit_grants SET remaining=remaining+1 WHERE id=?',(row['grant_id'],))
             self.ledger(db,row['member'],row['grant_id'],row['request'],1,reason,now)
 
@@ -429,6 +450,7 @@ class Credits:
             if existing:return False
             db.execute('INSERT INTO fz_credit_grants VALUES(?,?,?,?,?,?,?,?,0)',(gid,member,'subscription' if recurring else 'pack',plan_id,plan['credits'],plan['credits'],start,expiry))
             self.ledger(db,member,gid,None,plan['credits'],'verified_purchase',now)
+            if self.spaces_pricing:self.space_policy.convert(db,now)
             if recurring:
                 # Expired/out-of-order delivery cannot replace a newer period.
                 db.execute('''INSERT INTO fz_subscriptions VALUES(?,?,?,?,?,0)

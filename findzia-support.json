@@ -5,7 +5,7 @@
       "id": "search",
       "en": {
         "question": "How do I search with a photo or text?",
-        "answer": "Tap the camera to take or choose a clear product photo. For a text search, type the product name, brand or model, then tap the magnifying glass or Search on your keyboard. You can add details to a photo search. Try one product at a time with a clear background. Each new text or photo search uses one search credit."
+        "answer": "Tap the camera to take or choose a clear product photo. For a text search, type the product name, brand or model, then tap the magnifying glass or Search on your keyboard. You can add details to a photo search. Try one product at a time with a clear background. Each new product search uses 2 credits."
       },
       "ar": {
         "question": "شلون أبحث بالصورة أو بالنص؟",
@@ -18,12 +18,12 @@
     {
       "id": "credits",
       "en": {
-        "question": "How do search credits work?",
-        "answer": "Your first 10 searches are available without an account, subject to trial availability. Sign in with Google or Apple to link eligible remaining trial credits to your account and buy more. Current one-time packs: {packs}. Purchased credits do not expire. Any applicable tax and the final total appear at checkout. Help conversations do not use search credits."
+        "question": "How do credits work?",
+        "answer": "Eligible new users receive 3 free designs and 2 free product searches, once only. One design image costs 1 credit; searching one product costs 2 credits. Current one-time packs: {packs}. Purchased credits never expire. No subscriptions or auto-renewal. Sign in to link your remaining trial and purchase credits. Tax and the final total appear at checkout. Technical failures and empty searches restore credits. Saved results, comparing, store visits and help are free."
       },
       "ar": {
-        "question": "شلون يشتغل رصيد البحث؟",
-        "answer": "أول 10 بحوث متاحة بدون حساب، حسب توفر التجربة. سجّل بحساب Google أو Apple لربط الرصيد التجريبي المتبقي المؤهل بحسابك وشراء رصيد إضافي. الباقات الحالية بدفعة واحدة: {packs}. الرصيد المشترى ما تنتهي صلاحيته. الضريبة إن وجدت والمبلغ النهائي يظهران عند الدفع. محادثة المساعدة ما تخصم من رصيد البحث."
+        "question": "كيف يُستخدم الرصيد؟",
+        "answer": "يحصل المستخدم الجديد المؤهل على 3 تصاميم وبحثين عن المنتجات مجانًا لمرة واحدة. صورة التصميم برصيد والبحث عن منتج برصيدين. الباقات الحالية بدفعة واحدة: {packs}. الرصيد المدفوع لا ينتهي، وبدون اشتراك أو تجديد تلقائي. سجّل الدخول لربط الرصيد التجريبي المتبقي وشراء رصيد. تظهر الضريبة والمبلغ النهائي عند الدفع. نرجع الرصيد للفشل التقني والبحث دون نتائج. عرض النتائج المحفوظة والمقارنة وزيارة المتاجر والمساعدة مجانية."
       },
       "actions": [
         "plans",
@@ -34,7 +34,7 @@
       "id": "payment",
       "en": {
         "question": "I paid. Where are my credits?",
-        "answer": "Sign in with the same Findzia account used for payment. Open My account and choose Restore purchases, then check Searches remaining. If payment is still being verified, wait for its status before paying again. For help, email info@findzia.com with your purchase reference and a description of the issue. The assistant cannot inspect a payment, add credits or confirm a refund."
+        "answer": "Sign in with the same Findzia account used for payment. Open My account and choose Restore purchases, then check Credits remaining. If payment is still being verified, wait for its status before paying again. For help, email info@findzia.com with your purchase reference and a description of the issue. The assistant cannot inspect a payment, add credits or confirm a refund."
       },
       "ar": {
         "question": "دفعت وما وصلني الرصيد، شسوي؟",
@@ -106,7 +106,7 @@
       "id": "account",
       "en": {
         "question": "How do I sign in or manage my account?",
-        "answer": "Open My account and choose Google or Apple. If sign-in is unavailable or the connection fails, retry when the connection is restored. Use Account details to edit your display name and optional phone number. Your verified sign-in email comes from the provider; Findzia does not receive your Google or Apple password. Use Your search credits for your balance, search packs and purchase history."
+        "answer": "Open My account and choose Google or Apple. If sign-in is unavailable or the connection fails, retry when the connection is restored. Use Account details to edit your display name and optional phone number. Your verified sign-in email comes from the provider; Findzia does not receive your Google or Apple password. Use Credits for your balance, search packs and purchase history."
       },
       "ar": {
         "question": "شلون أسجّل أو أعدّل حسابي؟",

@@ -343,10 +343,10 @@ class PaddleSandbox:
             resolved = self.resolve_pending_checkout(member, pending, plan)
             if resolved is not None:
                 return resolved
-        purchase_plan(plan, prepaid=self.credits.prepaid_enabled)
+        purchase_plan(plan, prepaid=self.credits.prepaid_enabled, spaces=getattr(self.credits,'spaces_pricing',False))
         # This read cannot create a payment. A failed price lookup must not
         # leave a pending checkout or trigger transaction-recovery delays.
-        if plan in ('pack50', 'pack100'):
+        if plan in ('pack50', 'pack100','space_starter','space_plus','space_pro'):
             try:
                 price = self.api('GET', '/prices/' + self.prices[plan])
                 unit = price.get('unit_price') or {}
@@ -546,9 +546,17 @@ class PaddleSandbox:
                         (attempts,int(time.time())+min(3600,2**min(attempts,11)),str(exc)[:80] if re.fullmatch(r'[a-z_0-9]+',str(exc)) else type(exc).__name__,row['event']))
 
     async def worker(self):
+        catalog_due=0
         while True:
             try:
                 if self.ready:
+                    if getattr(self.credits,'spaces_pricing',False) and time.time()>=catalog_due:
+                        catalog_due=time.time()+300
+                        try:
+                            from findzia_space_catalog import ensure_catalog
+                            await asyncio.to_thread(ensure_catalog,self)
+                            catalog_due=time.time()+86400
+                        except Exception as exc:print('SPACES_PADDLE_CATALOG ready=false error='+type(exc).__name__,flush=True)
                     async with self.lock:
                         await asyncio.to_thread(self.drain)
             except asyncio.CancelledError:

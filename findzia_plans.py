@@ -12,14 +12,19 @@ PREPAID_PLANS = (
     dict(id='pack50', name='50 searches', amount_cents=999, currency='USD', credits=50, interval='once', recommended=True),
     dict(id='pack100', name='100 searches', amount_cents=1799, currency='USD', credits=100, interval='once'),
 )
+SPACE_PLANS = (
+    dict(id='space_starter', name='Starter', amount_cents=699, currency='USD', credits=30, interval='once'),
+    dict(id='space_plus', name='Plus', amount_cents=1499, currency='USD', credits=80, interval='once', recommended=True),
+    dict(id='space_pro', name='Pro', amount_cents=2999, currency='USD', credits=180, interval='once'),
+)
 # Never reuse Plus/Pro IDs or their recurring Paddle prices for a top-up.
-PLANS = LEGACY_PLANS + PREPAID_PLANS[1:]
+PLANS = LEGACY_PLANS + PREPAID_PLANS[1:] + SPACE_PLANS
 BY_ID = {p['id']: p for p in PLANS}
 
 
-def purchase_plan(plan_id, *, prepaid=False, once_only=False):
+def purchase_plan(plan_id, *, prepaid=False, once_only=False, spaces=False):
     plan = BY_ID.get(plan_id) if isinstance(plan_id, str) else None
-    offered = PREPAID_PLANS if prepaid else LEGACY_PLANS
+    offered = SPACE_PLANS if spaces else PREPAID_PLANS if prepaid else LEGACY_PLANS
     if plan is None or plan not in offered or (once_only and plan['interval'] != 'once'):
         raise HTTPException(400, 'invalid_plan')
     return plan

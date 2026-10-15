@@ -429,7 +429,7 @@ class MyFatoorahPack:
     @guarded
     def checkout(self, member, plan, language='en', previous_intent=None, acknowledge_unconfirmed=False):
         self.require(member)
-        selected = purchase_plan(plan, prepaid=self.credits.prepaid_enabled, once_only=True)
+        selected = purchase_plan(plan, prepaid=self.credits.prepaid_enabled, once_only=True, spaces=getattr(self.credits,'spaces_pricing',False))
         if previous_intent is not None:
             if acknowledge_unconfirmed is not True: raise HTTPException(400,'acknowledgement_required')
             previous=self.acknowledge_previous(member,previous_intent)
@@ -480,7 +480,7 @@ class MyFatoorahPack:
     def embedded_session(self, member, plan, previous_intent=None, acknowledge_unconfirmed=False):
         self.require(member)
         if not self.embedded: raise HTTPException(403,'embedded_not_available')
-        selected = purchase_plan(plan, prepaid=self.credits.prepaid_enabled, once_only=True)
+        selected = purchase_plan(plan, prepaid=self.credits.prepaid_enabled, once_only=True, spaces=getattr(self.credits,'spaces_pricing',False))
         if previous_intent is not None:
             if acknowledge_unconfirmed is not True: raise HTTPException(400,'acknowledgement_required')
             previous=self.acknowledge_previous(member,previous_intent)

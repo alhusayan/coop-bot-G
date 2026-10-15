@@ -14,10 +14,14 @@ import time
 from collections import Counter
 
 from starlette.requests import Request
+from fastapi import HTTPException
 from starlette.responses import JSONResponse
 from findzia_billing import CreditMiddleware
 
 PATH = '/internal/spaces/image/stream'
+DESIGN_RESERVE = '/internal/spaces/design/reserve'
+DESIGN_FINISH = '/internal/spaces/design/finish'
+PATHS = frozenset((PATH, DESIGN_RESERVE, DESIGN_FINISH))
 
 
 class SpacesImageGateway:
@@ -58,6 +62,33 @@ class SpacesImageGateway:
         self.nonces = {n: expiry for n, expiry in self.nonces.items() if expiry > now}
         if nonce in self.nonces:
             return await fail('replayed_request', 409)
+        self.nonces[nonce] = now + 180
+        if scope.get('path') in (DESIGN_RESERVE, DESIGN_FINISH):
+            try:
+                payload=json.loads(raw)
+                if payload.get('operation')!=scope['path']:raise HTTPException(400,'invalid_request')
+                credits=getattr(self.original.app.state,'findzia_credits',None)
+                if not credits or not credits.available or not credits.enabled or not credits.spaces_pricing:
+                    raise HTTPException(503,'credits_unavailable')
+                if scope['path']==DESIGN_RESERVE:
+                    if request.headers.get('origin') not in credits.accounts.origins:raise HTTPException(403,'origin_not_allowed')
+                    actor=await asyncio.to_thread(credits.actor,request)
+                    ids=payload.get('requests')
+                    if not isinstance(ids,list) or any(not isinstance(v,str) for v in ids):raise HTTPException(400,'invalid_request')
+                    from findzia_space_credits import DESIGN_PATH
+                    reservations=await asyncio.to_thread(credits.space_policy.reserve,actor['id'],ids,DESIGN_PATH)
+                    value={'ok':True,'reservations':reservations}
+                else:
+                    member,rid=payload.get('member'),payload.get('request')
+                    if not isinstance(member,str) or not isinstance(rid,str) or not isinstance(payload.get('success'),bool):raise HTTPException(400,'invalid_request')
+                    with credits.accounts.connect() as db:
+                        row=db.execute("SELECT * FROM fz_credit_requests WHERE member=? AND request=? AND path='/internal/spaces/design'",(member,rid)).fetchone()
+                    if not row:raise HTTPException(404,'not_found')
+                    await asyncio.to_thread(credits.finish,member,rid,payload['success'])
+                    value={'ok':True}
+                return await JSONResponse(value,headers={'Cache-Control':'no-store'})(scope,receive,send)
+            except HTTPException as exc:return await fail(exc.detail,exc.status_code)
+            except (ValueError,TypeError,KeyError):return await fail('invalid_request',400)
         try:
             payload = json.loads(raw)
             room = payload['spaces_room']
