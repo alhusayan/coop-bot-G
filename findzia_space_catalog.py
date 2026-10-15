@@ -29,7 +29,9 @@ def ensure_catalog(service):
         matches=[p for p in found if (p.get('custom_data') or {}).get('findzia_catalog')==VERSION and (p.get('custom_data') or {}).get('findzia_plan')==plan['id']]
         with service.accounts.connect() as db:
             saved=db.execute('SELECT * FROM fz_space_paddle_catalog WHERE mode=? AND plan=?',(service.mode,plan['id'])).fetchone()
-        price=matches[0] if matches else None
+        configured=service.prices.get(plan['id'])
+        price=next((p for p in found if p.get('id')==configured),None) if configured else matches[0] if matches else None
+        if configured and not price:price=service.api('GET','/prices/'+configured)
         if not price and saved and saved['price']:price=service.api('GET','/prices/'+saved['price'])
         if not price:
             # After an ambiguous create, list-only retries avoid duplicate prices.

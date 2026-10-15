@@ -76,7 +76,7 @@ class PaddleSandbox:
         self.live_open = env.get('FINDZIA_PADDLE_LIVE_OPEN', 'false').strip().lower() == 'true'
         self.prices = dict(LIVE_PRICES if self.mode == 'live' else PRICES)
         # New prices are mode-specific; existing Pack/Plus/Pro mappings stay intact.
-        for plan_id in ('pack50', 'pack100'):
+        for plan_id in ('pack50', 'pack100','space_starter','space_plus','space_pro'):
             value = env.get('FINDZIA_PADDLE_' + self.mode.upper() + '_' + plan_id.upper() + '_PRICE_ID', '').strip()
             if re.fullmatch(r'pri_[a-z0-9]{26}', value) and value not in self.prices.values():
                 self.prices[plan_id] = value
