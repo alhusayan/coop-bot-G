@@ -29,7 +29,7 @@ class Catalog(unittest.TestCase):
    self.assertEqual(set(service.prices),{'pack','space_starter','space_plus','space_pro'})
 
  def test_dashboard_prices_recover_pending_without_creating(self):
-  for reuse_ids in (True,False):
+  for reuse_ids in (True,False,"separate"):
    with self.subTest(reuse_ids=reuse_ids), tempfile.TemporaryDirectory() as d:
     @contextmanager
     def connect():
@@ -38,14 +38,15 @@ class Catalog(unittest.TestCase):
       with db:yield db
      finally:db.close()
     old={'pack':'old_starter','pack50':'old_plus','pack100':'old_pro'}
-    prices=[dict(id=list(old.values())[i] if reuse_ids else 'new_'+p['id'],product_id='pro_test',
+    prices=[dict(id=list(old.values())[i] if reuse_ids else 'new_'+p['id'],product_id=('pro_other_'+str(i) if reuse_ids=='separate' and i else 'pro_test'),
       status='active',billing_cycle=None,trial_period=None,
       unit_price={'amount':str(p['amount_cents']),'currency_code':'USD'}) for i,p in enumerate(SPACE_PLANS)]
     def api(method,path,body=None,envelope=False):
      self.assertEqual(method,'GET')
      if path=='/prices/old_starter':return {'product_id':'pro_test','tax_mode':'external'}
-     if path.startswith('/prices?'):return {'data':prices,'meta':{'pagination':{'has_more':False}}}
-     return next(p for p in prices if path=='/prices/'+p['id'])
+     if path.startswith('/prices?'):return {'data':[p for p in prices if p['product_id']=='pro_test'],'meta':{'pagination':{'has_more':False}}}
+     match=next((p for p in prices if path=='/prices/'+p['id']),None)
+     return match or dict(id=path.split('/')[-1],product_id='pro_test',status='active',unit_price={'amount':'499','currency_code':'USD'},billing_cycle=None)
     with connect() as db:
      db.execute('CREATE TABLE fz_space_paddle_catalog(mode TEXT,plan TEXT,price TEXT,state TEXT,updated INTEGER,PRIMARY KEY(mode,plan))')
      db.execute("INSERT INTO fz_space_paddle_catalog VALUES('live','space_starter',NULL,'creating',0)")
