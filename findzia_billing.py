@@ -652,3 +652,5 @@ def install_billing(app, accounts):
     install_paddle(app, service)
     from findzia_myfatoorah import install_myfatoorah
     install_myfatoorah(app, service)
+    from findzia_apple import install_apple
+    install_apple(app, service)
