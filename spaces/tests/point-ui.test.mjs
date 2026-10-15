@@ -1,3 +1,4 @@
+import {bindStoreLinks} from '../public/store-links.js';
 import {MARKETS,orderedMarkets,browserMarket} from '../public/markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from '../public/design-picks.js';
 import test from 'node:test';
@@ -20,9 +21,9 @@ test('clean photo selection is free and opens the original layer without a Space
  window.HTMLElement.prototype.getBoundingClientRect=()=>({width:390,height:292,top:0,left:0,right:390,bottom:292});
  const dialog=document.querySelector('#sheet');dialog.open=false;dialog.showModal=()=>{dialog.open=true;};dialog.close=()=>{dialog.open=false;};window.scrollTo=()=>{};
  document.querySelector('.fz-home').fzBilling={authorizePiece:async()=>{authorizations++;},refresh(){}};
- const fetch=async(path,options={})=>{if(path==='/api/config')return Response.json({markets:{US:{currency:'USD',en:'United States',flag:'US'},KW:{currency:'KWD',en:'Kuwait',flag:'KW'}},demo:job.id});if(/\/(focus|search)\//.test(path))searches++;return Response.json(structuredClone(job));};
+ const fetch=async(path,options={})=>{if(path==='/api/config')return Response.json({markets:{US:{currency:'USD',en:'United States',flag:'US'},SA:{currency:'SAR',en:'Saudi Arabia',flag:'SA'}},demo:job.id});if(/\/(focus|search)\//.test(path))searches++;return Response.json(structuredClone(job));};
  globalThis.fetch=fetch;const storage={getItem:()=>null,setItem:()=>{}};
- const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
+ const context=vm.createContext({document,window,console,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,bindStoreLinks,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
  try{
   vm.runInContext(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),context);
   vm.runInContext("state.market='US'",context);await vm.runInContext('demo()',context);await vm.runInContext('choose(0)',context);
@@ -36,12 +37,12 @@ test('clean photo selection is free and opens the original layer without a Space
   vm.runInContext("selected().items[0].original_view={items:[],lastSearch:{country:'US'}}",context);
   await vm.runInContext("openItem('1')",context);assert.equal(opens[1].view,null,'empty snapshots are not saved results');assert.equal(opens[1].newSearch,false);
   vm.runInContext("selected().items[0].phase='complete';selected().items[0].original_view=null;state.job.demo=true;selected().items[0].alternatives=[{link:'https://store.test/p'}];renderShop()",context);
-  assert.match(document.querySelector('#piece-feedback').textContent,/1 credit/,'legacy/demo flags must not label a new search as free');
+  assert.match(document.querySelector('#piece-feedback').textContent,/2 credits/,'legacy/demo flags must not label a new search as free');
   await vm.runInContext("openItem('1')",context);assert.equal(opens[2].view,null);
   vm.runInContext("selected().items[0].original_view={items:[{url:'https://store.test/p'}],lastSearch:{kind:'image',country:'US'}}",context);
   await vm.runInContext("openItem('1')",context);assert.ok(opens[3].view);
-  vm.runInContext("setMarket('KW')",context);await vm.runInContext("openItem('1')",context);
-  assert.equal(opens[4].market,'KW');assert.equal(opens[4].view,null,'US cache cannot appear in Kuwait');assert.notEqual(opens[4].key,opens[3].key);
+  vm.runInContext("setMarket('SA')",context);await vm.runInContext("openItem('1')",context);
+  assert.equal(opens[4].market,'SA');assert.equal(opens[4].view,null,'US cache cannot appear in Saudi Arabia');assert.notEqual(opens[4].key,opens[3].key);
   vm.runInContext("setMarket('US')",context);await vm.runInContext("openItem('1')",context);assert.ok(opens[5].view,'returning to US retains its own saved result');
   await vm.runInContext("saveDesignPick({key:keyFor(selected().items[0]),room:state.job.id,design:0,item:'1',readOnly:true},{url:'https://store.test/p',title:'Armchair',store:'Store',image:'https://store.test/photo.jpg',price:'USD 99.00'},false)",context);
   assert.equal(document.querySelectorAll('.design-pick').length,1);assert.match(document.querySelector('#design-picks').textContent,/USD 99.00/);

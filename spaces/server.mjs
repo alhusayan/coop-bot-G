@@ -1,3 +1,4 @@
+import {designBilling} from './design-billing.mjs';
 import {searchLocalCatalog} from './shopify.mjs';
 import {searchOriginalPiece,prioritizeOriginalPiece,SEARCH_ENGINE,SEARCH_REVISION} from './findzia-engine.mjs';
 import {checkStock} from './stock.mjs';
@@ -28,11 +29,37 @@ try{state=JSON.parse(readFileSync(STATE,'utf8'));}catch{}
 const tasks=new Map(),itemTasks=new Map();
 const trial=process.env.SPACES_TRIAL_TOKEN||'';
 const secret=trial||'development-only';
+const publicMode=process.env.SPACES_PUBLIC_LAUNCH==='true';
+const chargeDesigns=process.env.FINDZIA_SPACES_PRICING_ENABLED==='true';
+const admissions=new Set();
+function allowedOrigin(req){return ['https://findzia.com','https://www.findzia.com','https://findzia-spaces-production.up.railway.app',...(!secure?['http://'+req.headers.host]:[])].includes(String(req.headers.origin||''));}
+async function reserveDesignMutation(req,owner,id,d,key){
+ const lock='design:'+id;if(admissions.has(lock))throw error('JOB_BUSY',409);admissions.add(lock);
+ try{const [charge]=await reserveDesigns(req,owner,key,1);d.billing=charge;return charge;}finally{admissions.delete(lock);}
+}
+async function reserveDesigns(req,owner,id,count=3){
+ if(!chargeDesigns)return [];
+ if(!allowedOrigin(req))throw error('origin_not_allowed',403);
+ const authorization=String(req.headers.authorization||'');
+ if(!/^Bearer [^\s]{16,4096}$/.test(authorization))throw error('sign_in_required',401);
+ const requests=Array.from({length:count},(_,i)=>createHash('sha256').update(owner+':'+id+':'+i).digest('hex'));
+ const data=await designBilling('reserve',{requests},{Authorization:authorization,Origin:req.headers.origin});
+ return data.reservations;
+}
+async function settleDesign(d,success){
+ if(!d.billing)return;
+ d.billing.success=success;persist();
+ try{await designBilling('finish',d.billing);delete d.billing;persist();}catch{console.log('SPACES_CREDIT_SETTLEMENT pending=true');}
+}
+async function retrySettlements(){for(const j of Object.values(state.jobs))for(const d of j.designs||[])if(d.billing&&typeof d.billing.success==='boolean')await settleDesign(d,d.billing.success);}
+
 const secure=process.env.NODE_ENV==='production';
 function persist(){state.revision=(state.revision||0)+1;writeFileSync(STATE+'.tmp',JSON.stringify(state),{mode:0o600});renameSync(STATE+'.tmp',STATE);}
-function cleanup(){for(const [id,j] of Object.entries(state.jobs)){if(j.owner!=='demo'&&Date.now()-j.created>86400000){delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});}}for(const k of Object.keys(state.quota)){if(!k.startsWith(new Date().toISOString().slice(0,10)))delete state.quota[k];}persist();}
+function cleanup(){for(const [id,j] of Object.entries(state.jobs)){if(j.owner!=='demo'&&!j.designs.some(d=>d.billing)&&Date.now()-j.created>86400000){delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});}}for(const k of Object.keys(state.quota)){if(!k.startsWith(new Date().toISOString().slice(0,10)))delete state.quota[k];}persist();}
 for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting'].includes(d.status)){if(d.status==='analyzing'&&d.inventory_version!==INVENTORY_VERSION&&d.inventory_backup?.items?.length)d.items=d.inventory_backup.items;d.status=d.image?'ready':'error';d.error='INTERRUPTED';}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
+for(const j of Object.values(state.jobs))for(const d of j.designs||[])if(d.billing&&typeof d.billing.success!=='boolean')d.billing.success=!!d.image&&d.image!==d.billing.imageBefore;
 cleanup();
+setInterval(()=>retrySettlements().catch(()=>{}),30000).unref();
 for(const j of Object.values(state.jobs))if(j.measurement?.status==='analyzing'){j.measurement.status='error';j.measurement.error='INTERRUPTED';}
 setInterval(cleanup,3600000).unref();
 function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
@@ -45,7 +72,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({furnishing,inventory_backup,...d},i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3||d.inventory_version!==INVENTORY_VERSION,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(({furnishing_offers,...x})=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({furnishing,inventory_backup,billing,...d},i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3||d.inventory_version!==INVENTORY_VERSION,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(({furnishing_offers,...x})=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 const productDetails=createDetailsService({directory:resolve(DATA,'product-details'),onStart:owner=>{
  // Separate bounded enrichment allowance. Does not touch the Findzia wallet,
@@ -63,11 +90,11 @@ function reserveRoom(owner){
 function fileImage(j,file){const bytes=readFileSync(resolve(DATA,j.id,file));return {inlineData:{mimeType:bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp',data:bytes.toString('base64')}};}
 function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve().then(fn).catch(e=>console.error('SPACES_TASK_FAILED',key,String(e.message).slice(0,80))).finally(()=>tasks.delete(key));tasks.set(key,p);return true;}
 function searchLanguage(value){return ['en','ar','fr','de','es','it','pt','tr','ru','zh','ja','ko','hi','ur','id','ms'].includes(value)?value:'en';}
-function options(raw){return {market:MARKETS[raw.market]?raw.market:'KW',language:searchLanguage(raw.language),room:String(raw.room||'auto').slice(0,60),scope:['full','decor','scratch'].includes(raw.scope)?raw.scope:'full',request:String(raw.request||'').slice(0,600),keep:String(raw.keep||'').slice(0,400),notes:String(raw.notes||'').slice(0,400),budget:Math.min(1e7,Math.max(0,Number(raw.budget)||0)),width:Math.min(1000,Math.max(0,Number(raw.width)||0)),length:Math.min(1000,Math.max(0,Number(raw.length)||0))};}
+function options(raw){return {market:MARKETS[raw.market]?raw.market:'SA',language:searchLanguage(raw.language),room:String(raw.room||'auto').slice(0,60),scope:['full','decor','scratch'].includes(raw.scope)?raw.scope:'full',request:String(raw.request||'').slice(0,600),keep:String(raw.keep||'').slice(0,400),notes:String(raw.notes||'').slice(0,400),budget:Math.min(1e7,Math.max(0,Number(raw.budget)||0)),width:Math.min(1000,Math.max(0,Number(raw.width)||0)),length:Math.min(1000,Math.max(0,Number(raw.length)||0))};}
 async function generateDesign(j,index){
  const d=j.designs[index];d.status='generating';d.error=null;persist();
  try{
- const o=j.options,m=MARKETS[o.market];
+ const o=j.options,m=MARKETS[o.market]||MARKETS.SA;
  if(!j.room_context){j.room_context=await detectRoom(fileImage(j,'original.jpg'),j.options);j.room=j.room_context.room_en;persist();}
  const prompt=designPrompt(j.room_context,o,STYLES[index].prompt,m.currency);
  let img,checked=false,correction='';
@@ -82,14 +109,14 @@ async function generateDesign(j,index){
  const buffer=Buffer.from(img.data,'base64');if(buffer.length<1000||buffer.length>15e6)throw Error('NO_IMAGE');
  // Native output MIME is retained; no upload metadata is copied into the result.
  d.image='design-'+index+(img.mimeType==='image/jpeg'?'.jpg':'.png');writeFileSync(resolve(DATA,j.id,d.image),buffer,{mode:0o600});d.status='ready';console.log('SPACES_DESIGN_READY',index);launch('shop:'+j.id+':'+index,()=>identifyAndShop(j,index));
- }catch(e){d.status='error';d.error=e.message;console.error('SPACES_DESIGN_ERROR',index,e.message);}persist();
+ }catch(e){d.status='error';d.error=e.message;console.error('SPACES_DESIGN_ERROR',index,e.message);}persist();await settleDesign(d,!!d.image);
 }
 async function generateJob(j){
  try{
  j.room_context=await detectRoom(fileImage(j,'original.jpg'),j.options);j.room=j.room_context.room_en;
  console.log('SPACES_ROOM_TYPE',j.id,JSON.stringify({type:j.room_context.type,label:j.room,confidence:j.room_context.confidence}));persist();
  await Promise.all(j.designs.map((_,i)=>generateDesign(j,i)));
- }catch(e){for(const d of j.designs){d.status='error';d.error=e.message;}persist();}
+ }catch(e){for(const d of j.designs){d.status='error';d.error=e.message;}persist();await Promise.all(j.designs.map(d=>settleDesign(d,false)));}
 }
 function lensURL(j,item){
  const expires=Date.now()+20*60000,path='/lens-media/'+j.id+'/'+item.crop;
@@ -166,10 +193,11 @@ async function replacePiece(j,index,item,offer){
    item.offers=[result.offer];item.alternatives=[];item.status='done';item.description=offer.title;
    d.image=name;d.status='complete';persist();console.log('SPACES_PLACEMENT_READY',j.id,index,item.id);
  }catch(e){d.status='complete';d.adaptation_error=e.message;persist();console.log('SPACES_PLACEMENT_FAILED',j.id,index,e.message);}
+ await settleDesign(d,!d.adaptation_error);
 }
-function makeJob(owner,opt,buffer,idempotency=''){
+function makeJob(owner,opt,buffer,idempotency='',charges=[]){
  const id=randomBytes(12).toString('hex');mkdirSync(resolve(DATA,id),{recursive:true,mode:0o700});writeFileSync(resolve(DATA,id,'original.jpg'),buffer,{mode:0o600});
- const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map(s=>({id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
+ const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map((s,i)=>({billing:charges[i],id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
 }
 export function createServer(){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{
@@ -182,7 +210,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
-  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.10.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-1.0.0',public_launch:publicMode,flexible_credits:chargeDesigns,source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -190,9 +218,10 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.setHeader('Set-Cookie',cookie(session(req)||undefined));path='/';
  }
  let owner=session(req);
- if(u.pathname==='/'&&owner&&trial&&['GET','HEAD'].includes(req.method)){
+ if(!publicMode&&u.pathname==='/'&&owner&&trial&&['GET','HEAD'].includes(req.method)){
    res.writeHead(303,{...headers,'Location':'/trial/'+trial,'Cache-Control':'no-store'});return res.end();
  }
+ if(publicMode&&!owner&&['/','/account','/api/config'].includes(path)&&['GET','HEAD'].includes(req.method)){owner=randomBytes(16).toString('hex');res.setHeader('Set-Cookie',cookie(owner));}
  if(!secure&&!trial&&!owner){res.setHeader('Set-Cookie',cookie());owner='local-development';}
   if(path.startsWith('/api/')||path.startsWith('/media/')||path==='/account'){
    if(!owner)throw error('TRIAL_LINK_REQUIRED',401);
@@ -233,8 +262,13 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    if(tasks.size>8)throw error('PROVIDER_BUSY',429);
    const encoded=String(b.image||'');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(encoded))throw error('INVALID_IMAGE');
    const buffer=Buffer.from(encoded.split(',')[1],'base64');if(buffer.length>12*1024*1024||buffer.length<200||buffer[0]!==255||buffer[1]!==216||buffer[2]!==255)throw error('INVALID_IMAGE');
-   reserveRoom(owner);
-   const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>generateJob(j));return send(res,202,publicJob(j));
+   if(chargeDesigns&&!/^[A-Za-z0-9_-]{20,100}$/.test(idem))throw error('REQUEST_ID_REQUIRED');
+   const admission=owner+':'+idem;if(admissions.has(admission))throw error('search_in_progress',409);admissions.add(admission);
+   try{
+    reserveRoom(owner);const charges=await reserveDesigns(req,owner,idem);
+    let j;try{j=makeJob(owner,options(b),buffer,idem,charges);}catch(e){await Promise.all(charges.map(c=>designBilling('finish',{...c,success:false}).catch(()=>{})));throw e;}
+    launch('generate:'+j.id,()=>generateJob(j));return send(res,202,publicJob(j));
+   }finally{admissions.delete(admission);}
  }
  // Catalog market and query come from the owned room, never client country hints.
  const catalogMatch=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/catalog\/([0-2])\/(\d{1,2})$/);
@@ -242,13 +276,13 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    const j=ownerJob(catalogMatch[1],owner),d=j.designs[Number(catalogMatch[2])],item=d?.items?.find(x=>String(x.id)===catalogMatch[3]);
    if(!item||item.mode==='keep')throw error('NOT_FOUND',404);
    consume(owner,'catalog',150);
-   const market=j.options.market,result=await searchLocalCatalog(item.query||item.name_en,market,{language:MARKETS[market].lang});
+   const market=j.options.market,result=await searchLocalCatalog(item.query||item.name_en,market,{language:(MARKETS[market]||MARKETS.SA).lang});
    return send(res,200,{market,...result});
  }
  const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|focus|replace|results|picks)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
-   if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
+   if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if(j.designs.some(d=>d.billing)||[...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
    if(req.method==='POST'){
      const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting')throw error('JOB_BUSY',409);
      if(action==='results'){
@@ -273,13 +307,13 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      }
      if(action==='retry'){
        if(d.status!=='error'||d.retries>=2)throw error('TRIAL_LIMIT',429);
-       consume(owner,'retry',6);d.retries++;launch('retry:'+id+':'+i,()=>generateDesign(j,i));return send(res,202,publicJob(j));
+       consume(owner,'retry',6);if(d.billing)throw error('search_in_progress',409);await reserveDesignMutation(req,owner,id+':'+i,d,id+':retry:'+i+':'+d.retries);d.retries++;launch('retry:'+id+':'+i,()=>generateDesign(j,i));return send(res,202,publicJob(j));
      }
      if(action==='replace'){
        const item=d.items.find(x=>x.id===String(b.item)),offer=item?.alternatives?.find(x=>x.link===b.offer);
        if(!item||!offer||!(offer.search_engine===SEARCH_ENGINE&&offer.search_market===j.options.market||sourceScope(offer.link,j.options.market)))throw error('INVALID_INPUT');
        if(offer.availability!=='listed_available')throw error(offer.availability==='out_of_stock'?'OUT_OF_STOCK':'STOCK_UNCONFIRMED',409);
-       consume(owner,'placements',8);d.status='adapting';d.adaptation_error=null;persist();launch('replace:'+id+':'+i,()=>replacePiece(j,i,item,offer));return send(res,202,publicJob(j));
+       consume(owner,'placements',8);if(d.billing)throw error('search_in_progress',409);const charge=await reserveDesignMutation(req,owner,id+':'+i,d,id+':adapt:'+i+':'+d.image+':'+item.id+':'+offer.link);d.billing=charge?{...charge,imageBefore:d.image}:undefined;d.status='adapting';d.adaptation_error=null;persist();launch('replace:'+id+':'+i,()=>replacePiece(j,i,item,offer));return send(res,202,publicJob(j));
      }
      if(action==='focus'||action==='search'){
        const item=d.items.find(x=>x.id===String(itemIndex));if(!item||item.status==='kept')throw error('INVALID_INPUT');
@@ -291,7 +325,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
        const authorization=String(req.headers.authorization||'');
        if(!/^Bearer [^\s]{16,4096}$/.test(authorization))throw error('sign_in_required',401);
        const origin=String(req.headers.origin||'');
-       if(origin!==(secure?'https://':'http://')+req.headers.host)throw error('origin_not_allowed',403);
+       if(!allowedOrigin(req))throw error('origin_not_allowed',403);
        consume(owner,'search',30);
        item.last_ui_request=b.request_id;
        const requestId=createHash('sha256').update([owner,key,b.request_id].join(':')).digest('hex').slice(0,32);
@@ -310,7 +344,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  assets['/findzia/fonts/OFL-Cairo.txt']='findzia/fonts/OFL-Cairo.txt';
  for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js'])assets['/findzia/'+name]='findzia/'+name;
   for(const name of ['store-links.js','spaces-typography.css','markets.js','findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js','original-results-frame.css','design-picks.js','product-facts.js','product-summary.js','similar-review.js','spaces-theme.js','mobile-viewport.js','account-navigation.js','account-page.js','account-page.css','search-budget.js'])assets['/'+name]=name;
- if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
+ if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,...(path==='/'&&publicMode?{'X-Robots-Tag':'index, follow'}:{}),'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
  throw error('NOT_FOUND',404);
  }catch(e){if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'UNEXPECTED_ERROR'});else res.end();if(!e.status)console.error('SPACES_HTTP_ERROR',e.message);}
 });}
@@ -343,7 +377,7 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.10.1');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 1.0.0');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
 

@@ -7,6 +7,7 @@ export function frameDocument(html){
  return html.replace(/((?:src|href)=["'])\/(assets\/[^"']+|favicon\.svg)(["'])/g,'$1https://findzia.com/$2$3')
   // Spaces shares the original search engine, with its own reviewed UI copy.
   .replace(/(src=["'])https:\/\/findzia\.com\/assets\/findzia-i18n\.[^"']+\.js(["'])/g,'$1/findzia/i18n.js$2')
+  .replace(/(src=["'])https:\/\/findzia\.com\/assets\/findzia-billing\.[^"']+\.js(["'])/g,'$1/findzia/billing.js$2')
   .replace(/<html\b/i,'<html data-findzia-spaces-results')
   .replace(/<\/head>/i,'<link rel="stylesheet" href="/original-results-frame.css"><link rel="stylesheet" href="/spaces-typography.css"></head>');
 }
@@ -18,7 +19,7 @@ export async function originalPage(fetcher=fetch){
  if(cached&&Date.now()-cached.at<60000)return cached.html;
  if(flight)return flight;
  flight=(async()=>{
-  const response=await fetcher('https://findzia.com/',{redirect:'error',signal:AbortSignal.timeout(20000)});
+  const response=await fetcher('https://findzia.com/trial/original',{redirect:'error',signal:AbortSignal.timeout(20000)});
   if(!response.ok||!response.headers.get('content-type')?.includes('text/html'))throw Error('ORIGINAL_PAGE_UNAVAILABLE');
   const html=await response.text();if(html.length>3000000)throw Error('ORIGINAL_PAGE_UNAVAILABLE');
   cached={at:Date.now(),html:frameDocument(html)};return cached.html;

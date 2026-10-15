@@ -18,7 +18,7 @@ test('every supported language covers the complete Spaces flow and retains inter
    assert.ok(text.trim(),language+': '+catalog.keys[index]);
    assert.deepEqual([...text.matchAll(/\{\w+\}/g)].map(x=>x[0]).sort(),[...catalog.keys[index].matchAll(/\{\w+\}/g)].map(x=>x[0]).sort(),language+': '+catalog.keys[index]);
    // These two words are also the correct German/Italian terms.
-   if(language!=='en'&&index>=794&&!['de:Optional','it:Password','fr:Dimensions','fr:Configuration','es:Configuration','id:Diameter','ms:Diameter','nl:Diameter'].includes(language+':'+catalog.keys[index]))assert.notEqual(text,catalog.values.en[index],language+': '+catalog.keys[index]);
+   if(language!=='en'&&index>=794&&!['de:Optional','it:Password','fr:Dimensions','fr:Configuration','es:Configuration','id:Diameter','ms:Diameter','nl:Diameter','de:Credits','nl:Credits','de:2 credits','nl:2 credits','nl:{count} credits'].includes(language+':'+catalog.keys[index]))assert.notEqual(text,catalog.values.en[index],language+': '+catalog.keys[index]);
   });
  }
  const arabic=catalog.values.ar.join('\n');

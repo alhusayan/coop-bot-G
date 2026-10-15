@@ -21,12 +21,12 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
   newSearch:home,openDesigns,accountNotice:notice,
   accountSaved:()=>{try{return JSON.parse(localStorage.getItem('findzia-saved-v1')||'[]');}catch{return [];}},
   accountRemoveSaved:url=>{const saved=root.fzRefineBridge.accountSaved().filter(x=>x.url!==url);localStorage.setItem('findzia-saved-v1',JSON.stringify(saved));},
-  accountSearch:(query,country)=>{const url=new URL('https://findzia.com/');url.searchParams.set('q',query);url.searchParams.set('country',country||getMarket());location.assign(url.href);},
+  accountSearch:(query,country)=>{const url=new URL('https://findzia.com/trial/original');url.searchParams.set('q',query);url.searchParams.set('country',country||getMarket());location.assign(url.href);},
   snapshot:()=>({view:{items:[]},recommendation:null}),restore:()=>{root.dataset.homeState='empty';},restoreHomeView:home
  };
  function sync(){
   const markets=getMarkets();market.replaceChildren(...Object.entries(markets).map(([code,m])=>new Option(m.flag+' '+m.en,code)));market.value=getMarket();
-  const selected=markets[getMarket()];root.querySelector('[data-dark-market-flag]').textContent=selected?.flag||'🇰🇼';
+  const selected=markets[getMarket()];root.querySelector('[data-dark-market-flag]').textContent=selected?.flag||'🇸🇦';
   let countryName=selected?.en||'';try{countryName=new Intl.DisplayNames([root.dataset.lang||'en'],{type:'region'}).of(getMarket());}catch{}
   root.querySelector('[data-dark-market-open]').setAttribute('aria-label',(window.FindziaI18n?.t('Market, language and currency','السوق واللغة والعملة',root)||'Market, language and currency')+' · '+countryName);
  }
