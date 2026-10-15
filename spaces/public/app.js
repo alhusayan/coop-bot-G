@@ -1,13 +1,13 @@
 import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
-import {createOriginalLayer} from './original-results.js';
+import {createOriginalLayer} from './original-results.js?v=20261016-credit1';
 import {bindStoreLinks} from './store-links.js';
 import {mountFindzia} from './findzia-shell.js?v=20261015-ios2';
 import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261015-studio2';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261016-credit1';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 bindStoreLinks(document);
@@ -264,7 +264,6 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'designs':pointFocus=null;closeSheet();view('designs');break;
  case 'choose':await choose(index);break;
  case 'retry':el.disabled=true;generationStarted=Date.now();if(await changeJob('/retry',{design:index})){renderKey='';renderDesigns();poll();}break;
- case 'preview':showSheet(`<img class="preview-photo" src="${esc(state.job.designs[index].image)}" alt="${esc(state.job.designs[index].title)}"><div class="preview-actions"><button class="primary wide" data-action="choose" data-index="${index}">Explore this design ${icon('forward')}</button></div>`,'preview');break;
  case 'original':showSheet(`<img class="preview-photo" src="${esc(state.job.original)}" alt="Original room"><div class="preview-actions"><h3>Your original room</h3></div>`,'preview');break;
  case 'zoom':showSheet(`<div class="design-canvas zoom-canvas"><img src="${esc(selected().image)}" alt="Selected room design"><div data-zoom-hotspots></div></div><div class="zoom-feedback" data-zoom-feedback></div><div class="preview-actions"><button class="browse-pieces" data-action="pieces">${esc(translate('All pieces','جميع القطع'))} ${icon('chevron',true)}</button></div>`,'zoom');renderShop();break;
  case 'compare':state.compare=!state.compare;renderShop();break;
@@ -314,3 +313,6 @@ init().then(async allowed=>{
 mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();shell.setMarketLanguage();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));
 
 document.addEventListener('spaces:locale',()=>{if(state.view==='designs')renderDesigns();if(state.view==='shopping')renderShop();originalLayer.refreshLanguage?.();});
+
+// Preserve scrolling and pinch zoom, without iOS image peek/share callouts.
+document.addEventListener('contextmenu',event=>{if(event.target.closest?.('.design-image,.design-canvas,.setup-photo,.original-peek,.preview-photo'))event.preventDefault();});

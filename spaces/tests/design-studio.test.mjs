@@ -22,7 +22,7 @@ test('a later-index result is immediately usable and stays first when another de
  const grid=document.getElementById('grid');patchHTML(grid,a.cards);const first=grid.firstElementChild,image=first.querySelector('img');
  j.designs[0].image='/zero.jpg';j.designs[0].status='ready';
  const b=designPresentation(j,{...options,order:[2,0]});patchHTML(grid,b.cards);
- assert.equal(grid.firstElementChild,first);assert.equal(first.querySelector('img'),image);assert.equal(grid.querySelectorAll('[data-action="choose"]')[1].dataset.index,'0');
+ assert.equal(grid.firstElementChild,first);assert.equal(first.querySelector('img'),image);assert.equal(grid.querySelectorAll('.design-card-body [data-action="choose"]')[1].dataset.index,'0');
 });
 test('completion removes activity; errors retain correct retry indexes; reconnection never claims progress',()=>{
  const j=job();j.designs.forEach((d,i)=>{d.image='/'+i+'.jpg';d.status='ready';});
@@ -76,4 +76,12 @@ test('style tour survives polls, respects manual choice and stops off-screen, on
  tour.sync(state);assert.equal(tasks.size,1);tour.stop();assert.equal(tasks.size,0);
  assert.equal(tour.sync({...state,jobId:'two',reduced:true}).styleIndex,0);assert.equal(tasks.size,0);
  tour.choose(1);assert.equal(tasks.size,0);assert.equal(tour.sync({...state,jobId:'two',reduced:true}).styleIndex,1);
+});
+
+test('design photos open the selected design directly instead of a duplicate preview',()=>{
+ const j=job();j.designs[1].image='/one.jpg';
+ const {document}=parseHTML(designPresentation(j,options).cards);
+ const photo=document.querySelector('.design-image');assert.equal(photo.dataset.action,'choose');assert.equal(photo.dataset.index,'1');
+ assert.equal(photo.querySelector('img').getAttribute('draggable'),'false');
+ assert.doesNotMatch(readFileSync(new URL('../public/app.js',import.meta.url),'utf8'),/case 'preview':/);
 });

@@ -23,6 +23,11 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  const body=document.createElement('div');body.className='original-results-body';
  const waiting=document.createElement('div');waiting.className='original-results-waiting';waiting.setAttribute('aria-hidden','true');
  waiting.innerHTML='<span class="search-spinner"></span><span class="results-skeletons"><i></i><i></i></span>';body.append(waiting);
+ const blocked=document.createElement('section');blocked.className='original-results-blocked';blocked.hidden=true;blocked.setAttribute('role','status');
+ const blockedTitle=document.createElement('h2'),blockedText=document.createElement('p'),addCredits=document.createElement('button'),retryBlocked=document.createElement('button');
+ addCredits.type=retryBlocked.type='button';addCredits.className='primary';retryBlocked.className='text-button';blocked.append(blockedTitle,blockedText,addCredits,retryBlocked);body.append(blocked);
+ addCredits.addEventListener('click',()=>{close();openAccountModal('plans');});
+ retryBlocked.addEventListener('click',()=>{if(current&&!current.busy&&!current.loading)run(current);});
  bar.append(thumbnail,heading,back);layer.append(bar,tools,body);document.body.append(layer);
  const text=(en,ar)=>globalThis.window?.FindziaI18n?.t(en,ar,document.querySelector('#findzia-home-spaces'))||(getLanguage()==='ar'?ar:en);
  function resultsOnly(session){
@@ -47,10 +52,20 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(thumbnail.getAttribute('src')!==session.crop)thumbnail.src=session.crop;subtitle.textContent=text('Store options','خيارات المتاجر');
   if(!back.firstChild)back.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
   back.setAttribute('aria-label',text('Done','تم'));title.textContent=session.name;
-  const searching=!!(session.busy||session.loading);
+  const isBlocked=!!session.blockedCode;
+  blocked.hidden=!isBlocked;session.frame.hidden=isBlocked;
+  if(isBlocked){
+   const credits=session.blockedCode==='credits_exhausted';
+   blockedTitle.textContent=credits?text('You’re out of search credits','نفد رصيد البحث'):'';
+   blockedTitle.hidden=!credits;
+   blockedText.textContent=credits?text('Add credits to keep searching.','أضف رصيدًا لمواصلة البحث.'):session.blockedMessage;
+   addCredits.hidden=!credits;addCredits.textContent=text('Add credits','إضافة رصيد');
+   retryBlocked.textContent=text('Try again','حاول مجددًا');
+  }
+  const searching=!isBlocked&&!!(session.busy||session.loading);
   const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
   waiting.hidden=!!visible||!!session.error||!searching;
-  status.textContent=searching?text('Searching…','جارٍ البحث…'):!visible?(session.error||''):'';
+  status.textContent=isBlocked?'':searching?text('Searching…','جارٍ البحث…'):!visible?(session.error||''):'';
   status.setAttribute('aria-busy',String(searching));
   const value=searching?(session.budget?Math.min(99,Math.floor((Date.now()-session.started)/SEARCH_BUDGET_MS*100)):0):100;
   progress.setAttribute('aria-label',text('Search progress','تقدّم البحث'));
@@ -82,7 +97,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   resultsOnly(session);
   // Loading a late product photo is not an active search. The native stream
   // can already be finished/stopped while media_pending remains true.
-  const c=context(session),busy=!session.budget?.expired&&!!(session.launching||c?.busy||session.root.dataset.searchLaunching==='true');
+  const c=context(session),busy=!session.budget?.expired&&!session.blockedCode&&!!(session.launching||c?.busy||session.root.dataset.searchLaunching==='true');
   if(session.busy!==busy){session.busy=busy;onStatus?.(session.key,busy);if(!busy){save(session);document.querySelector('#findzia-home-spaces')?.fzBilling?.refresh(true);}}
   syncPicks(session);paint(session);
  }
@@ -162,7 +177,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(reuseBudget&&session.budget?.expired)return;
   if(!reuseBudget||!session.budget)beginBudget(session);
   const budget=session.budget;
-  session.error='';session.completed=false;session.legacy=false;session.launching=true;session.busy=true;session.startedSearch=true;paint(session);onStatus?.(session.key,true);
+  session.blockedCode='';session.blockedMessage='';session.error='';session.completed=false;session.legacy=false;session.launching=true;session.busy=true;session.startedSearch=true;paint(session);onStatus?.(session.key,true);
   try{
    const response=await fetch(session.crop,{credentials:'same-origin',cache:'no-store',signal:budget.signal});if(!response.ok)throw Error('Photo unavailable');
    const blob=await response.blob(),win=session.frame.contentWindow;
@@ -172,7 +187,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const file=new win.File([blob],'room-piece.jpg',{type:blob.type||'image/jpeg'});
    const result=await session.root.fzRefineBridge.searchPhoto(file);
    if(session.budget!==budget||budget.expired)return;
-   session.completed=result!==false;
+   session.completed=!session.blockedCode&&result!==false;
    if(result===false&&!context(session)?.busy)session.startedSearch=!!context(session)?.kind&&context(session).kind==='image';
   }catch{if(session.budget===budget&&!budget.expired)session.error=text('Could not finish. Try again.','لم يكتمل البحث. أعد المحاولة.');}
   finally{if(session.budget===budget){budget.finish();clearInterval(session.progressTimer);session.launching=false;watch(session);save(session);}}
@@ -187,6 +202,12 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(session.budget?.expired)return;
   if(!session.root)throw Error('Original page unavailable');
   const win=session.frame.contentWindow,root=session.root;
+  root.addEventListener('fz:search-blocked',event=>{
+   if(!event.detail?.code)return;
+   session.blockedCode=event.detail.code;session.blockedMessage=event.detail.message||text('Could not check your credits. Please try again.','تعذّر التحقق من رصيدك. حاول مجددًا.');
+   session.error=session.blockedMessage;session.completed=false;session.busy=false;session.launching=false;
+   session.budget?.finish();clearInterval(session.progressTimer);onStatus?.(session.key,false);paint(session);
+  });
   bindStoreLinks(session.frame.contentDocument);
   bindAccountNavigation(root,view=>{close();openAccountModal(view);});
   const beforeSearch=win.FindziaBeforeSearch;
