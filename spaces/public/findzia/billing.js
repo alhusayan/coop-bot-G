@@ -349,7 +349,7 @@
       if(!account.member()){account.open('signin');return true;}
       if(record.owner&&account.member()?.id&&record.owner!==account.member().id)return false;
       const rev=revision;paymentBusy=true;
-      paymentMessage=paymentCopy('pending',tr('Confirming your payment…','نتحقق من دفعتك…'));account.open('checkout');
+      paymentMessage=paymentCopy('pending',tr('Confirming your payment…','نتحقق من دفعتك…'));account.open('usage');
       try{
         const hasPayment=typeof record.payment==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(record.payment);
         const data=hasPayment
@@ -795,7 +795,7 @@
       if(paymentBusy||!paymentTxn||!account.member()||paymentRevision!==revision)return;
       clearTimeout(recoveryTimer);recoveryTimer=null;
       paymentBusy=true;const rev=revision,tid=paymentTxn;
-      paymentMessage=paymentCopy('pending',tr('Confirming payment…','نتحقق من الدفع…'));account.open('checkout');
+      paymentMessage=paymentCopy('pending',tr('Confirming payment…','نتحقق من الدفع…'));account.open('usage');
       const confirmationEpoch=feedbackEpoch;
       try{
         let confirmed=false;
@@ -879,7 +879,7 @@
     async function restorePurchases(){
       if(!account.member()){account.open('signin');return;}
       if(paymentBusy)return;
-      const rev=revision;paymentBusy=true;paymentMessage=paymentCopy('pending',tr('Checking your purchases…','نتحقق من مشترياتك…'));account.open('checkout');
+      const rev=revision;paymentBusy=true;paymentMessage=paymentCopy('pending',tr('Checking your purchases…','نتحقق من مشترياتك…'));account.open('usage');
       try{
         await paymentConfig();if(rev!==revision)return;
         // Explicit restore checks the retired provider too; checkout warmup does not wait for it.
@@ -909,6 +909,8 @@
       finally{if(rev===revision){paymentBusy=false;account.render();}}
     }
     function renderCheckout(body){
+      // Pending verification is automatic; keep the customer on their credits.
+      if(paymentState==='pending'){renderUsage(body);return;}
       const state=paymentState,success=state==='success'||state==='restored';
       const card=el('section','fzb-payment-result');card.dataset.paymentState=state;
       const badge=el('div','fzb-payment-icon');badge.setAttribute('aria-hidden','true');
@@ -927,7 +929,7 @@
         let check=paymentTxn?confirmPayment:null;
         try{if(!check&&mfConfig?.enabled&&sessionStorage.getItem(mfReturnKey))check=confirmMyFatoorah;}catch(_){}
         if(check||state==='pending'){
-          const b=primary(tr('Check payment','تحقق من الدفع'),check||restorePurchases);b.disabled=paymentBusy;b.setAttribute('aria-busy',String(paymentBusy));
+          primary(tr('Credits','الرصيد'),()=>account.open('usage'));
         }else if(selectedPlan()){
           const b=primary(tr('Try again','حاول مجددًا'),()=>startPayment());b.dataset.checkout='';b.disabled=paymentBusy;
         }else primary(tr('Credits','الرصيد'),()=>account.open('usage'));
@@ -956,12 +958,6 @@
         ms:['Pembayaran disahkan','Pembayaran tidak dapat diselesaikan','Menyemak pembayaran','Pembelian dikemas kini']
       };
       return (headings[root.dataset.lang]||headings.en)[state==='success'?0:state==='error'?1:state==='restored'?3:2];
-    }
-    function appendPaymentCheck(body){
-      let check=null;
-      if(paymentTxn)check=confirmPayment;
-      else try{if(mfConfig?.enabled&&sessionStorage.getItem(mfReturnKey))check=confirmMyFatoorah;}catch(_){}
-      if(check){const b=button(tr('Check payment','تحقق من الدفع'),check,'fza-text');b.disabled=paymentBusy;body.append(b);}
     }
     async function paidFetch(url,options={}){
       const target=new URL(url,location.href), allowed=new URL(api);
@@ -1018,12 +1014,20 @@
       if(account.member()&&(paddleConfig?.management_available||paddleConfig?.checkout_available))actions.append(button(tr('Purchase history','سجل المشتريات'),viewPurchases,'fza-text'));
       body.append(details,actions);
     }
+    function planFeatures(plan){
+      const capacityCopy={"en": "{designs} designs or {searches} product searches", "ar": "{designs} تصميم أو {searches} بحث عن منتج", "fr": "{designs} designs ou {searches} recherches de produits", "de": "{designs} Designs oder {searches} Produktsuchen", "es": "{designs} diseños o {searches} búsquedas de productos", "it": "{designs} progetti o {searches} ricerche di prodotti", "pt": "{designs} designs ou {searches} pesquisas de produtos", "tr": "{designs} tasarım veya {searches} ürün araması", "ru": "{designs} дизайнов или {searches} поисков товаров", "zh": "{designs} 次设计或 {searches} 次商品搜索", "ja": "デザイン{designs}回、または商品検索{searches}回", "ko": "디자인 {designs}회 또는 상품 검색 {searches}회", "hi": "{designs} डिज़ाइन या {searches} उत्पाद खोज", "ur": "{designs} ڈیزائن یا {searches} مصنوعات کی تلاش", "id": "{designs} desain atau {searches} pencarian produk", "ms": "{designs} reka bentuk atau {searches} carian produk", "nl": "{designs} ontwerpen of {searches} productzoekopdrachten"};
+      const capacity=(capacityCopy[root.dataset.lang]||capacityCopy.en).replace('{designs}',String(plan.credits)).replace('{searches}',String(Math.floor(plan.credits/2)));
+      const list=el('ul','fzb-plan-features');
+      const first=el('li','',capacity);first.dataset.noI18n='';list.append(first);
+      for(const text of [tr('One-time payment','دفعة واحدة'),tr('No expiry','بدون انتهاء'),tr('Saved results, comparisons and store visits are free.','النتائج المحفوظة والمقارنة وزيارة المتاجر مجانية.')])list.append(el('li','',text));
+      return list;
+    }
     function renderPlans(body){
       // Warm the SDK when the customer opens plans. Never create an order here.
       if(account.member())paymentConfig().then(()=>{if(paddleConfig?.checkout_available)loadPaddle().catch(()=>{});});
       const plans=config?.plans||status?.plans||[];
       if(!plans.length){body.append(el('p','fza-caption',error?message(error):tr('Loading…','جاري التحميل…')));if(error)body.append(button(tr('Try again','حاول مجددًا'),()=>refresh(true)));return;}
-      if(paymentMessage&&!['success','restored'].includes(paymentState)){const msg=el('p','fza-payment-message',paymentMessage);msg.setAttribute('role','status');body.append(msg);appendPaymentCheck(body);}
+      if(paymentMessage&&paymentState==='error'){const msg=el('p','fza-payment-message',paymentMessage);msg.setAttribute('role','status');body.append(msg);}
       const intro=el('section','fzb-plans-intro');
       intro.append(el('h2','',tr('Choose your pack','اختر باقتك')));
       const promises=el('p','fzb-plan-promises');promises.append(el('span','',tr('One-time payment','دفعة واحدة')),el('span','',tr('No expiry','بدون انتهاء')));intro.append(promises);intro.append(el('p','fza-caption',tr('1 design = 1 credit. 1 product search = 2 credits.','التصميم برصيد واحد. البحث عن منتج برصيدين.')),el('p','fza-caption',tr('3 free designs + 2 free product searches','3 تصاميم مجانية + بحثان مجانيان عن المنتجات')));body.append(intro);
@@ -1053,12 +1057,12 @@
         buy.disabled=loading||(paymentProvider()==='paddle'&&Array.isArray(paddleConfig?.checkout_plan_ids)&&!paddleConfig.checkout_plan_ids.includes(plan.id));
         buy.setAttribute('aria-busy',String(loading));
         card.addEventListener('click',event=>{if(!event.target.closest('button')&&!buy.disabled)choosePlan(plan.id);});
-        footer.append(buy);card.append(footer);list.append(card);
+        footer.append(buy);card.append(footer,planFeatures(plan));list.append(card);
       }
       body.append(list);
       const details=el('section','fzb-plans-details');
       details.append(el('p','',tr('Prices in USD. Tax calculated at checkout.','الأسعار بالدولار الأمريكي. تُحسب الضريبة عند الدفع.')));
-      details.append(el('p','',tr('Paid credits never expire. No subscriptions or auto-renewal.','الرصيد المدفوع لا ينتهي. بدون اشتراكات أو تجديد تلقائي.')),el('p','',tr('Saved results, comparisons and store visits are free.','النتائج المحفوظة والمقارنة وزيارة المتاجر مجانية.')),el('p','',tr('Technical failures and empty searches are refunded. Style preferences are not technical failures.','نرجع الرصيد عند الفشل التقني أو عدم وجود نتائج. اختلاف الذوق ليس فشلًا تقنيًا.')));
+      details.append(el('p','',tr('Technical failures and empty searches are refunded. Style preferences are not technical failures.','نرجع الرصيد عند الفشل التقني أو عدم وجود نتائج. اختلاف الذوق ليس فشلًا تقنيًا.')));
       body.append(details);
       if(mfConfig?.environment==='sandbox'||paddleConfig?.paddle_environment==='sandbox')body.append(el('p','fza-footnote',tr('Test mode. No real payment is collected.','وضع التجربة، بدون تحصيل مبلغ حقيقي.')));
     }
@@ -1205,6 +1209,9 @@
 .fzb-plan-count{font-size:42px;font-weight:650;line-height:1.05;letter-spacing:-1.5px;font-variant-numeric:tabular-nums}
 .fzb-plan-label{font-size:15px;font-weight:500;line-height:1.4;color:var(--a-muted)}
 .fzb-plan-footer{min-width:0}
+.fz-account .fzb-plan-features{grid-column:1/-1;list-style:none;margin:0;padding:14px 0 0;border-top:1px solid var(--a-line);display:grid;gap:7px;text-align:start}
+.fz-account .fzb-plan-features li{position:relative;margin:0;padding-inline-start:17px;font-size:12px;font-weight:400;line-height:1.55;color:var(--a-muted);overflow-wrap:anywhere}
+.fz-account .fzb-plan-features li::before{content:"✓";position:absolute;inset-inline-start:0;color:var(--a-accent);font-size:11px;font-weight:600}
 .fz-account .fzb-plan .fzb-plan-buy{display:flex;align-items:center;justify-content:center;gap:12px;width:132px;min-height:56px;margin:0!important;padding:13px 14px;border:1px solid var(--a-line);background:var(--a-soft);color:var(--a-ink);border-radius:14px;font-size:15px;font-weight:600;line-height:1.4;white-space:normal}
 .fzb-plan-button-price{font-size:23px;font-weight:650;line-height:1.2;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
 .fz-account .fzb-plan-buy svg{width:18px;height:18px;flex:none}.fz-account[dir=rtl] .fzb-plan-buy svg{transform:rotate(180deg)}
