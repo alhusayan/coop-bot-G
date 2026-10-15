@@ -7,7 +7,7 @@ import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation} from './design-studio.js?v=20261015-studio1';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261015-studio2';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 bindStoreLinks(document);
@@ -54,15 +54,16 @@ let pointTimer;
 const translate=(en,ar)=>window.FindziaI18n?.t(en,ar,document.querySelector('.fz-home'))||en;
 const localCatalog=createLocalCatalog({request,escape:esc,safe,money,translate,icon,context:item=>({key:[state.job?.id,state.design,state.job?.options?.market,item.id].join(':'),market:state.job?.options?.market,marketName:country().en,url:'/api/jobs/'+state.job?.id+'/catalog/'+state.design+'/'+item.id})});
 let designArrival=[],designJob='',generationStarted=0;
+const styleTour=createStyleTour({onChange:()=>{if(state.view==='designs')renderDesigns();}});
 let pollTimer,toastTimer,renderKey='',shopKey='',submitting=false,sheetMode='',pollErrors=0,gestureDragged=false;
 const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
 const messages={credits_exhausted:'You’ve used your credits. Add credits to search another piece.',credits_unavailable:'Could not check your credits. Please try again.',sign_in_required:'Please open your account and try again.',session_expired:'Please sign in again.',guest_session_expired:'Please reopen your account and try again.',search_in_progress:'Another search is still running. Please wait.',search_already_processed:'This search was already processed. Reopen the piece.',REQUEST_ID_REQUIRED:'Please refresh this page and try again.',OUT_OF_STOCK:'This piece sold out. We’re finding another option.',STOCK_UNCONFIRMED:'Check availability at the store before choosing this piece.',TRIAL_LINK_REQUIRED:'Open your private preview link to start.',NOT_CONFIGURED:'Designs are temporarily unavailable. Please try again later.',MODEL_UNAVAILABLE:'The design service is temporarily unavailable.',GENERATION_FAILED:'We couldn’t create this design. Please try again.',NO_IMAGE:'The design didn’t arrive. Please try again.',PROVIDER_BUSY:'We’re busy right now. Please try again shortly.',TRIAL_LIMIT:'You’ve reached today’s preview limit. Come back tomorrow.',IMAGE_TOO_LARGE:'Choose a photo under 20 MB.',INVALID_IMAGE:'Please try a JPG, PNG or WebP photo.',NOT_A_ROOM:'Use a clear photo of an interior, outdoor space, building or empty plot.',INTERRUPTED:'This design was interrupted. Try it again.',NO_ITEMS:'We couldn’t identify the pieces. Please try this design again.',ENGINE_UNAVAILABLE:'Search is temporarily unavailable. Please try again shortly.',SEARCH_FAILED:'The stores aren’t responding. Please try again.',DEMO_READ_ONLY:'Upload your own photo to customise a room.',NOT_FOUND:'This room has expired or belongs to another browser.',JOB_BUSY:'This room is still being prepared.',INVALID_CROP:'This piece is not clear enough to search.',ROOM_FUNCTION_MISMATCH:'This design did not match your request. Please try again.'};
 function toast(text){$('#toast').textContent=translate(text);$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5500);}
 async function api(path,opt={}){const r=await request(path,{...opt,headers:{'Content-Type':'application/json',...opt.headers}});let data;try{data=await r.json();}catch{throw Error('Connection interrupted. Please try again.');}if(!r.ok)throw Object.assign(Error(messages[data.error]||'Something went wrong. Please try again.'),{code:data.error});return data;}
-function resetRoom(){originalLayer.close();clearTimeout(pointTimer);pointStarted.clear();pointFocus=null;pointLaunches.clear();roomContext.begin();optionOrder.clear();clearTimeout(pollTimer);closeSheet();state.job=null;state.image=null;designArrival=[];designJob='';generationStarted=0;state.design=0;state.compare=false;state.itemId=null;updateImage($('#selected-image'),'');renderKey='';shopKey='';pollErrors=0;$('#items-list').innerHTML='';$('#hotspots').innerHTML='';}
+function resetRoom(){styleTour.stop();originalLayer.close();clearTimeout(pointTimer);pointStarted.clear();pointFocus=null;pointLaunches.clear();roomContext.begin();optionOrder.clear();clearTimeout(pollTimer);closeSheet();state.job=null;state.image=null;designArrival=[];designJob='';generationStarted=0;state.design=0;state.compare=false;state.itemId=null;updateImage($('#selected-image'),'');renderKey='';shopKey='';pollErrors=0;$('#items-list').innerHTML='';$('#hotspots').innerHTML='';}
 function applyJob(job,token){if(!roomContext.current(token)||!acceptsJob(state.job,job))return false;state.job=job;return true;}
 async function changeJob(path,body){const token=roomContext.capture(),id=state.job?.id;const authorization=['/retry','/replace'].includes(path)?await document.querySelector('.fz-home')?.fzBilling?.authorizeDesign(1):{};if(!authorization)return false;const job=await api('/api/jobs/'+id+path,{method:'POST',headers:authorization,body:JSON.stringify({...body,language:shell?.getLanguage()||'en'})});return state.job?.id===id&&applyJob(job,token);}
-function view(name){state.view=name;$$('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));window.scrollTo({top:0,behavior:'instant'});if(name==='designs')renderDesigns();if(name==='shopping')renderShop();}
+function view(name){if(name!=='designs')styleTour.stop();state.view=name;$$('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));window.scrollTo({top:0,behavior:'instant'});if(name==='designs')renderDesigns();if(name==='shopping')renderShop();}
 function country(){return state.config.markets[state.job?.options?.market||state.market]||fallbackMarkets.SA;}
 function money(n,currency=country().currency){if(n==null||!Number.isFinite(n))return 'Price at store';try{return new Intl.NumberFormat('en-US',{style:'currency',currency:currency||'USD',currencyDisplay:'code',maximumFractionDigits:['KWD','BHD','OMR'].includes(currency)?3:2}).format(n);}catch{return currency+' '+n;}}
 function syncMarket(){if(!state.config.markets[state.market])state.market=initialMarket;const m=state.config.markets[state.market];try{localStorage.setItem('spaces-market',state.market);}catch{}shell?.sync();}
@@ -92,15 +93,27 @@ function renderDesigns(){
  if(designJob!==j.id){designJob=j.id;designArrival=[];generationStarted=Date.now();}
  j.designs.forEach((d,i)=>{if(d.image&&!designArrival.includes(i))designArrival.push(i);});
  updateImage($('#original-thumb'),j.original);
- const presentation=designPresentation(j,{escape:esc,icon,translate,messages,language:shell?.getLanguage()||document.documentElement.lang,order:designArrival,reconnecting:pollErrors>1,slow:Date.now()-generationStarted>60000});
+ const tour=styleTour.sync({jobId:j.id,indexes:j.designs.map((d,i)=>({d,i})).filter(({d})=>!d.image&&d.status!=='error').map(({i})=>i),active:state.view==='designs'&&!document.hidden&&!designArrival.length&&pollErrors<2,reduced:matchMedia('(prefers-reduced-motion: reduce)').matches});
+ const presentation=designPresentation(j,{...tour,reduced,escape:esc,icon,translate,messages,language:shell?.getLanguage()||document.documentElement.lang,order:designArrival,reconnecting:pollErrors>1,slow:Date.now()-generationStarted>60000});
  const status=$('#generation-status');if(status.textContent!==presentation.status)status.textContent=presentation.status;
  const studio=$('#design-studio');studio.hidden=!presentation.pending;
  $('#designs').classList.toggle('is-creating',presentation.ready===0&&presentation.pending>0);
  $('#design-grid').hidden=!presentation.cards;
- $('#designs .swipe-hint').hidden=presentation.ready<2;
+ $('#design-gallery-nav').hidden=presentation.ready<2;
  const key=JSON.stringify([j.id,presentation.stage,presentation.cards]);if(key===renderKey)return;renderKey=key;
- patchHTML(studio,presentation.stage);patchHTML($('#design-grid'),presentation.cards);
+ patchHTML(studio,presentation.stage);patchHTML($('#design-grid'),presentation.cards);patchHTML($('#design-gallery-nav'),presentation.navigation);syncDesignNavigation();
 }
+
+function syncDesignNavigation(){
+ const grid=$('#design-grid'),bounds=grid.getBoundingClientRect();
+ const cards=[...grid.querySelectorAll('[data-design-index]')];
+ const center=bounds.left+bounds.width/2;
+ const nearest=cards.sort((a,b)=>Math.abs(a.getBoundingClientRect().left+a.offsetWidth/2-center)-Math.abs(b.getBoundingClientRect().left+b.offsetWidth/2-center))[0];
+ $('#design-gallery-nav').querySelectorAll('button').forEach(button=>button.setAttribute('aria-current',String(button.dataset.index===nearest?.dataset.designIndex)));
+}
+$('#design-grid').addEventListener('scroll',syncDesignNavigation,{passive:true});
+$('#design-studio').addEventListener('focusin',event=>{if(!event.target.closest('[data-action="studio-play"]'))styleTour.pause();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)styleTour.stop();else if(state.view==='designs')renderDesigns();});
 
 async function choose(index){if(!state.job?.designs[index]?.image)return;pointFocus=null;const token=roomContext.begin(),id=state.job.id;clearTimeout(pollTimer);closeSheet();state.design=index;state.compare=false;shopKey='';const d=state.job.designs[index];if((!d.items?.length&&!d.inventory_complete)||d.needs_rescan){d.status='analyzing';d.items=[];}view('shopping');try{const job=await api('/api/jobs/'+id+'/select',{method:'POST',body:JSON.stringify({design:index,language:shell?.getLanguage()||'en'})});if(!applyJob(job,token))return;shopKey='';renderShop();poll();}catch(e){if(roomContext.current(token))toast(e.message);}}
 const selected=()=>state.job?.designs[state.design];
@@ -238,6 +251,9 @@ function downloadBlob(blob,name){const a=document.createElement('a'),u=URL.creat
 async function saveDesign(){try{const r=await fetch(selected().image);if(!r.ok)throw Error();const blob=await r.blob();downloadBlob(blob,'Findzia-'+selected().id+'.'+(blob.type.includes('jpeg')?'jpg':blob.type.includes('webp')?'webp':'png'));}catch{toast('The image couldn’t be saved. Please try again.');}}
 function exportList(){const d=selected(),lines=['Findzia Spaces — '+d.title,'Market: '+country().en,''];for(const item of d.items){const o=chosen(item);lines.push(item.name_en+(item.mode==='ready'?' × '+qty(item):''),o?o.title:'No visually checked store match yet',o?(o.price!=null?money(o.price,o.currency):'Price at store'):'',o?.link||'',o?.dimensions?'Store measurements: '+o.dimensions:'Size must be checked','');}lines.push('Partial total: '+money(total().sum),'Only priced ready-made pieces in the selected currency are included. Confirm size, delivery, availability and price with each store.');downloadBlob(new Blob([lines.join('\n')],{type:'text/plain;charset=utf-8'}),'Findzia-shopping-list.txt');}
 document.addEventListener('click',async e=>{const el=e.target.closest('[data-action]');if(!el||el.disabled||gestureDragged)return;const action=el.dataset.action,index=Number(el.dataset.index),id=el.dataset.id;try{switch(action){
+ case 'studio-style':styleTour.choose(index);break;
+ case 'studio-play':styleTour.toggle();break;
+ case 'design-slide':{const grid=$('#design-grid'),card=grid.querySelector('[data-design-index="'+index+'"]');if(card)grid.scrollBy({left:card.getBoundingClientRect().left-grid.getBoundingClientRect().left,behavior:reduced?'instant':'smooth'});break;}
  case 'home':resetRoom();view('home');break;
  case 'upload':$('#file-input').click();break;
  case 'camera':$('#camera-input').click();break;

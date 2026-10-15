@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {parseHTML} from 'linkedom';
-import {designPresentation} from '../public/design-studio.js';
+import {designPresentation,createStyleTour} from '../public/design-studio.js';
 import {studioCopy} from '../public/design-studio-copy.js';
 import {patchHTML} from '../public/live-view.js';
 globalThis.document=undefined;
@@ -11,7 +11,7 @@ const job=()=>({id:'room-a',original:'/original.jpg',designs:[0,1,2].map(i=>({ti
 test('pending designs show one original-photo workspace and no disabled result cards',()=>{
  const result=designPresentation(job(),options),{document}=parseHTML(result.stage);
  assert.equal(result.cards,'');assert.equal(result.pending,3);assert.equal(result.ready,0);
- assert.equal(document.querySelectorAll('img').length,1);assert.equal(document.querySelectorAll('.studio-concept').length,3);
+ assert.equal(document.querySelectorAll('img').length,1);assert.equal(document.querySelectorAll('[data-action=studio-style]').length,3);
  assert.doesNotMatch(result.stage,/disabled|filter:blur|%|progressbar/);
 });
 test('a later-index result is immediately usable and stays first when another design arrives',t=>{
@@ -51,4 +51,29 @@ test('every supported language has complete waiting copy and live locale changes
   assert.equal(p.status,copy['Your designs appear here as they’re ready.']);
   assert.ok(p.stage.includes(copy['Explore each design as soon as it’s ready.']));
  }
+});
+
+test('style exploration changes the palette and copy without touching results or the original image',t=>{
+ const j=job();j.designs.forEach((d,i)=>d.palette=['#112233','#445566','#778899']);
+ const {document}=parseHTML('<html><body><div id="studio"></div></body></html>');t.mock.property(globalThis,'document',document);
+ const root=document.getElementById('studio');patchHTML(root,designPresentation(j,options).stage);
+ const photo=root.querySelector('img'),tab=root.querySelector('[data-index="2"]');
+ patchHTML(root,designPresentation(j,{...options,styleIndex:2,paused:true}).stage);
+ assert.equal(root.querySelector('img'),photo);assert.equal(root.querySelector('[data-index="2"]'),tab);
+ assert.equal(tab.getAttribute('aria-pressed'),'true');assert.match(root.querySelector('.studio-mood').textContent,/Style 2.*Rich textures/);
+ assert.equal(root.querySelector('[data-action="studio-play"]').getAttribute('aria-label'),'Play slideshow');
+ assert.equal(designPresentation(j,{...options,reduced:true}).stage.includes('data-action="studio-play"'),false);
+});
+test('style tour survives polls, respects manual choice and stops off-screen, on results and with reduced motion',()=>{
+ let callback,nextId=0,changed=0;const tasks=new Map();
+ const tour=createStyleTour({onChange:()=>changed++,schedule(fn,ms){assert.equal(ms,6500);callback=fn;tasks.set(++nextId,fn);return nextId;},cancel:id=>tasks.delete(id)});
+ const state={jobId:'one',indexes:[0,1,2],active:true,reduced:false};
+ assert.equal(tour.sync(state).styleIndex,0);tour.sync(state);assert.equal(nextId,1,'polling must not restart the tour');
+ tasks.clear();callback();assert.equal(tour.sync(state).styleIndex,1);assert.equal(changed,1);
+ tour.choose(2);assert.equal(tasks.size,0);assert.deepEqual(tour.sync(state),{styleIndex:2,paused:true});
+ tour.choose(9);assert.equal(changed,2,'ignore invalid style indexes');
+ tour.toggle();assert.equal(tasks.size,1);tour.sync({...state,active:false});assert.equal(tasks.size,0);
+ tour.sync(state);assert.equal(tasks.size,1);tour.stop();assert.equal(tasks.size,0);
+ assert.equal(tour.sync({...state,jobId:'two',reduced:true}).styleIndex,0);assert.equal(tasks.size,0);
+ tour.choose(1);assert.equal(tasks.size,0);assert.equal(tour.sync({...state,jobId:'two',reduced:true}).styleIndex,1);
 });
