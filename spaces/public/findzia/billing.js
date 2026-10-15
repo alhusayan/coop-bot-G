@@ -86,9 +86,10 @@
         if(rect.top<inset||rect.bottom>(window.visualViewport?.height||window.innerHeight||800))hint.scrollIntoView?.({block:'start',behavior:'auto'});
       });
     };
+    function reportSearchBlock(code){root.dispatchEvent(new CustomEvent('fz:search-blocked',{bubbles:true,detail:{code,message:message(code)}}));}
     function blockSearch(code){
       root.querySelectorAll('dialog[data-refine-dialog][open],dialog.fz-guide[open]').forEach(dialog=>dialog.close());
-      notice(code);return false;
+      notice(code);reportSearchBlock(code);return false;
     }
     function button(text, fn, cls='fza-primary'){const b=el('button',cls,text);b.type='button';b.addEventListener('click',fn);return b;}
     function message(code){return ({
@@ -158,7 +159,7 @@
         if(previous?.snapshot.view?.items?.length)bridge.restore(previous.snapshot);
         else if(previous?.homeState==='empty')bridge.restoreHomeView();
       }
-      notice(code);return true;
+      notice(code);reportSearchBlock(code);return true;
     }
     async function ensureGuest(){
       if(guestToken)return;

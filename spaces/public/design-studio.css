@@ -151,3 +151,12 @@ html.findzia-native body main{padding-bottom:calc(112px + env(safe-area-inset-bo
 main :is(.item-copy h3,.design-pick-piece,.piece-selection-summary strong){display:block;-webkit-line-clamp:unset;overflow:visible;overflow-wrap:anywhere}
 main :is(.photo-search-status>span:nth-child(2),.design-pick-store>span:first-child){white-space:normal;text-overflow:clip;overflow:visible;overflow-wrap:anywhere}
 body:has(#setup:not(.hidden))>footer,body:has(#designs:not(.hidden))>footer,body:has(#shopping:not(.hidden))>footer{display:none}
+
+:is(.design-image,.design-canvas,.setup-photo,.original-peek,.preview-photo),:is(.design-image,.design-canvas,.setup-photo,.original-peek) img{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+.original-results-blocked{padding:clamp(24px,6vw,48px);max-width:540px;margin:24px auto;text-align:center}
+.original-results-blocked[hidden]{display:none!important}
+.original-results-blocked h2{font-size:25px;line-height:1.5;margin-bottom:12px;overflow-wrap:anywhere}
+.original-results-blocked p{font-size:16px;color:var(--muted);line-height:1.7;margin-bottom:24px}
+.original-results-blocked button{width:100%;min-height:48px;margin-bottom:14px}
+.original-results-blocked button[hidden]{display:none!important}
+.original-results-frame[hidden]{display:none!important}
