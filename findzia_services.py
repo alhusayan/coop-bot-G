@@ -45,6 +45,13 @@ def listings(data):
         if not isinstance(place, dict):
             continue
         title, address = clean(place.get('title')), clean(place.get('address'), 400)
+        category = clean(place.get('category') or place.get('type'), 160)
+        # Local packs sometimes mix tradespeople with shops selling their tools.
+        # Do not present a retail-only listing as a service provider.
+        if category.casefold() in {'hardware store', 'electrical supply store',
+                'plumbing supply store', 'building materials store', 'furniture store',
+                'electronics store', 'متجر أدوات', 'متجر أجهزة', 'متجر مواد بناء'}:
+            continue
         cid = str(place.get('cid') or '')
         if not title or not address:
             continue
@@ -56,7 +63,7 @@ def listings(data):
         number, tel = phone(place.get('phoneNumber'))
         rating = place.get('rating')
         count = place.get('ratingCount')
-        rows.append(dict(title=title, address=address, category=clean(place.get('category') or place.get('type'), 160),
+        rows.append(dict(title=title, address=address, category=category,
                          phone=number, tel=tel, website=website(place.get('website')), link=maps,
                          rating=rating if type(rating) in (int, float) and 0 < rating <= 5 else None,
                          reviews=count if type(count) is int and count >= 0 else None))

@@ -83,6 +83,12 @@ class ServicesTests(unittest.TestCase):
         self.assertIsNone(rows[0]['rating'])
         self.assertTrue(rows[0]['link'].startswith('https://www.google.com/maps/search/'))
 
+    def test_retail_listing_is_not_presented_as_a_tradesperson(self):
+        data = {'places': [
+            {'title': 'Tools for sale', 'address': 'Salmiya', 'category': 'Hardware store'},
+            {'title': 'Plumber fixture', 'address': 'Salmiya', 'category': 'Plumber'}]}
+        self.assertEqual([r['title'] for r in listings(data)], ['Plumber fixture'])
+
 
 if __name__ == '__main__':
     unittest.main()
