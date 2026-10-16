@@ -10,7 +10,7 @@ const manifest=JSON.parse(readFileSync(resolve(out,'release.json'),'utf8'));
 const hash=body=>createHash('sha256').update(body).digest('hex');
 function emit(url,file,body,type,immutable=false){body=Buffer.from(body);const path=resolve(out,file);mkdirSync(dirname(path),{recursive:true});writeFileSync(path,body);manifest.routes[url]={file,sha256:hash(body),type,immutable};return url;}
 const files={
- 'world.webp':'hub-art/world.webp','product.webp':'hub-art/product.webp','shopping.webp':'hub-art/shopping-wide.webp','service.webp':'services-art/ac.webp',
+ 'space-story.webp':'hub-art/space-story.webp','one-story.webp':'hub-art/one-story.webp','compare-story.webp':'hub-art/compare-story.webp','service-story.webp':'hub-art/service-story.webp',
  'findzia-boot.js':'findzia-boot.js','findzia-hub-bridge.css':'findzia-hub-bridge.css','findzia-hub.css':'findzia-hub.css','findzia-hub.js':'findzia-hub.js','findzia-hub-bridge.js':'findzia-hub-bridge.js'
 };
 const assets={};
@@ -40,6 +40,6 @@ if(/__ASSET_|__ANALYTICS__/.test(html))throw Error('Unresolved hub asset');
 emit('/','index.html',html,'html');manifest.routes['/index.html']=manifest.routes['/'];manifest.routes['/home']=manifest.routes['/'];manifest.routes['/home/']=manifest.routes['/'];
 const sitemapEntry=manifest.routes['/sitemap.xml'];
 const sitemap=readFileSync(resolve(out,sitemapEntry.file),'utf8').replace('</urlset>','<url><loc>https://findzia.com/search</loc></url></urlset>');writeFileSync(resolve(out,sitemapEntry.file),sitemap);sitemapEntry.sha256=hash(sitemap);
-const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261016.5';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
-manifest.hub='20261016.5';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
+const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261016.6';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
+manifest.hub='20261016.6';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
 console.log('Findzia World published at /; Original at /search; One, Space, Services linked.');

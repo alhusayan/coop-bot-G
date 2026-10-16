@@ -16,9 +16,9 @@ test('one selection section, four large image cards, all local assets available'
  const response=await get('/'),html=await response.text();assert.equal(response.status,200);
  assert.equal([...html.matchAll(/class="project-card /g)].length,4);assert.equal([...html.matchAll(/class="project-grid"/g)].length,1);assert.doesNotMatch(html,/class="hero"|intent-picker|faq-section|__ASSET_/);
  for(const path of ['/search','/trial/one-55321448a0352f1ff18b','/space','/trial/services'])assert.ok(html.includes('href="'+path+'"'));
- assert.match(html,/<dialog id="project-layer"/);assert.equal([...html.matchAll(/<header\b/g)].length,1);assert.doesNotMatch(html,/class="layer-toolbar"/);assert.ok(html.indexOf('</header>')<html.indexOf('<dialog id="project-layer"'));assert.match(html,/<form id="header-search"[^>]+hidden/);
+ assert.match(html,/<div class="project-grid">\s*<a[^>]+data-project="space"/);assert.match(html,/data-t="spaceDetail"/);assert.match(html,/<dialog id="project-layer"/);assert.equal([...html.matchAll(/<header\b/g)].length,1);assert.doesNotMatch(html,/class="layer-toolbar"/);assert.ok(html.indexOf('</header>')<html.indexOf('<dialog id="project-layer"'));assert.match(html,/<form id="header-search"[^>]+hidden/);
  for(const asset of new Set([...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]))){const r=await get(asset);assert.equal(r.status,200,asset);assert.match(r.headers.get('cache-control'),/immutable/)}
- const css=read('../source/findzia-hub.css');assert.match(css,/height:var\(--hub-height\)/);assert.match(css,/grid-template-rows:repeat\(2,minmax\(0,1fr\)\)/);assert.match(css,/env\(safe-area-inset-bottom\)/);assert.match(css,/prefers-reduced-motion/);
+ const css=read('../source/findzia-hub.css');assert.match(css,/height:var\(--hub-height\)/);assert.match(css,/grid-template-areas:"space one" "space shop" "space services"/);assert.match(css,/env\(safe-area-inset-bottom\)/);assert.match(css,/prefers-reduced-motion/);
 });
 test('only project documents allow same-origin embedding; home and payment files retain protections',async()=>{
  const home=await get('/');assert.match(home.headers.get('content-security-policy'),/frame-src 'self'/);assert.equal(home.headers.get('x-frame-options'),'DENY');
