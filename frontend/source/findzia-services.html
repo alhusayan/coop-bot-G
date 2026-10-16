@@ -5,9 +5,13 @@
    <h1 data-copy="title">What can we help with?</h1><p class="svc-lead" data-copy="intro">Choose a service. Find someone nearby.</p>
   </section>
   <section class="svc-suggestions" id="svc-suggestions" aria-label="Popular services">
+   <div class="svc-photo-entry"><button type="button" class="svc-camera" id="svc-camera"><span data-icon="camera"></span><span><strong data-copy="camera">Show us with a photo</strong><small data-copy="cameraHint">Take a photo. Find the right service.</small></span><span data-icon="arrow"></span></button><button type="button" class="svc-gallery" id="svc-gallery"><span data-icon="image"></span><span data-copy="gallery">Photos</span></button></div>
+   <p class="svc-photo-privacy" data-copy="photoPrivacy">Your photo is analysed by AI to suggest a service.</p>
+   <input type="file" id="svc-camera-input" accept="image/*" capture="environment" hidden><input type="file" id="svc-gallery-input" accept="image/*" hidden>
    <div class="svc-categories" id="svc-categories"></div>
    <button type="button" class="svc-browse" id="svc-browse"><span data-icon="grid"></span><span data-copy="allServices">All services</span><span data-icon="arrow"></span></button>
   </section>
+  <section class="svc-photo-panel" id="svc-photo-panel" hidden aria-labelledby="svc-photo-title"><div class="svc-photo-heading"><img id="svc-photo-preview" alt="" width="64" height="64"><div><h2 id="svc-photo-title" data-copy="photoReady">Finding help from your photo</h2><p id="svc-photo-description" role="status" aria-live="polite"></p></div><button type="button" id="svc-photo-clear" data-copy-aria="removePhoto" aria-label="Remove photo">×</button></div><div class="svc-photo-options" id="svc-photo-options"></div></section>
   <form id="svc-form" class="svc-search" role="search" data-dark-form novalidate>
    <div class="svc-fields">
     <label class="svc-field svc-query-field"><span class="svc-sr-only" data-copy="need">What do you need?</span><span class="svc-input-wrap"><span data-icon="search"></span><input id="svc-query" name="query" type="text" required minlength="2" maxlength="200" dir="auto" autocomplete="off" enterkeyhint="next" data-placeholder="queryExample" placeholder="Or type any service…"></span></label>
@@ -18,14 +22,13 @@
     </div>
     <button type="submit" class="svc-primary" id="svc-submit"><span data-copy="search">Find someone nearby</span><span data-icon="arrow"></span></button>
    </div>
-   <div class="svc-form-meta"><p id="svc-cost" data-copy="costPending">Uses your Findzia credits.</p><button type="button" id="svc-cancel-edit" data-copy="cancel" hidden>Cancel</button></div>
+   <div class="svc-form-meta"><p id="svc-cost" data-copy="costPending">Uses your Findzia credits.</p></div>
   </form>
   <div class="svc-message" id="svc-message" role="status" aria-live="polite" hidden></div>
   <section id="svc-results" class="svc-results" hidden aria-labelledby="svc-results-title">
-   <div class="svc-results-head"><h2 id="svc-results-title" tabindex="-1" dir="auto"></h2><button id="svc-edit" type="button" aria-controls="svc-form" aria-expanded="false" data-copy="edit">Change</button></div>
+   <div class="svc-results-head"><h2 id="svc-results-title" tabindex="-1" dir="auto"></h2><button id="svc-edit" type="button" aria-controls="svc-form" data-copy="newSearch">New search</button></div>
    <div class="svc-result-meta"><p id="svc-results-location"></p><label class="svc-sort"><span class="svc-sr-only" data-copy="sort">Sort by</span><select id="svc-sort"><option value="relevance" data-copy="relevance">Best match</option><option value="rating" data-copy="rating">Highest rated</option></select></label></div>
    <div class="svc-cards" id="svc-cards"></div>
-   <nav class="svc-pagination" id="svc-pagination" aria-label="Results pages" hidden><button type="button" id="svc-prev" data-copy="previous">Previous</button><span id="svc-page-number" aria-live="polite" aria-atomic="true"></span><button type="button" id="svc-next" data-copy="next">Next</button></nav>
    <p class="svc-results-note" data-copy="resultsNote">Google Maps listings · Confirm details with the provider.</p>
   </section>
  </main>

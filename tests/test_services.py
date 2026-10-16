@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -21,10 +21,10 @@ class Runtime:
 
 
 class ServicesTests(unittest.TestCase):
-    def client(self, data, blocked=False):
+    def client(self, data, blocked=False, **options):
         app = FastAPI()
         provider = Mock(return_value=data)
-        install_services(app, provider, {'kw': 'Kuwait', 'gb': 'United Kingdom'}, lambda: True)
+        install_services(app, provider, {'kw': 'Kuwait', 'gb': 'United Kingdom'}, lambda: True, **options)
         runtime = Runtime()
         def reserve(member, rid, path):
             if blocked:
@@ -100,6 +100,91 @@ class ServicesTests(unittest.TestCase):
                 self.assertEqual(phone(raw, country)[1], expected)
         self.assertEqual(phone('2222 1234'), ('', ''))
         self.assertEqual(phone('2222 1234567890', 'KW'), ('', ''))
+
+
+    def image(self):
+        import base64, io
+        from PIL import Image
+        out = io.BytesIO()
+        Image.new('RGB', (40, 30), 'green').save(out, format='JPEG', exif=b'Exif\x00\x00private-location')
+        return base64.b64encode(out.getvalue()).decode()
+
+    def test_photo_recognition_searches_detected_service_with_one_charge(self):
+        vision = Mock(return_value={'status': 'clear', 'options': [{'en': 'Plumber', 'ar': 'سباك'}]})
+        client, provider, runtime = self.client({'places': [{'title': 'Plumber fixture', 'address': 'Salmiya'}]}, vision=vision)
+        response = self.search(client, query='', image=self.image())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['query'], 'سباك')
+        self.assertTrue(response.json()['items'])
+        self.assertEqual(runtime.outcomes, [True])
+        self.assertEqual(vision.call_count, 1)
+        self.assertIn('سباك', provider.call_args.args[1]['q'])
+        import base64
+        self.assertNotIn(b'private-location', base64.b64decode(vision.call_args.args[0]))
+
+    def test_photo_ambiguity_or_unknown_refunds_without_search(self):
+        for status, options in [('choose', [{'en': 'Plumber', 'ar': 'سباك'}, {'en': 'Cleaning', 'ar': 'تنظيف'}]), ('unknown', [])]:
+            vision = Mock(return_value={'status': status, 'options': options})
+            client, provider, runtime = self.client({'places': []}, vision=vision)
+            response = self.search(client, query='', image=self.image())
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['photo']['status'], status)
+            self.assertEqual(response.json()['items'], [])
+            provider.assert_not_called()
+            self.assertEqual(runtime.outcomes, [False])
+
+    def test_photo_without_credit_never_calls_vision(self):
+        vision = Mock()
+        client, provider, runtime = self.client({'places': []}, blocked=True, vision=vision)
+        self.assertEqual(self.search(client, query='', image=self.image()).status_code, 402)
+        vision.assert_not_called()
+        provider.assert_not_called()
+
+    def test_invalid_photos_and_vision_failure_refund(self):
+        for image in ['', 'not-base64', 'YQ==', 'a' * 2_050_001]:
+            vision = Mock()
+            client, provider, runtime = self.client({'places': []}, vision=vision)
+            self.assertIn(self.search(client, query='', image=image).status_code, (400, 413))
+            vision.assert_not_called()
+            provider.assert_not_called()
+            self.assertEqual(runtime.outcomes, [False])
+        client, provider, runtime = self.client({'places': []}, vision=Mock(side_effect=RuntimeError()))
+        self.assertEqual(self.search(client, query='', image=self.image()).status_code, 503)
+        self.assertEqual(runtime.outcomes, [False])
+
+    def test_only_explicit_published_whatsapp_links_are_returned(self):
+        from findzia_services import whatsapp_link, published_whatsapp
+        self.assertEqual(whatsapp_link('https://api.whatsapp.com/send?phone=96555551234&text=Hi'), 'https://wa.me/96555551234')
+        for value in ['tel:+96555551234', 'https://wa.me.evil.com/96555551234', 'https://wa.me@evil.com/96555551234', 'https://wa.me:8080/96555551234', 'https://wa.me/invalid', 'http://wa.me/96555551234']:
+            self.assertEqual(whatsapp_link(value), '')
+        response = Mock(status_code=200, headers={'content-type': 'text/html'}, _findzia_session=None)
+        response.iter_content.return_value = [b'<a href="tel:+96555551234">Call</a>']
+        safe = Mock(return_value=response)
+        self.assertEqual(published_whatsapp('https://example.com', safe), '')
+        response.iter_content.return_value = [b'<a href="https://wa.me/96555551234">WhatsApp</a>']
+        client, provider, runtime = self.client({'places': [{'title': 'Fixture', 'address': 'Salmiya', 'website': 'https://example.com'}]}, safe_get=safe)
+        row = self.search(client).json()['items'][0]
+        self.assertEqual(row['whatsapp'], 'https://wa.me/96555551234')
+        self.assertEqual(row['whatsapp_source'], row['website'])
+        self.assertTrue(response.close.called)
+        safe.side_effect = ValueError('unsafe_outbound_url')
+        self.assertEqual(published_whatsapp('http://127.0.0.1', safe), '')
+
+    def test_vision_request_uses_normalized_image_and_structured_service_response(self):
+        from findzia_service_photo import identify_service, photo_suggestions
+        import json
+        result = {'status': 'choose', 'options': [{'en': 'AC repair', 'ar': 'تصليح تكييف'}]}
+        response = Mock()
+        response.json.return_value = {'candidates': [{'content': {'parts': [{'text': json.dumps(result)}]}}]}
+        with patch('findzia_service_photo.requests.post', return_value=response) as post:
+            self.assertEqual(identify_service(self.image(), key='test-only', model='gemini-2.5-flash'), result)
+            payload = post.call_args.kwargs['json']
+            self.assertEqual(payload['contents'][0]['parts'][0]['inlineData']['mimeType'], 'image/jpeg')
+            self.assertEqual(payload['generationConfig']['responseMimeType'], 'application/json')
+            self.assertNotIn('tools', payload)
+        with self.assertRaises(ValueError):
+            photo_suggestions({'status': 'clear', 'options': None})
+        self.assertEqual(photo_suggestions({'status': 'clear', 'options': [{'en': '<script>', 'ar': 'سباك'}]})['status'], 'unknown')
 
 
 if __name__ == '__main__':
