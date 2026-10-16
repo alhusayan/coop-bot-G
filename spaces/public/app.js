@@ -1,13 +1,13 @@
 import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
-import {createOriginalLayer} from './original-results.js?v=20261016-credit1';
+import {createOriginalLayer} from './original-results.js?v=20261016-guide1';
 import {bindStoreLinks} from './store-links.js';
 import {mountFindzia} from './findzia-shell.js?v=20261015-ios2';
 import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261016-credit1';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261016-guide1';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 bindStoreLinks(document);
@@ -134,12 +134,14 @@ function searchCopy(item){
 }
 function searchSeconds(item){const start=pointStarted.get(searchKey(item))||item.started_at||Date.now();return Math.max(0,Math.floor((Date.now()-start)/1000));}
 function elapsedLabel(item){return searchSeconds(item)+(shell?.getLanguage()==='ar'?' ث':'s');}
+let photoGuideSeen=false;try{photoGuideSeen=localStorage.getItem('findzia-piece-guide-seen')==='1';}catch{}
 function photoMarkup(items){
  if(!items.length||['analyzing','adapting'].includes(selected().status))return '';
  const item=items.find(x=>pointFocus?.key===keyFor(x)),busy=pieceBusy(item);
  const view=item&&(pieceViews([item]).find(v=>v.marker===pointFocus?.marker)||pieceViews([item])[0]);
  let outline='';
- const guide=!item?`<span class="photo-touch-guide" aria-hidden="true"><span class="touch-ripple">${icon('plus',true)}</span><span>${esc(translate('Tap a piece to shop','اضغط على قطعة للتسوّق'))}</span></span>`:'';
+ const candidate=!item&&!photoGuideSeen?pieceViews(items).filter(v=>!v.background).sort((a,b)=>(b.box[2]-b.box[0])*(b.box[3]-b.box[1])-(a.box[2]-a.box[0])*(a.box[3]-a.box[1]))[0]:null;
+ const guide=candidate?`<button class="piece-coach" data-ui-key="piece-coach" data-action="select-piece" data-id="${esc(candidate.id)}" data-marker="${esc(candidate.marker)}" style="top:${Math.max(15,Math.min(85,(candidate.box[0]+candidate.box[2])/20))}%;left:${Math.max(24,Math.min(76,(candidate.box[1]+candidate.box[3])/20))}%" aria-label="${esc(translate('Choose a piece in this photo','اختر قطعة من الصورة'))}"><span class="coach-dot" aria-hidden="true">${icon('plus',true)}</span><span>${esc(translate('Tap a piece to find it.','اضغط على قطعة للعثور عليها.'))}</span></button>`:'';
  if(view){const [top,left,bottom,right]=view.box;outline=`<span class="piece-outline${busy?' is-searching':''}" style="top:${top/10}%;left:${left/10}%;width:${(right-left)/10}%;height:${(bottom-top)/10}%" aria-hidden="true"><i></i><i></i><i></i><i></i>${busy?'<span class="piece-scan"></span>':''}</span>`;}
  return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose a piece in this photo','اختر قطعة من الصورة'))}" aria-busy="${busy}"></button>${outline}${guide}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
 }
@@ -155,9 +157,10 @@ function selectPiece(id,marker){
  const items=selected()?.items||[],item=items.find(x=>x.id===id);if(!item)return;
  const running=items.find(pieceBusy);
  if(running){if(running.id!==id)toast(translate('Your piece is being searched. Store options will open here.','جارٍ البحث عن القطعة. ستظهر خيارات المتاجر هنا.'));return;}
+ photoGuideSeen=true;try{localStorage.setItem('findzia-piece-guide-seen','1');}catch{}
  if(sheetMode==='pieces')closeSheet();
  pointFocus={key:keyFor(item),id,marker:String(marker||pieceViews([item])[0]?.marker||id),waiting:false};renderShop();
- const card=sheetMode==='zoom'?$('[data-zoom-feedback]'):$('#piece-feedback');
+ const card=$('#piece-feedback');
  const bounds=card?.getBoundingClientRect();if(bounds&&bounds.bottom>(window.innerHeight||900)-16)card.scrollIntoView?.({block:'nearest',behavior:reduced?'auto':'smooth'});
 }
 function pickFromPhoto(event,button){
@@ -183,10 +186,8 @@ function renderShop(){
  $('#empty-items').classList.toggle('hidden',items.length>0&&!preparing&&!adapting);
  if(!items.length||preparing||adapting)$('#empty-items').innerHTML=conceptOnly?`<p>${esc(translate('Your design is ready. This concept has no individual store pieces.','تصميمك جاهز. لا يتضمن هذا التصور قطعًا منفردة للتسوّق.'))}</p>`:d.error?`<p>${esc(messages[d.error]||'We couldn’t identify the pieces.')}</p><button class="secondary" data-action="choose" data-index="${state.design}">Try again</button>`:`<span class="search-spinner" aria-hidden="true"></span><p role="status">${esc(adapting?translate('Updating your design…','جارٍ تحديث تصميمك…'):translate('Finding the pieces in your room…','جارٍ تحديد القطع في غرفتك…'))}</p>`;
  patchHTML($('#hotspots'),photoMarkup(items));
- const zoom=$('[data-zoom-hotspots]');if(zoom)patchHTML(zoom,photoMarkup(items));
  const current=items.find(x=>pointFocus?.key===keyFor(x)),busy=pieceBusy(current);
  patchHTML($('#piece-feedback'),feedbackMarkup(current));renderDesignPicks();
- const zoomFeedback=$('[data-zoom-feedback]');if(zoomFeedback)patchHTML(zoomFeedback,feedbackMarkup(current));
  for(const item of items){const settled=keyFor(item)+':'+item.last_ui_request;if(item.last_ui_request&&item.status!=='searching'&&(item.phase==='complete'||item.status==='error')&&!pointSettled.has(settled)){pointSettled.add(settled);document.querySelector('.fz-home')?.fzBilling?.refresh(true);}}
  if(current&&pointFocus?.waiting&&!pointLaunches.has(keyFor(current))&&(current.alternatives?.length||current.offers?.length||!busy&&(current.phase==='complete'||current.status==='error'))){
   pointFocus.waiting=false;
@@ -265,7 +266,6 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'choose':await choose(index);break;
  case 'retry':el.disabled=true;generationStarted=Date.now();if(await changeJob('/retry',{design:index})){renderKey='';renderDesigns();poll();}break;
  case 'original':showSheet(`<img class="preview-photo" src="${esc(state.job.original)}" alt="Original room"><div class="preview-actions"><h3>Your original room</h3></div>`,'preview');break;
- case 'zoom':showSheet(`<div class="design-canvas zoom-canvas"><img src="${esc(selected().image)}" alt="Selected room design"><div data-zoom-hotspots></div></div><div class="zoom-feedback" data-zoom-feedback></div><div class="preview-actions"><button class="browse-pieces" data-action="pieces">${esc(translate('All pieces','جميع القطع'))} ${icon('chevron',true)}</button></div>`,'zoom');renderShop();break;
  case 'compare':state.compare=!state.compare;renderShop();break;
  case 'photo-pick':pickFromPhoto(e,el);break;
  case 'pieces':browsePieces();break;
@@ -294,7 +294,7 @@ if(!reduced){document.addEventListener('pointerup',e=>{const el=e.target.closest
 let dragStart=null;const handle=$('.sheet-handle');handle.addEventListener('pointerdown',e=>{dragStart={y:e.clientY,t:performance.now()};handle.setPointerCapture(e.pointerId);});handle.addEventListener('pointermove',e=>{if(dragStart){const y=Math.max(0,e.clientY-dragStart.y);$('#sheet').style.transform=`translateY(${y}px)`;}});handle.addEventListener('pointerup',e=>{if(!dragStart)return;const y=e.clientY-dragStart.y,v=y/(performance.now()-dragStart.t);dragStart=null;if(y>90||y>30&&v>.5)closeSheet();else{$('#sheet').style.transform='';if(!reduced)$('#sheet').animate([{transform:`translateY(${Math.max(0,y)}px)`},{transform:'translateY(-7px)',offset:.6},{transform:'translateY(0)'}],{duration:380,easing:'ease-out'});}});
 let carouselDrag=null;$('#design-grid').addEventListener('pointerdown',e=>{if(e.pointerType!=='mouse')return;carouselDrag={x:e.clientX,scroll:$('#design-grid').scrollLeft};gestureDragged=false;});$('#design-grid').addEventListener('pointermove',e=>{if(!carouselDrag)return;const dx=e.clientX-carouselDrag.x;if(Math.abs(dx)>8){gestureDragged=true;$('#design-grid').scrollLeft=carouselDrag.scroll-dx;}});document.addEventListener('pointerup',()=>{carouselDrag=null;setTimeout(()=>gestureDragged=false,50);});
 new ResizeObserver(()=>{if(state.view==='shopping')renderShop();}).observe($('#design-canvas'));
-document.addEventListener('load',event=>{if(state.view==='shopping'&&(event.target.id==='selected-image'||event.target.matches?.('.zoom-canvas>img')))renderShop();},true);
+document.addEventListener('load',event=>{if(state.view==='shopping'&&event.target.id==='selected-image')renderShop();},true);
 // Only room coordinates are retained across account navigation. Session tokens
 // stay exclusively with the original account's same-origin session storage.
 document.addEventListener('spaces:account-navigation',()=>{
@@ -316,3 +316,9 @@ document.addEventListener('spaces:locale',()=>{if(state.view==='designs')renderD
 
 // Preserve scrolling and pinch zoom, without iOS image peek/share callouts.
 document.addEventListener('contextmenu',event=>{if(event.target.closest?.('.design-image,.design-canvas,.setup-photo,.original-peek,.preview-photo'))event.preventDefault();});
+
+// The short CTA stays independent from the transparent credit cost beneath it.
+const discoverLabels={en:'Discover designs',ar:'اكتشف التصاميم',de:'Designs entdecken',fr:'Découvrez les designs',it:'Scopri i design',es:'Descubre diseños',pt:'Descubra designs',tr:'Tasarımları keşfet',ru:'Откройте дизайны',ja:'デザインを発見',zh:'探索设计',ko:'디자인 둘러보기',hi:'डिज़ाइन खोजें',ur:'ڈیزائن دریافت کریں',id:'Jelajahi desain',ms:'Terokai reka bentuk',nl:'Ontdek ontwerpen'};
+function refreshDiscoverLabel(){const label=document.getElementById('discover-label');if(label)label.textContent=discoverLabels[document.documentElement.lang]||discoverLabels.en;}
+refreshDiscoverLabel();
+new MutationObserver(refreshDiscoverLabel).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
