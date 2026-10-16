@@ -18,7 +18,11 @@ for _name in ('FINDZIA_ACCOUNT_ORIGINS', 'WEB_ALLOWED_ORIGINS'):
     os.environ[_name] = ','.join(_origins)
 
 import main as original
+from findzia_services import install_services
 from findzia_spaces_gateway import SpacesImageGateway, PATHS as SPACES_PATHS
+
+install_services(original.app, original._serper_json, original.COUNTRY_NAMES,
+                 lambda: bool(original.SERPER_API_KEY))
 
 original.CACHE_DB_PATH += '.original-a332321'
 # main initializes these at import time, before the version-specific path above.

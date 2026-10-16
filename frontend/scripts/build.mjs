@@ -56,8 +56,9 @@ function emit(url, file, bytes, type, immutable=false) {
   routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
 }
 const assets = new Map();
-for (const name of ['findzia-store-scene.js','findzia-store-scene.css','findzia-photo-history.js','findzia-camera.js','findzia-camera-trial.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-choice-trial.js','findzia-choice-trial.css','findzia-one-catalog.js','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-hero-type.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
+for (const name of ['findzia-services.js','findzia-services.css','findzia-store-scene.js','findzia-store-scene.css','findzia-photo-history.js','findzia-camera.js','findzia-camera-trial.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-choice-trial.js','findzia-choice-trial.css','findzia-one-catalog.js','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-hero-type.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
   let bytes=read(name);
+  if(name==='findzia-services.css')bytes=Buffer.from(bytes.toString().replaceAll('__FINDZIA_SECTION__',section));
   if(name==='findzia-store-scene.js'){const art=JSON.parse(read('findzia-store-art.json'));bytes=Buffer.from(bytes.toString().replace('/* STORE_ART */ null',()=>JSON.stringify(Object.fromEntries(Object.entries(art).map(([key,value])=>[key,value.src])))));}
   if(name==='findzia-support.js')bytes=Buffer.from(bytes.toString().replace('/* SUPPORT_KNOWLEDGE */ null',()=>JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8')))));
   if(name==='findzia-i18n.js')bytes=Buffer.from(bytes.toString().replace('/* UI_TRANSLATIONS */ null',()=>JSON.stringify(uiLocales)));
@@ -117,6 +118,22 @@ trialHTML=trialHTML.replace(/<link rel="canonical"[^>]*>/,'<meta name="robots" c
 emit(trialConfig.path,'trial/one.html',trialHTML,'html');
 routes[trialConfig.path].preview=true;
 routes[trialConfig.path+'/']=routes[trialConfig.path];
+// Services trial reuses the original brand CSS, menu, account and credit modules.
+// Product-search scripts are absent from this separate page.
+const serviceStyles=[...home.matchAll(/<style\b[^>]*>[\s\S]*?<\/style>/g)].map(m=>m[0]).join('\n');
+const compressedBrand=home.match(/<script>\(function\(\)\{var s=[\s\S]*?<\/script>/)?.[0];
+if(!compressedBrand)throw Error('Original brand stylesheet missing');
+let serviceHeader=home.match(/<header class="fz-dark-header">[\s\S]*?<\/header>/)?.[0];
+if(!serviceHeader)throw Error('Original header missing');
+serviceHeader=serviceHeader.replace('<div class="fz-brand"','<a href="/" class="fz-brand"').replace('SHOP A BRIGHTER YOU</span></div>','SHOP A BRIGHTER YOU</span></a>');
+const serviceAssets=Object.fromEntries(['i18n','support','account','billing'].map(name=>[name,assets.get('findzia-'+name+'.js')]));
+const serviceBody=`${compressedBrand}${serviceStyles}<link rel="stylesheet" href="${assets.get('findzia-services.css')}"><div id="shopify-section-${section}"><section class="fz-home" id="findzia-home-${section}" data-services data-lang="en" dir="ltr" data-home-state="empty" data-theme="light" data-service-assets='${JSON.stringify(serviceAssets)}'><div class="fz-dark-home" data-dark-home>${serviceHeader}</div><dialog class="fz-dark-menu" id="fz-dark-menu-${section}" data-dark-menu aria-label="Menu"><div class="fz-dark-menu-head"><h2>Menu</h2><button class="fz-dark-menu-close" type="button" data-dark-menu-close aria-label="Close">×</button></div></dialog>${read('findzia-services.html')}</section></div><script type="module" src="${assets.get('findzia-services.js')}"></script>`;
+let serviceHTML=page(serviceBody,'Findzia Services — Find your specialist','/trial/services');
+for(const name of ['findzia-ads.js','findzia-analytics.js'])serviceHTML=serviceHTML.replace(`<script src="${assets.get(name)}" defer></script>`,'');
+serviceHTML=serviceHTML.replace(/<link rel="canonical"[^>]*>/,'<meta name="robots" content="noindex, nofollow, noarchive">').replace('Find products with a photo or a few words. Compare local and global stores with Findzia.','Find local service providers and contact specialists directly with Findzia.');
+emit('/trial/services','trial/services.html',serviceHTML,'html');
+routes['/trial/services'].preview=true;
+routes['/trial/services/']=routes['/trial/services'];
 // Keep known landing links working; unknown routes remain a real 404.
 routes['/index.html']=routes['/']; routes['/pages/findzia']=routes['/'];
 routes['/jp']=routes['/']; routes['/jp/']=routes['/'];

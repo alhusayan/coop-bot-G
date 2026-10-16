@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from findzia_credit_runtime import CreditRuntime
 
 from findzia_plans import PLANS, LEGACY_PLANS, PREPAID_PLANS, SPACE_PLANS
-SEARCH_PATHS = frozenset(('/api/search', '/api/search/stream', '/api/search/image',
+SEARCH_PATHS = frozenset(('/api/services/search', '/api/search', '/api/search/stream', '/api/search/image',
     '/api/search/image/stream', '/api/search/more', '/api/search/more/stream',
     '/api/search/markets/stream', '/api/refine/search/stream'))
 HELPER_PATHS = {'/api/guide': ('guide', 4), '/api/evaluate': ('insight', 5),
