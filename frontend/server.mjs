@@ -89,7 +89,10 @@ export function createServer(env=process.env) {
     // No canonical-domain, slash or HTTPS redirects here: the provider must
     // receive the file itself on each HTTPS host, not a redirected document.
     const path = (req.url || '/').split('?')[0];
-    const entry = path==='/analytics-config.json' ? analyticsEntry : path===association ? selectedFile : path==='/healthz' ? healthEntry : ['/trial/original','/trial/original/'].includes(path) ? {...routes.get('/'),preview:true} : routes.get(path);
+    // Existing payment return URLs must still reach the original billing client.
+    const returnParams = new URLSearchParams((req.url || '/').split('?').slice(1).join('?'));
+    const paymentReturn = ['/', '/home', '/home/'].includes(path) && (returnParams.has('fz_mf_intent') || returnParams.has('paymentId'));
+    const entry = paymentReturn ? (routes.get('/search') || routes.get('/')) : path==='/analytics-config.json' ? analyticsEntry : path===association ? selectedFile : path==='/healthz' ? healthEntry : ['/trial/original','/trial/original/'].includes(path) ? {...(routes.get('/search')||routes.get('/')),preview:true} : routes.get(path);
     if (!entry) {
       const page = routes.get('/404.html');
       res.writeHead(404, {...common, 'Content-Type':types.html, 'Cache-Control':'no-store', 'Content-Length':page.body.length});
