@@ -4,3 +4,25 @@ html[data-hub-account-only] .fz-home>:not(.fz-account){visibility:hidden!importa
 html[data-hub-account-only] .fz-account{visibility:visible!important}
 html[data-hub-account-only] .fz-account::backdrop{background:transparent}
 @media(max-width:600px){html[data-findzia-embedded] .fz-account{max-height:100%;max-height:100dvh}}
+/* Layered important declarations override legacy per-section styles only
+   inside the hub. The parent owns navigation and the search composer. */
+@layer findzia-hub-embed {
+ html[data-findzia-embedded] .fz-home :is(.fz-dark-header,.fz-topbar,.fz-search-row,.fz-dark-dock,[data-dark-photo],[data-photo-btn],.fz-dark-tap){display:none!important}
+ html[data-findzia-embedded] .fz-home :is(.fz-header-slot,.fz-fixed-header,.fz-fixed-header-inner,.fz-search-card){display:contents!important;position:static!important;height:auto!important;min-height:0!important;margin:0!important;padding:0!important;transform:none!important}
+ html[data-findzia-embedded] .fz-home{--fz-header-height:0px!important;padding-top:0!important}
+ html[data-findzia-embedded] .fz-home>.fz-container{padding-top:0!important}
+ html[data-findzia-embedded] .fz-home .fz-results-shell{margin-top:0!important}
+ html[data-findzia-embedded] .fz-home .fz-dark-home{padding-top:0!important;min-height:0!important;height:auto!important}
+ html[data-findzia-embedded] .fz-home .fz-dark-main{min-height:76svh!important;justify-content:center!important;padding:32px 16px!important;gap:20px!important}
+ html[data-findzia-embedded] .fz-home .fz-dark-bottom{position:static!important;margin:0!important;min-height:0!important;padding:0!important}
+ html[data-hub-project=shop] .fz-home .fz-results-tools{position:relative!important;inset:auto!important;transform:none!important;display:flex!important;align-items:center!important;justify-content:space-between!important;gap:12px!important;min-height:58px!important;padding:8px 0!important;margin:0!important}
+ html[data-hub-project=shop] .fz-home .fz-results-tools .fz-sort-row{position:static!important;inset:auto!important;transform:none!important;margin-inline-start:auto!important}
+ html[data-hub-project=shop] .fz-home[data-home-state=empty] .fz-results-tools{display:none!important}
+ html[data-findzia-embedded]:not([data-hub-project=shop]) .fz-home :is(.fz-results-tools,[data-assistant-tools],[data-view-control],[data-sort-control],.svc-sort){display:none!important}
+ html[data-hub-project=services] .fz-home :is(.fz-dark-home,.svc-photo-entry,.svc-photo-privacy,.svc-query-field){display:none!important}
+ html[data-hub-project=services] .svc-fields{grid-template-columns:minmax(0,1fr) auto!important}
+ html[data-hub-project=space] .fz-home>.fz-dark-home{display:none!important}
+ html[data-hub-project=space] [data-spaces-content] :is(.home-actions,.floating-button[data-action=upload],label[for=design-request],#design-request){display:none!important}
+ html[data-hub-project=space] [data-spaces-content]{padding-top:12px!important}
+ @media(max-width:600px){html[data-hub-project=services] .svc-fields{grid-template-columns:minmax(0,1fr)!important}}
+}

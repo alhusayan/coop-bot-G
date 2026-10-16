@@ -27,6 +27,7 @@ function countries(){for(const select of [$('#svc-country'),$('[data-profile-mar
 function text(el,value){if(el&&el.textContent!==String(value))el.textContent=value;}
 function creditLabel(){const s=root.fzBilling?.status(),c=s||creditConfig;const label=$('#svc-credit span:last-child');text(label,s&&Number.isFinite(s.remaining)?`${s.remaining} ${t('remaining')}`:t('credits'));if(c)text($('#svc-cost'),c.enabled===false?t('free'):language==='ar'&&c.search_cost===2?'رصيدان للبحث · بلا نتائج؟ بلا خصم.':`${c.search_cost||1} ${t('cost')}`);}
 function syncSelection(){
+ document.dispatchEvent(new Event('findzia:header-state'));
  const query=$('#svc-query').value.trim();
  $('#svc-categories').querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.query===query)));
 }

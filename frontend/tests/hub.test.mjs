@@ -16,7 +16,7 @@ test('one selection section, four large image cards, all local assets available'
  const response=await get('/'),html=await response.text();assert.equal(response.status,200);
  assert.equal([...html.matchAll(/class="project-card /g)].length,4);assert.equal([...html.matchAll(/class="project-grid"/g)].length,1);assert.doesNotMatch(html,/class="hero"|intent-picker|faq-section|__ASSET_/);
  for(const path of ['/search','/trial/one-55321448a0352f1ff18b','/space','/trial/services'])assert.ok(html.includes('href="'+path+'"'));
- assert.match(html,/<dialog id="project-layer"/);
+ assert.match(html,/<dialog id="project-layer"/);assert.equal([...html.matchAll(/<header\b/g)].length,1);assert.doesNotMatch(html,/class="layer-toolbar"/);assert.ok(html.indexOf('</header>')<html.indexOf('<dialog id="project-layer"'));assert.match(html,/<form id="header-search"[^>]+hidden/);
  for(const asset of new Set([...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]))){const r=await get(asset);assert.equal(r.status,200,asset);assert.match(r.headers.get('cache-control'),/immutable/)}
  const css=read('../source/findzia-hub.css');assert.match(css,/height:var\(--hub-height\)/);assert.match(css,/grid-template-rows:repeat\(2,minmax\(0,1fr\)\)/);assert.match(css,/env\(safe-area-inset-bottom\)/);assert.match(css,/prefers-reduced-motion/);
 });
@@ -29,9 +29,9 @@ test('only project documents allow same-origin embedding; home and payment files
 });
 // A DOM fixture exercises event handlers and navigation without a browser or real credentials.
 function hubFixture(href='https://findzia.com/',saved={}){
- class Element{constructor(dataset={}){this.dataset=dataset;this.attributes={};this.listeners={};this.children=[];this.style={setProperty:(key,value)=>this.style[key]=value};this.hidden=false;this.value='';this.textContent='';this.open=false;this.options=[];}addEventListener(name,fn){(this.listeners[name]??=[]).push(fn)}fire(name,event={}){for(const fn of this.listeners[name]||[])fn({target:this,button:0,preventDefault(){},...event})}setAttribute(key,value){this.attributes[key]=value}append(el){this.children.push(el);if(el.tagName==='option')this.options.push(el)}prepend(el){this.children.unshift(el)}remove(){this.removed=true}focus(){this.focused=true}showModal(){this.open=true}close(){this.open=false}querySelector(selector){return node(selector)}}
+ class Element{constructor(dataset={}){this.dataset=dataset;this.attributes={};this.listeners={};this.children=[];this.style={setProperty:(key,value)=>this.style[key]=value};this.hidden=false;this.value='';this.textContent='';this.open=false;this.options=[];}addEventListener(name,fn){(this.listeners[name]??=[]).push(fn)}fire(name,event={}){for(const fn of this.listeners[name]||[])fn({target:this,button:0,preventDefault(){},...event})}setAttribute(key,value){this.attributes[key]=value}append(el){this.children.push(el);if(el.tagName==='option')this.options.push(el)}prepend(el){this.children.unshift(el)}remove(){this.removed=true}focus(){this.focused=true}blur(){this.focused=false}show(){this.open=true;this.modal=false}showModal(){this.open=true;this.modal=true}getBoundingClientRect(){return{height:72}}toggleAttribute(key,value){if(value)this.attributes[key]='';else delete this.attributes[key]}replaceChildren(...items){this.children=items;this.options=[]}close(){this.open=false}querySelector(selector){return node(selector)}}
  const nodes=new Map(),node=key=>{if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key)};
- const groups={};for(const key of ['language','theme-toggle','account'])groups['[data-'+key+']']=[new Element(),new Element()];groups['[data-project]']=['shop','one','space','services'].map(project=>new Element({project}));groups['[data-t]']=['choose','shop','one','space','services','loading','retry'].map(t=>new Element({t}));groups['[data-language-name]']=[new Element(),new Element()];groups['.account-dot']=[new Element(),new Element()];
+ const groups={};for(const key of ['language','theme-toggle','account'])groups['[data-'+key+']']=[new Element(),new Element()];groups['[data-project]']=['shop','one','space','services'].map(project=>new Element({project}));groups['[data-t]']=['choose','shop','one','space','services','loading','retry'].map(t=>new Element({t}));groups['[data-language-name]']=[new Element(),new Element()];groups['.account-dot']=[new Element(),new Element()];groups['[data-camera-source]']=['camera','photos'].map(cameraSource=>new Element({cameraSource}));
  const html=new Element();html.lang='ar';html.dataset.theme='light';const location=new URL(href),messages=[],frames=[],listeners={},stored=new Map(Object.entries(saved)),sessions=new Map(),history=[];
  const document={documentElement:html,activeElement:groups['[data-project]'][0],querySelector:node,querySelectorAll:key=>groups[key]||[],createElement:tag=>{const el=new Element();el.tagName=tag;if(tag==='iframe'){el.contentWindow={postMessage:(data,origin)=>messages.push({data,origin})};frames.push(el)}return el}};
  const window={innerHeight:620,visualViewport:{height:560,scale:1,addEventListener:(name,fn)=>listeners['viewport-'+name]=fn},FindziaAppearance:{apply:()=>({theme:stored.get('findzia-appearance-v1')||'light'})},addEventListener:(name,fn)=>listeners[name]=fn};
@@ -70,7 +70,7 @@ test('Space allowlist covers app assets, uploads, selections, catalog and media,
  for(const path of ['/space','/space/','/app.js','/findzia/account.js','/markets.js','/api/config','/api/jobs',`/api/jobs/${id}`,`/api/jobs/${id}/select/0`,`/api/jobs/${id}/catalog/2/12`,`/api/jobs/${id}/product-details/${'a'.repeat(64)}`,`/media/${id}/original.jpg`])assert.equal(isSpacePath(path),true,path);
  for(const path of ['https://evil.example/','//evil.example/','/api/admin','/../../secret','/media/../secret','/app.js/evil','/%2f%2fevil.example'])assert.equal(isSpacePath(path),false,path);
  const market="export function marketLanguage(market,read=()=>null){return read('spaces-language-choice-'+market+'-v1')||'en';}";const transformed=transformSpace('/markets.js',market,{});assert.equal(vm.runInNewContext(transformed.replace('export ','')+';marketLanguage("JP", key=>key==="findzia-lang"?"ar":null)'),'ar');
- const html=transformSpace('/space','<html><head></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);
+ const html=transformSpace('/space','<html><head><script src="/app.js?v=existing"></script></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);assert.match(html,/app.js\?v=existing&hubHeader=20261016.5/);
 });
 test('Space proxy preserves same-origin session cookies, streams POST bodies and rewrites framing',async()=>{
  async function run(path,method,body,replyBody,replyHeaders){let options,uploaded='';const req=new PassThrough();req.url=path;req.method=method;req.headers={cookie:'fz_spaces=existing',authorization:'Bearer test',origin:'https://findzia.com','content-type':'application/json','sec-fetch-site':'same-origin',host:'untrusted.example'};
@@ -93,4 +93,47 @@ test('child bridge applies parent language to the real preference control and op
  events.message({origin:'https://findzia.com',source:parent,data:{findziaHub:true,type:'account'}});assert.equal(accountOpens,1);
  stored.set('findzia-lang','en');events.storage({key:'findzia-lang'});assert.equal(internalLanguage,'en');assert.equal(document.documentElement.dir,'ltr');
  root.fzRefineBridge.accountSearch('chair','KW');assert.equal(posts.at(-1).message.project,'shop');assert.equal(posts.at(-1).message.q,'chair');assert.equal(JSON.stringify(posts).includes('access_token'),false);
+});
+
+test('persistent header remains operable outside the project layer; one composer follows current section',()=>{
+ const f=hubFixture();assert.equal(f.node('#header-search').hidden,true);assert.equal(f.node('#projects').inert,false);
+ f.groups['[data-project]'][0].fire('click');const calls=[],frame=f.frames.at(-1);frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push({name,data});return name==='state'?{query:'chair',country:'KW',countries:['KW','SA'],busy:false,cameraReady:true}:true}};
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
+ assert.equal(f.node('#project-layer').modal,false);assert.equal(f.node('#projects').inert,true);assert.equal(f.node('#header-search').hidden,false);assert.equal(f.node('#header-camera').disabled,false);assert.equal(f.node('#header-query').value,'chair');
+ f.node('#header-camera').fire('click');assert.equal(calls.at(-1).name,'camera');
+ f.node('#header-query').value='طاولة';f.node('#header-query').fire('input');assert.equal(calls.at(-1).data.query,'طاولة');f.node('#header-search').fire('submit');assert.equal(calls.at(-1).name,'search');
+ f.node('#open-menu').fire('click');assert.equal(f.node('#hub-menu').open,true);f.node('#hub-menu').close();
+ f.node('#close-layer').fire('click');assert.equal(f.node('#header-search').hidden,true);assert.equal(f.node('#projects').inert,false);
+ f.groups['[data-project]'][2].fire('click');const space=f.frames.at(-1);space.contentWindow.FindziaHubBridge={action:(name)=>name==='state'?{cameraReady:true}:calls.push({name})};f.listeners.message({origin:'https://findzia.com',source:space.contentWindow,data:{findziaHub:true,type:'ready'}});f.node('#header-camera').fire('click');assert.equal(f.node('#camera-source').open,true);f.groups['[data-camera-source]'][1].fire('click');assert.equal(calls.at(-1).name,'photos');assert.equal(f.node('#camera-source').open,false);
+});
+function projectFixture(project){
+ const records=[],posts=[],events={},stored=new Map(),nodes=new Map();
+ const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{value:'',hidden:false,disabled:false,required:false,options:[],dataset:{},click(){records.push(selector)},dispatchEvent(){records.push('input:'+selector)},requestSubmit(){records.push('submit:'+selector)}});return nodes.get(selector)};
+ const root={dataset:{lang:'en'},fzAccount:{open(){}},fzRefineBridge:{context:()=>({busy:false,country:'KW'})},querySelector:selector=>['[data-profile-language-select]','[data-solar-mode]'].includes(selector)?null:selector==='[data-profile-market-select]'?node(selector):null,addEventListener(){}};
+ node('[data-profile-market-select]').options=[{value:'KW'},{value:'SA'}];node('[data-profile-market-select]').value='KW';
+ const document={documentElement:{dataset:{}},readyState:'complete',querySelector:s=>s==='.fz-home'?root:node(s),addEventListener:(name,fn)=>{(events[name]??=[]).push(fn)}};
+ const parent={FindziaHub:true,location:{origin:'https://findzia.com',href:'https://findzia.com/?project='+project},postMessage:data=>posts.push(data)},window={addEventListener(){}};
+ vm.runInNewContext(read('../source/findzia-hub-bridge.js'),{window,parent,document,location:new URL('https://findzia.com/search?hub=1&hubProject='+project),URL,URLSearchParams,Event,queueMicrotask,localStorage:{getItem:key=>stored.get(key),setItem:(key,value)=>stored.set(key,value)}});
+ return{action:window.FindziaHubBridge.action,connect:window.FindziaHubBridge.connectSpace,node,records,posts,root,events,stored};
+}
+test('one header camera dispatches synchronously to each existing photo flow; search uses native forms',()=>{
+ for(const project of ['shop','one','services','space']){
+  const f=projectFixture(project);if(project==='space')f.connect({state:()=>({ready:true,busy:false,hasImage:true}),review:()=>f.records.push('review')});
+  assert.equal(f.action('camera'),true);assert.equal(f.records.at(-1),project==='services'?'#svc-camera':project==='space'?'[data-action="camera"]':'[data-photo-btn]');
+  if(['services','space'].includes(project)){assert.equal(f.action('photos'),true);assert.equal(f.records.at(-1),project==='services'?'#svc-gallery':'[data-action="upload"]')}
+  assert.equal(f.action('search',{query:'warm colours'}),true);assert.equal(f.records.at(-1),project==='space'?'review':project==='services'?'submit:#svc-form':'[data-search-btn]');
+  const field=project==='services'?'#svc-query':project==='space'?'#design-request':'textarea[id^="fz-query-"]';assert.equal(f.node(field).value,'warm colours');
+ }
+ const service=projectFixture('services');service.node('#svc-query').required=true;assert.equal(service.action('search',{query:''}),'needs-query');assert.equal(service.records.includes('submit:#svc-form'),false);
+ const space=projectFixture('space');space.connect({state:()=>({ready:true,busy:false,hasImage:false}),review:()=>{throw Error('must not generate or review without room')}});assert.equal(space.action('search',{query:'minimal'}),'needs-photo');assert.equal(space.node('#design-request').value,'minimal');
+});
+test('Space adapter reviews preferences without generating; chosen market survives module refresh',()=>{
+ const output=transformSpace('/app.js','// upstream module',{});let adapter;vm.runInNewContext(output,{window:{FindziaHubBridge:{connectSpace:x=>adapter=x}},state:{auth:true,image:'photo'},submitting:false,view:name=>assert.equal(name,'setup')});assert.equal(adapter.state().ready,true);assert.equal(adapter.state().hasImage,true);adapter.review();
+ const f=projectFixture('space');const chosen={dataset:{id:'SA'}};for(const fn of f.events.click)fn({target:{closest:selector=>selector.includes('set-market')?chosen:null}});assert.equal(f.stored.get('findzia-market-country-v1'),'SA');assert.ok(f.posts.some(x=>x.type==='market'&&x.country==='SA'));
+});
+test('direct section links enter unified shell, while payment callbacks stay with their existing handler',()=>{
+ for(const [path,project] of [['/search','shop'],['/trial/one-55321448a0352f1ff18b','one'],['/trial/services','services'],['/space/','space']]){
+  let redirected;const location=new URL('https://findzia.com'+path+'?q=chair&country=KW');location.replace=value=>redirected=value;const window={};vm.runInNewContext(read('../source/findzia-hub-bridge.js'),{window,parent:window,location,URL,URLSearchParams});const dest=new URL(redirected);assert.equal(dest.pathname,'/');assert.equal(dest.searchParams.get('project'),project);assert.equal(dest.searchParams.get('q'),'chair');
+ }
+ const location=new URL('https://findzia.com/search?paymentId=return');location.replace=()=>{throw Error('payment callback rewritten')};const window={addEventListener(){}};vm.runInNewContext(read('../source/findzia-hub-bridge.js'),{window,parent:window,location,URL,URLSearchParams,document:{readyState:'loading',addEventListener(){}},localStorage:{getItem:()=>null}});
 });

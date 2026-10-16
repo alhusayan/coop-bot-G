@@ -11,34 +11,50 @@ const keys=['choose','shop','one','space','services','account','close','loading'
 const projects={shop:{path:'/search',title:'Findzia'},one:{path:'/trial/one-55321448a0352f1ff18b',title:'Findzia One'},space:{path:'/space',title:'Findzia Space'},services:{path:'/trial/services',title:'Findzia Services'},account:{path:'/search',title:'Findzia'}};
 const read=key=>{try{return localStorage.getItem(key)}catch{return null}},save=(key,value)=>{try{localStorage.setItem(key,value)}catch{}};
 const validLang=value=>Object.hasOwn(languages,value)?value:'en';
+let isReady=false,noticeTimer=null;
 let lang=validLang(read('findzia-lang')||html.lang),active=null,frame=null,returnFocus=null,loadTimer=null;
+const header=$('#main-header'),search=$('#header-search'),query=$('#header-query');
 const layer=$('#project-layer'),content=$('#project-content'),status=$('#layer-status'),retry=$('#retry-project');
 window.FindziaHub=true;
 const t=key=>(labels[lang][keys.indexOf(key)]||labels.en[keys.indexOf(key)]||key);
 function send(data){frame?.contentWindow?.postMessage({findziaHub:true,...data},location.origin)}
-function render(){html.lang=lang;html.dir=['ar','ur'].includes(lang)?'rtl':'ltr';all('[data-t]').forEach(el=>el.textContent=t(el.dataset.t));all('[data-language]').forEach(el=>{el.value=lang;el.setAttribute('aria-label',t('language'))});all('[data-language-name]').forEach(el=>el.textContent=languages[lang]);all('[data-account]').forEach(el=>el.setAttribute('aria-label',t('account')));$('#close-layer').setAttribute('aria-label',t('close'));all('[data-theme-toggle]').forEach(el=>{el.setAttribute('aria-label',t('appearance'));el.setAttribute('aria-pressed',String(html.dataset.theme==='dark'))});if(active)$('#layer-title').textContent=active==='account'?t('account'):projects[active].title;}
+const ui={ar:{typeQuery:'اكتب اسم الخدمة أولاً',menu:'القائمة',home:'الرئيسية',preferences:'الدولة واللغة والمظهر',country:'الدولة',auto:'تلقائي',light:'فاتح',dark:'داكن',photo:'أضف صورة',takePhoto:'التقط صورة',photos:'اختر من الصور',sectionOptions:'خيارات القسم',search:'بحث',addRoom:'أضف صورة مساحتك من العدسة',loading:'لحظة، جاري تجهيز القسم…',unavailable:'تعذّر تنفيذ الطلب. حاول مرة ثانية.',shop:'ابحث عن منتج…',one:'شنو المنتج اللي تبيه؟',space:'صف مساحتك أو الستايل اللي تبيه…',services:'شنو الخدمة اللي تحتاجها؟'},en:{typeQuery:'Enter a service first',menu:'Menu',home:'Home',preferences:'Country, language & appearance',country:'Country',auto:'Automatic',light:'Light',dark:'Dark',photo:'Add a photo',takePhoto:'Take a photo',photos:'Choose from photos',sectionOptions:'Section options',search:'Search',addRoom:'Add your room with the camera above',loading:'Getting this section ready…',unavailable:'Could not complete this action. Please try again.',shop:'Search for a product…',one:'Which product are you looking for?',space:'Describe your space or style…',services:'What service do you need?'}};
+const copy=key=>(ui[lang]||ui.en)[key]||ui.en[key]||key;
+const defaultCountries=['KW','SA','AE','QA','BH','OM','GB','US','CA','AU','DE','FR','IT','ES','NL','TR','EG','JO','IN','JP','CN','KR','BR','SG','MY','ID'];
+let currentCountry=read('findzia-market-country-v1')||'KW',marketOptions=defaultCountries;
+const flag=code=>/^[A-Z]{2}$/.test(code)?String.fromCodePoint(...[...code].map(c=>c.charCodeAt(0)+127397)):'🌐';
+function notice(key){const node=$('#header-notice');node.textContent=copy(key);node.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>node.hidden=true,4200)}
+// Same-origin synchronous calls preserve the tap's user activation for iOS file pickers.
+function action(name,data={}){try{return frame?.contentWindow?.FindziaHubBridge?.action?.(name,data)||false}catch{return false}}
+function measureHeader(){const height=Math.ceil(header.getBoundingClientRect().height);if(height)html.style.setProperty('--header-height',height+'px')}
+function renderMarkets(){const select=$('#hub-country');select.replaceChildren();let names;try{names=new Intl.DisplayNames([lang],{type:'region'})}catch{}for(const code of marketOptions){const option=document.createElement('option');option.value=code;option.textContent=flag(code)+' '+(names?.of(code)||code);select.append(option)}select.value=currentCountry}
+function headerState(data){if(!data)return;if(typeof data.query==='string'&&document.activeElement!==query)query.value=data.query;if(/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;$('#market-flag').textContent=flag(currentCountry)}if(Array.isArray(data.countries)){const codes=data.countries.filter(c=>typeof c==='string'&&/^[A-Z]{2}$/.test(c));if(codes.length)marketOptions=codes;}$('#header-camera').disabled=!isReady||data.busy===true||data.cameraReady===false;$('#submit-search').disabled=!isReady||data.busy===true;query.disabled=!isReady;}
+function preferences(){renderMarkets();$('#hub-theme').value=read('findzia-appearance-v1')||'auto';$('#hub-preferences').showModal()}
+function render(){html.lang=lang;html.dir=['ar','ur'].includes(lang)?'rtl':'ltr';all('[data-t]').forEach(el=>el.textContent=t(el.dataset.t));all('[data-language]').forEach(el=>{el.value=lang;el.setAttribute('aria-label',t('language'))});all('[data-language-name]').forEach(el=>el.textContent=languages[lang]);all('[data-account]').forEach(el=>el.setAttribute('aria-label',t('account')));$('#close-layer').setAttribute('aria-label',t('close'));all('[data-theme-toggle]').forEach(el=>{el.setAttribute('aria-label',t('appearance'));el.setAttribute('aria-pressed',String(html.dataset.theme==='dark'))});if(active)$('#layer-title').textContent=active==='account'?t('account'):projects[active].title;
+ search.hidden=!active||active==='account';$('#close-layer').hidden=!active;$('#close-layer').setAttribute('aria-label',copy('home'));$('#section-options').hidden=!active;$('#projects').inert=!!active;html.toggleAttribute('data-project-open',!!active);all('[data-ui]').forEach(el=>el.textContent=copy(el.dataset.ui));all('[data-dismiss]').forEach(el=>el.setAttribute('aria-label',t('close')));$('#open-menu').setAttribute('aria-label',copy('menu'));$('#open-preferences').setAttribute('aria-label',copy('preferences'));$('#market-flag').textContent=flag(currentCountry);query.placeholder=copy(active||'shop');$('#search-label').textContent=query.placeholder;$('#header-camera').setAttribute('aria-label',copy('photo'));$('#submit-search').setAttribute('aria-label',copy('search'));measureHeader();}
+
 function setLanguage(value,notify=true){lang=validLang(value);save('findzia-lang',lang);render();if(notify)send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto'})}
 function syncTheme(){const theme=window.FindziaAppearance?.apply()?.theme||(read('findzia-appearance-v1')==='dark'?'dark':'light');html.dataset.theme=theme;render()}
 function syncAccount(){let signedIn=false;try{const s=JSON.parse(sessionStorage.getItem('findzia-account-v1-session'));signedIn=!!s?.access_token&&s.expires_at>Date.now()/1000}catch{}all('.account-dot').forEach(el=>el.hidden=!signedIn)}
-function viewport(){const v=window.visualViewport;if(v&&Math.abs(v.scale-1)>.05)return;html.style.setProperty('--hub-height',Math.round(Math.min(window.innerHeight,v?.height||window.innerHeight))+'px')}
-function ready(){clearTimeout(loadTimer);status.hidden=true;retry.hidden=true;send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto'});syncAccount()}
+function viewport(){const v=window.visualViewport;if(v&&Math.abs(v.scale-1)>.05)return;html.style.setProperty('--hub-height',Math.round(Math.min(window.innerHeight,v?.height||window.innerHeight))+'px');measureHeader()}
+function ready(){clearTimeout(loadTimer);isReady=true;status.hidden=true;retry.hidden=true;send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto',country:read('findzia-market-country-v1')});headerState(action('state')||{});syncAccount()}
 function showError(){status.hidden=false;status.querySelector('[data-t]').textContent=t('error');retry.hidden=false}
 function mountFrame(hash=''){
- frame?.remove();status.hidden=false;retry.hidden=true;status.querySelector('[data-t]').textContent=t('loading');
- const url=new URL(projects[active].path,location.origin);if(active==='shop'){const outer=new URL(location.href);for(const key of ['q','country'])if(outer.searchParams.has(key))url.searchParams.set(key,outer.searchParams.get(key))}url.searchParams.set('hub','1');url.searchParams.set('hubProject',active);if(active==='account')url.searchParams.set('account','1');if(hash)url.hash=hash;
+ frame?.remove();isReady=false;query.value='';query.disabled=true;$('#submit-search').disabled=true;$('#header-camera').disabled=true;status.hidden=false;retry.hidden=true;status.querySelector('[data-t]').textContent=t('loading');
+ const url=new URL(projects[active].path,location.origin);if(active!=='account'){const outer=new URL(location.href);for(const key of ['q','country'])if(outer.searchParams.has(key))url.searchParams.set(key,outer.searchParams.get(key))}url.searchParams.set('hub','1');url.searchParams.set('hubProject',active);if(active==='account')url.searchParams.set('account','1');if(hash)url.hash=hash;
  frame=document.createElement('iframe');frame.title=active==='account'?t('account'):projects[active].title;frame.allow='camera; microphone; geolocation; payment; clipboard-write';frame.referrerPolicy='same-origin';frame.src=url.href;frame.addEventListener('error',showError);content.prepend(frame);
  clearTimeout(loadTimer);loadTimer=setTimeout(showError,30000);
 }
 function openProject(key,{push=true,hash=''}={}){
  if(!Object.hasOwn(projects,key))return;
  if(active===key&&layer.open)return;
- returnFocus=document.activeElement;active=key;render();if(!layer.open)layer.showModal();
+ returnFocus=document.activeElement;active=key;render();if(!layer.open)layer.show();
  if(push){const url=new URL(location.href);url.searchParams.set('project',key);url.hash='';history.pushState({findziaHub:true},'',url.pathname+url.search)}
  mountFrame(hash);
 }
 function closeProject({update=true}={}){
- clearTimeout(loadTimer);frame?.remove();frame=null;active=null;if(layer.open)layer.close();
- if(update){const url=new URL(location.href);url.searchParams.delete('project');url.hash='';history.replaceState(null,'',url.pathname+url.search)}
+ clearTimeout(loadTimer);frame?.remove();frame=null;active=null;isReady=false;marketOptions=defaultCountries;$('#header-notice').hidden=true;if(layer.open)layer.close();
+ if(update){const url=new URL(location.href);url.searchParams.delete('project');url.searchParams.delete('q');url.searchParams.delete('country');url.hash='';history.replaceState(null,'',url.pathname+url.search)}
  syncAccount();setLanguage(read('findzia-lang')||lang,false);syncTheme();returnFocus?.focus?.({preventScroll:true});
 }
 all('[data-language]').forEach(select=>{for(const [value,label]of Object.entries(languages)){const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option)}select.addEventListener('change',()=>setLanguage(select.value))});
@@ -50,12 +66,29 @@ window.addEventListener('message',event=>{
  if(event.origin!==location.origin||event.source!==frame?.contentWindow||event.data?.findziaHub!==true)return;
  const data=event.data;
  if(data.type==='ready')ready();
+ if(data.type==='header-state')headerState(data);
+ if(data.type==='market'&&/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;save('findzia-market-country-v1',currentCountry);save('findzia-services-country-v1',currentCountry);render()}
  if(data.type==='close')closeProject();
  if(data.type==='navigate'&&Object.hasOwn(projects,data.project)){const url=new URL(location.href);for(const key of ['q','country']){url.searchParams.delete(key);if(typeof data[key]==='string'&&data[key].length<=1000)url.searchParams.set(key,data[key])}history.replaceState(history.state,'',url.pathname+url.search);openProject(data.project);}
  if(data.type==='language'&&Object.hasOwn(languages,data.language))setLanguage(data.language,false);
  if(data.type==='appearance')syncTheme();
  if(data.type==='account-state')syncAccount();
 });
+$('#open-menu').addEventListener('click',()=>$('#hub-menu').showModal());
+all('[data-dismiss]').forEach(button=>button.addEventListener('click',()=>$('#'+button.dataset.dismiss).close()));
+all('[data-go]').forEach(button=>button.addEventListener('click',()=>{$('#hub-menu').close();openProject(button.dataset.go)}));
+$('#menu-home').addEventListener('click',()=>{$('#hub-menu').close();closeProject()});
+$('#home-link').addEventListener('click',event=>{if(active){event.preventDefault();closeProject()}});
+$('#section-options').addEventListener('click',()=>{$('#hub-menu').close();if(!action('menu'))notice('loading')});
+$('#open-preferences').addEventListener('click',()=>{if(active&&isReady&&action('market'))return;preferences()});
+$('#menu-preferences').addEventListener('click',()=>{$('#hub-menu').close();preferences()});
+$('#hub-theme').addEventListener('change',event=>{save('findzia-appearance-v1',event.target.value);syncTheme();send({type:'preferences',language:lang,theme:event.target.value})});
+$('#hub-country').addEventListener('change',event=>{const value=event.target.value;if(!marketOptions.includes(value))return;currentCountry=value;save('findzia-market-country-v1',value);save('findzia-services-country-v1',value);save('findzia-market-country-ts-v1',String(Date.now()));save('findzia_manual_market_v1',value);action('country',{country:value});render()});
+query.addEventListener('input',()=>action('query',{query:query.value}));
+search.addEventListener('submit',event=>{event.preventDefault();if(!isReady)return notice('loading');const value=action('search',{query:query.value});if(value==='needs-query'){notice('typeQuery');query.focus();return}if(value==='needs-photo'){$('#camera-source').showModal();return}if(!value)notice('unavailable');else query.blur()});
+$('#header-camera').addEventListener('click',()=>{if(!isReady)return notice('loading');if(['space','services'].includes(active))$('#camera-source').showModal();else if(!action('camera'))notice('unavailable')});
+all('[data-camera-source]').forEach(button=>button.addEventListener('click',()=>{$('#camera-source').close();if(!action(button.dataset.cameraSource))notice('unavailable')}));
+if(window.ResizeObserver)new ResizeObserver(measureHeader).observe(header);
 window.addEventListener('storage',event=>{if(event.key==='findzia-lang')setLanguage(read('findzia-lang')||lang,false);if(event.key==='findzia-appearance-v1')syncTheme();if(event.key==='findzia-account-v1-session')syncAccount()});
 window.addEventListener('popstate',()=>{const key=new URL(location.href).searchParams.get('project');if(key&&Object.hasOwn(projects,key))openProject(key,{push:false});else closeProject({update:false})});
 window.addEventListener('resize',viewport,{passive:true});window.visualViewport?.addEventListener('resize',viewport,{passive:true});window.addEventListener('pageshow',()=>{viewport();syncAccount();setLanguage(read('findzia-lang')||lang,false);syncTheme()});

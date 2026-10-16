@@ -25,15 +25,24 @@ __ANALYTICS__
 <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></symbol>
 <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
 <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M5 6h14M5 12h10M5 18h14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+<symbol id="i-camera" viewBox="0 0 24 24"><path d="M8 5.5 9.5 3.5h5L16 5.5h3A2.5 2.5 0 0 1 21.5 8v10a2.5 2.5 0 0 1-2.5 2.5H5A2.5 2.5 0 0 1 2.5 18V8A2.5 2.5 0 0 1 5 5.5Z"/><circle cx="12" cy="12.5" r="4"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="m14 5-7 7 7 7"/></symbol>
 <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
 </svg>
 <div class="hub-shell">
-<header class="site-header">
-<a class="wordmark" href="/" dir="ltr" aria-label="Findzia">Findzia<span>·</span></a>
-<div class="header-actions">
-<label class="language-control"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg><span data-language-name>العربية</span><select data-language aria-label="اللغة"></select></label>
-<button data-theme-toggle class="icon-button" type="button" aria-label="المظهر" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button>
-<button data-account class="icon-button account-button" type="button" aria-label="حسابي"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg><i class="account-dot" hidden></i></button>
+<header class="site-header" id="main-header">
+<div class="header-inner">
+<div class="header-row">
+<div class="header-start"><button id="open-menu" class="icon-button round-button" type="button" aria-label="القائمة" aria-haspopup="dialog" aria-controls="hub-menu"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button><button id="close-layer" class="icon-button back-button" type="button" aria-label="الرئيسية" hidden><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button></div>
+<a id="home-link" class="wordmark" href="/" dir="ltr" aria-label="Findzia — الرئيسية">Findz<span class="brand-i">ı</span>a</a>
+<div class="header-actions"><button id="open-preferences" class="icon-button round-button market-button" type="button" aria-label="الدولة واللغة والمظهر" aria-haspopup="dialog"><span id="market-flag" aria-hidden="true">🇰🇼</span></button><button data-account class="icon-button round-button account-button" type="button" aria-label="حسابي"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg><i class="account-dot" hidden></i></button></div>
+</div>
+<form id="header-search" class="header-search" role="search" hidden>
+<label class="sr-only" for="header-query" id="search-label">البحث</label><input id="header-query" type="search" maxlength="600" dir="auto" autocomplete="off" enterkeyhint="search" placeholder="ابحث عن منتج…">
+<button id="submit-search" class="icon-button" type="submit" aria-label="بحث" disabled><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg></button><span class="search-divider" aria-hidden="true"></span><button id="header-camera" class="icon-button camera-button" type="button" aria-label="البحث بالصورة" disabled><svg class="icon" aria-hidden="true"><use href="#i-camera"/></svg></button>
+</form>
 </div>
 </header>
 <main id="projects">
@@ -59,11 +68,15 @@ __ANALYTICS__
 </main>
 </div>
 <dialog id="project-layer" aria-labelledby="layer-title">
-<div class="layer-toolbar">
-<button id="close-layer" class="icon-button" type="button" aria-label="إغلاق"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
-<h2 id="layer-title" dir="ltr">Findzia</h2>
-<div class="layer-actions"><label class="language-control"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg><span data-language-name>العربية</span><select data-language aria-label="اللغة"></select></label><button data-account class="icon-button account-button" type="button" aria-label="حسابي"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg><i class="account-dot" hidden></i></button></div>
-</div>
+<h2 id="layer-title" class="sr-only" dir="ltr">Findzia</h2>
 <div id="project-content" class="project-content"><div id="layer-status" role="status"><span data-t="loading">جاري الفتح…</span><button id="retry-project" type="button" hidden data-t="retry">حاول مرة ثانية</button></div></div>
 </dialog>
+<dialog id="hub-menu" class="hub-sheet" aria-labelledby="menu-title">
+<div class="sheet-head"><h2 id="menu-title" data-ui="menu">القائمة</h2><button class="icon-button" type="button" data-dismiss="hub-menu" aria-label="إغلاق"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+<nav class="project-nav"><button type="button" id="menu-home" data-ui="home">الرئيسية</button><button type="button" data-go="shop"><span dir="ltr">Findzia</span><small data-t="shop">تسوّق وقارن</small></button><button type="button" data-go="one"><span dir="ltr">Findzia One</span><small data-t="one">منتجك الواحد</small></button><button type="button" data-go="space"><span dir="ltr">Findzia Space</span><small data-t="space">صمّم مساحتك</small></button><button type="button" data-go="services"><span dir="ltr">Findzia Services</span><small data-t="services">اطلب خدمة</small></button></nav>
+<div class="menu-bottom"><button id="section-options" type="button" data-ui="sectionOptions" hidden>خيارات القسم</button><button id="menu-preferences" type="button" data-ui="preferences">اللغة والمظهر</button></div>
+</dialog>
+<dialog id="hub-preferences" class="hub-sheet" aria-labelledby="preferences-title"><div class="sheet-head"><h2 id="preferences-title" data-ui="preferences">التفضيلات</h2><button class="icon-button" type="button" data-dismiss="hub-preferences" aria-label="إغلاق"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div><div class="preference-fields"><label><span data-ui="country">الدولة</span><select id="hub-country"></select></label><label><span data-t="language">اللغة</span><select data-language></select></label><label><span data-t="appearance">المظهر</span><select id="hub-theme"><option value="auto" data-ui="auto">تلقائي</option><option value="light" data-ui="light">فاتح</option><option value="dark" data-ui="dark">داكن</option></select></label></div></dialog>
+<dialog id="camera-source" class="hub-sheet camera-source" aria-labelledby="camera-title"><div class="sheet-head"><h2 id="camera-title" data-ui="photo">أضف صورة</h2><button class="icon-button" type="button" data-dismiss="camera-source" aria-label="إغلاق"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div><div class="camera-choices"><button type="button" data-camera-source="camera" data-ui="takePhoto">التقط صورة</button><button type="button" data-camera-source="photos" data-ui="photos">اختر من الصور</button></div></dialog>
+<div id="header-notice" role="status" hidden></div>
 </body></html>
