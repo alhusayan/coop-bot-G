@@ -10,9 +10,9 @@ test('services trial is separate, unindexed, and connects the original account a
   assert.match(response.headers.get('x-robots-tag'),/noindex/);assert.equal(response.headers.get('cache-control'),'no-store');
   const html=await response.text();assert.match(html,/data-services/);assert.doesNotMatch(html,/\{\{|\{%/);
   const accountAssets=JSON.parse(html.match(/data-service-assets='([^']+)'/)[1]);
-  assert.deepEqual(Object.keys(accountAssets),['i18n','support','account','billing','state']);
+  assert.deepEqual(Object.keys(accountAssets),['i18n','support','account','billing','state','catalog','images']);
   const urls=[...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]);
-  for(const path of [...urls,...Object.values(accountAssets)])assert.equal((await fetch(origin+path)).status,200,path);
+  for(const path of [...urls,...Object.entries(accountAssets).filter(([key])=>key!=='images').map(([,value])=>value),...Object.values(accountAssets.images)])assert.equal((await fetch(origin+path)).status,200,path);
   assert.doesNotMatch(html,/<script[^>]*findzia-(?:shell|choice|ads|analytics)\./);
   const home=await(await fetch(origin+'/')).text();assert.match(home,/See it\. Find it\./);assert.doesNotMatch(home,/data-services/);
  }finally{await new Promise(r=>server.close(r));}
@@ -48,4 +48,30 @@ test('four-card pages retain every result and sort the complete result set',()=>
  assert.equal(serviceResultsPage([]).items.length,0);
  assert.equal(serviceResultsPage(rows.slice(0,4)).pages,1);
  assert.equal(rows[0].title,'1');
+});
+
+import {serviceWhatsApp,serviceLocation} from '../source/findzia-services-state.js';
+import {serviceDirectory,serviceCount} from '../source/findzia-services-catalog.js';
+test('WhatsApp links use complete published international numbers only',()=>{
+ assert.equal(serviceWhatsApp('tel:+96555551234'),'https://wa.me/96555551234');
+ assert.equal(serviceWhatsApp('tel:+442071234567'),'https://wa.me/442071234567');
+ for(const tel of ['tel:55551234','tel:+012345678','tel:+96555','javascript:alert(1)',null])assert.equal(serviceWhatsApp(tel),'');
+});
+test('location resolves an area and supported country without inventing either',()=>{
+ assert.deepEqual(serviceLocation({countryCode:'KW',locality:'Salmiya',city:'Salmiya'}),{country:'KW',area:'Salmiya'});
+ assert.deepEqual(serviceLocation({countryCode:'GB',locality:'Camden',city:'London'}),{country:'GB',area:'Camden, London'});
+ assert.equal(serviceLocation({countryCode:'KW',countryName:'Kuwait'}),null);
+ assert.equal(serviceLocation({countryCode:'ZZ',locality:'Unknown'}),null);
+});
+test('service directory has translated entries across broad needs',()=>{
+ assert.ok(serviceDirectory.length>=15);assert.ok(serviceCount>=200);
+ for(const group of serviceDirectory){assert.ok(group[0]&&group[1]&&group[3].length);for(const row of group[3])assert.ok(row[0]&&row[1]);}
+});
+test('GPS and geocoding are enabled only for the services document',async()=>{
+ const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;
+ try{const service=await fetch(origin+'/trial/services'),home=await fetch(origin+'/');
+ assert.match(service.headers.get('permissions-policy'),/geolocation=\(self\)/);
+ assert.match(service.headers.get('content-security-policy'),/https:\/\/api.bigdatacloud.net/);
+ assert.doesNotMatch(home.headers.get('content-security-policy'),/bigdatacloud/);
+ }finally{await new Promise(r=>server.close(r));}
 });

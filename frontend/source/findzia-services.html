@@ -1,17 +1,26 @@
 <div class="svc-page" data-no-i18n>
  <main id="services-main" class="svc-main">
-  <section class="svc-intro"><div class="svc-intro-head"><h1 data-copy="title">Find your specialist.</h1><button type="button" class="svc-credit" id="svc-credit"><span class="svc-dot"></span><span data-copy="credits">Your credits</span></button></div><p class="svc-lead" data-copy="intro">Local services. Direct contact.</p></section>
-  <form id="svc-form" class="svc-search" role="search" data-dark-form>
+  <section class="svc-intro">
+   <div class="svc-topline"><span class="svc-eyebrow" data-copy="services">Services</span><button type="button" class="svc-credit" id="svc-credit"><span class="svc-dot"></span><span data-copy="credits">Your credits</span></button></div>
+   <h1 data-copy="title">What can we help with?</h1><p class="svc-lead" data-copy="intro">Choose a service. Find someone nearby.</p>
+  </section>
+  <section class="svc-suggestions" id="svc-suggestions" aria-label="Popular services">
+   <div class="svc-categories" id="svc-categories"></div>
+   <button type="button" class="svc-browse" id="svc-browse"><span data-icon="grid"></span><span data-copy="allServices">All services</span><span data-icon="arrow"></span></button>
+  </section>
+  <form id="svc-form" class="svc-search" role="search" data-dark-form novalidate>
    <div class="svc-fields">
-    <label class="svc-field svc-query-field"><span class="svc-field-label" data-copy="need">What do you need?</span><span class="svc-input-wrap"><span data-icon="search"></span><input id="svc-query" name="query" type="text" required minlength="2" maxlength="200" dir="auto" autocomplete="off" enterkeyhint="next" data-placeholder="queryExample" placeholder="e.g. Plumber"></span></label>
-    <label class="svc-field svc-location"><span class="svc-field-label" data-copy="where">City or area</span><span class="svc-input-wrap"><span data-icon="pin"></span><input id="svc-area" name="area" type="text" required minlength="2" maxlength="120" dir="auto" autocomplete="address-level2" enterkeyhint="search" data-placeholder="areaExample" placeholder="e.g. Salmiya"></span></label>
-    <label class="svc-field svc-country-label"><span class="svc-field-label" data-copy="country">Country</span><select id="svc-country" aria-label="Country"></select></label>
-    <button type="submit" class="svc-primary" id="svc-submit"><span data-copy="search">Find a specialist</span><span data-icon="arrow"></span></button>
+    <label class="svc-field svc-query-field"><span class="svc-sr-only" data-copy="need">What do you need?</span><span class="svc-input-wrap"><span data-icon="search"></span><input id="svc-query" name="query" type="text" required minlength="2" maxlength="200" dir="auto" autocomplete="off" enterkeyhint="next" data-placeholder="queryExample" placeholder="Or type any service…"></span></label>
+    <div class="svc-location">
+     <div class="svc-location-actions"><button type="button" id="svc-locate" class="svc-locate"><span data-icon="locate"></span><span id="svc-locate-label" data-copy="useLocation">Use my location</span><span class="svc-location-check" aria-hidden="true">✓</span></button><button type="button" id="svc-manual" class="svc-manual" aria-controls="svc-manual-fields" aria-expanded="false" data-copy="enterArea">Enter area</button></div>
+     <div id="svc-manual-fields" class="svc-manual-fields" hidden><label class="svc-field"><span class="svc-field-label" data-copy="where">City or area</span><input id="svc-area" name="area" type="text" required minlength="2" maxlength="120" dir="auto" autocomplete="address-level2" enterkeyhint="search" data-placeholder="areaExample" placeholder="e.g. Salmiya"></label><label class="svc-field svc-country-label"><span class="svc-field-label" data-copy="country">Country</span><select id="svc-country" aria-label="Country"></select></label></div>
+     <p class="svc-location-status" id="svc-location-status" role="status" aria-live="polite" hidden></p>
+    </div>
+    <button type="submit" class="svc-primary" id="svc-submit"><span data-copy="search">Find someone nearby</span><span data-icon="arrow"></span></button>
    </div>
    <div class="svc-form-meta"><p id="svc-cost" data-copy="costPending">Uses your Findzia credits.</p><button type="button" id="svc-cancel-edit" data-copy="cancel" hidden>Cancel</button></div>
   </form>
   <div class="svc-message" id="svc-message" role="status" aria-live="polite" hidden></div>
-  <section class="svc-suggestions" id="svc-suggestions" aria-label="Popular services"><div class="svc-categories" id="svc-categories"></div></section>
   <section id="svc-results" class="svc-results" hidden aria-labelledby="svc-results-title">
    <div class="svc-results-head"><h2 id="svc-results-title" tabindex="-1" dir="auto"></h2><button id="svc-edit" type="button" aria-controls="svc-form" aria-expanded="false" data-copy="edit">Change</button></div>
    <div class="svc-result-meta"><p id="svc-results-location"></p><label class="svc-sort"><span class="svc-sr-only" data-copy="sort">Sort by</span><select id="svc-sort"><option value="relevance" data-copy="relevance">Best match</option><option value="rating" data-copy="rating">Highest rated</option></select></label></div>
@@ -23,3 +32,5 @@
 </div>
 <dialog id="svc-market" class="svc-market" data-no-i18n aria-labelledby="svc-market-title"><div class="svc-dialog-head"><h2 id="svc-market-title" data-copy="preferences">Your preferences</h2><button type="button" id="svc-market-close" aria-label="Close">×</button></div><label><span data-copy="country">Country</span><select data-profile-market-select aria-label="Country"></select></label><label><span data-copy="language">Language</span><select data-profile-language-select aria-label="Language"><option value="en">English</option><option value="ar">العربية</option></select></label><label><span data-copy="appearance">Appearance</span><select data-solar-mode aria-label="Appearance"><option value="auto" data-copy="auto">Automatic</option><option value="light" data-copy="light">Light</option><option value="dark" data-copy="dark">Dark</option></select></label></dialog>
 <noscript><p>Please enable JavaScript to search for services.</p></noscript>
+
+<dialog id="svc-directory" class="svc-market svc-directory" data-no-i18n aria-labelledby="svc-directory-title"><div class="svc-dialog-head"><div><h2 id="svc-directory-title" data-copy="allServices">All services</h2><p data-copy="directoryIntro">Everyday help, and everything else.</p></div><button type="button" id="svc-directory-close" data-copy-aria="close" aria-label="Close">×</button></div><label class="svc-directory-search"><span data-icon="search"></span><input id="svc-directory-query" type="search" data-placeholder="directorySearch" placeholder="Search all services" autocomplete="off" aria-label="Search all services"></label><div id="svc-directory-groups"></div><button type="button" class="svc-directory-custom" id="svc-directory-custom" hidden></button></dialog>

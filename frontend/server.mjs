@@ -20,7 +20,7 @@ const common = {
   'Permissions-Policy': 'payment=*, camera=(self), microphone=(self)',
   'Content-Security-Policy': csp,
 };
-const types = {html:'text/html; charset=utf-8', js:'text/javascript; charset=utf-8', css:'text/css; charset=utf-8', json:'application/json; charset=utf-8', txt:'text/plain; charset=utf-8', xml:'application/xml; charset=utf-8', svg:'image/svg+xml'};
+const types = {webp:'image/webp',html:'text/html; charset=utf-8', js:'text/javascript; charset=utf-8', css:'text/css; charset=utf-8', json:'application/json; charset=utf-8', txt:'text/plain; charset=utf-8', xml:'application/xml; charset=utf-8', svg:'image/svg+xml'};
 for (const [url, entry] of Object.entries(manifest.routes)) {
   // Load only build-manifest entries, never a path supplied by an HTTP client.
   const path = resolve(base, entry.file);
@@ -100,6 +100,7 @@ export function createServer(env=process.env) {
     const headers = {...common, 'Content-Type':entry.type, 'Content-Length':body.length,
       'Cache-Control': (path === association || path === '/analytics-config.json') ? 'no-store' : entry.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag:'"'+entry.hash+(encoding?'.'+encoding:'')+'"', 'X-Findzia-Build':manifest.version};
+    if(path==='/trial/services'||path==='/trial/services/'){headers['Content-Security-Policy']=csp.replace("connect-src 'self'","connect-src 'self' https://api.bigdatacloud.net");headers['Permissions-Policy']+=', geolocation=(self)';}
     if(entry.preview){headers['X-Robots-Tag']='noindex, nofollow, noarchive';headers['Cache-Control']='no-store';headers['Referrer-Policy']='no-referrer';}
     if(entry.encoded)headers.Vary='Accept-Encoding';
     if(encoding)headers['Content-Encoding']=encoding;
