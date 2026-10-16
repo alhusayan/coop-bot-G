@@ -1,6 +1,7 @@
 // Dedicated static storefront. Never install this server in the existing API service.
 import http from 'node:http';
 import https from 'node:https';
+import {isSpacePath,proxySpace} from './spaces-proxy.mjs';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,7 @@ const base = resolve(dirname(fileURLToPath(import.meta.url)), 'public');
 const manifest = JSON.parse(readFileSync(resolve(base, 'release.json'), 'utf8'));
 const association = '/.well-known/apple-developer-merchantid-domain-association';
 const routes = new Map();
-const csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.myfatoorah.com https://cdn.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://www.google.com https://googleads.g.doubleclick.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://*.google-analytics.com https://analytics.google.com https://api.findzia.com https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://googleads.g.doubleclick.net https://pagead2.googlesyndication.com https://www.google.com https://www.google.com.kw https://www.google.com.sa https://ad.doubleclick.net; img-src 'self' https: data: blob:; frame-src https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://*.myfatoorah.com https://*.paddle.com";
+const csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.myfatoorah.com https://cdn.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://www.google.com https://googleads.g.doubleclick.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://*.google-analytics.com https://analytics.google.com https://api.findzia.com https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://googleads.g.doubleclick.net https://pagead2.googlesyndication.com https://www.google.com https://www.google.com.kw https://www.google.com.sa https://ad.doubleclick.net; img-src 'self' https: data: blob:; frame-src 'self' https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://*.myfatoorah.com https://*.paddle.com";
 const common = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -70,8 +71,9 @@ export function createServer(env=process.env) {
     spaces_public:spaces,original_url:'/trial/original',payment_provider:provider,apple_pay_file_sha256:selectedFile.hash,apple_pay_switch:'railway-variable-v1'}));
   const healthEntry = {body:health,hash:createHash('sha256').update(health).digest('hex'),type:types.json,immutable:false};
   console.log(`FINDZIA_APPLE_PAY_FILE provider=${provider} sha256=${selectedFile.hash}`);
-  return http.createServer({maxHeaderSize: 16384, requestTimeout: 15000, headersTimeout: 10000}, (req, res) => {
+  return http.createServer({maxHeaderSize: 16384, requestTimeout: 30000, headersTimeout: 10000}, (req, res) => {
     const requestPath=(req.url||'/').split('?')[0];
+    if(!routes.has(requestPath)&&isSpacePath(requestPath)){proxySpace(req,res,manifest.hubBridge);return;}
     if(spaces&&(requestPath==='/'||requestPath==='/account'||(!routes.has(requestPath)&&requestPath!=='/trial/original'&&requestPath!=='/trial/original/'&&requestPath!=='/analytics-config.json'))){
       // Fixed owned upstream. Preserve streaming uploads, cookies and origin;
       // never accept a client supplied proxy destination or forwarding identity.
@@ -104,6 +106,7 @@ export function createServer(env=process.env) {
       'Cache-Control': (path === association || path === '/analytics-config.json') ? 'no-store' : entry.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag:'"'+entry.hash+(encoding?'.'+encoding:'')+'"', 'X-Findzia-Build':manifest.version};
     if(path==='/trial/services'||path==='/trial/services/'){headers['Content-Security-Policy']=csp.replace("connect-src 'self'","connect-src 'self' https://api.bigdatacloud.net");headers['Permissions-Policy']+=', geolocation=(self)';}
+    if(entry.type===types.html&&['/search','/search/','/trial/original','/trial/original/','/pages/findzia','/jp','/jp/','/trial/one-55321448a0352f1ff18b','/trial/one-55321448a0352f1ff18b/','/trial/services','/trial/services/'].includes(path)){headers['X-Frame-Options']='SAMEORIGIN';headers['Content-Security-Policy']=headers['Content-Security-Policy'].replace("frame-ancestors 'none'","frame-ancestors 'self'");}
     if(entry.preview){headers['X-Robots-Tag']='noindex, nofollow, noarchive';headers['Cache-Control']='no-store';headers['Referrer-Policy']='no-referrer';}
     if(entry.encoded)headers.Vary='Accept-Encoding';
     if(encoding)headers['Content-Encoding']=encoding;

@@ -1,0 +1,6 @@
+/* The surrounding portal owns the top-level close control and safe area. */
+html[data-findzia-embedded] {scroll-padding-top:8px}
+html[data-hub-account-only] .fz-home>:not(.fz-account){visibility:hidden!important}
+html[data-hub-account-only] .fz-account{visibility:visible!important}
+html[data-hub-account-only] .fz-account::backdrop{background:transparent}
+@media(max-width:600px){html[data-findzia-embedded] .fz-account{max-height:100%;max-height:100dvh}}

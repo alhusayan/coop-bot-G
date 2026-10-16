@@ -11,7 +11,7 @@ FROM public.ecr.aws/docker/library/node:22-alpine
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY --from=build --chown=node:node /app/public ./public
-COPY --chown=node:node package.json server.mjs ./
+COPY --chown=node:node package.json server.mjs spaces-proxy.mjs ./
 USER node
 EXPOSE 8080
 CMD ["node", "server.mjs"]
