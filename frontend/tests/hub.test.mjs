@@ -71,7 +71,7 @@ test('Space allowlist covers app assets, uploads, selections, catalog and media,
  for(const path of ['/space','/space/','/app.js','/findzia/account.js','/markets.js','/api/config','/api/jobs',`/api/jobs/${id}`,`/api/jobs/${id}/select/0`,`/api/jobs/${id}/catalog/2/12`,`/api/jobs/${id}/product-details/${'a'.repeat(64)}`,`/media/${id}/original.jpg`])assert.equal(isSpacePath(path),true,path);
  for(const path of ['https://evil.example/','//evil.example/','/api/admin','/../../secret','/media/../secret','/app.js/evil','/%2f%2fevil.example'])assert.equal(isSpacePath(path),false,path);
  const market="export function marketLanguage(market,read=()=>null){return read('spaces-language-choice-'+market+'-v1')||'en';}";const transformed=transformSpace('/markets.js',market,{});assert.equal(vm.runInNewContext(transformed.replace('export ','')+';marketLanguage("JP", key=>key==="findzia-lang"?"ar":null)'),'ar');
- const html=transformSpace('/space','<html><head><script src="/app.js?v=existing"></script></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);assert.match(html,/app.js\?v=existing&hubHeader=20261016.7/);
+ const html=transformSpace('/space','<html><head><script src="/app.js?v=existing"></script></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);assert.match(html,/app.js\?v=existing&hubHeader=20261016.8/);
 });
 test('Space proxy preserves same-origin session cookies, streams POST bodies and rewrites framing',async()=>{
  async function run(path,method,body,replyBody,replyHeaders){let options,uploaded='';const req=new PassThrough();req.url=path;req.method=method;req.headers={cookie:'fz_spaces=existing',authorization:'Bearer test',origin:'https://findzia.com','content-type':'application/json','sec-fetch-site':'same-origin',host:'untrusted.example'};
@@ -150,8 +150,11 @@ test('product mode preserves typed intent without auto-searching, and is absent 
 test('design-to-service handoff carries the requested work for review without submitting a search',()=>{
  const f=projectFixture('space');f.connect({state:()=>({ready:true,busy:false}),serviceQuery:()=> 'Wood wall panel installation'});
  assert.equal(f.action('services'),true);assert.equal(f.posts.at(-1).project,'services');assert.equal(f.posts.at(-1).q,'Wood wall panel installation');assert.ok(!f.records.some(x=>x.startsWith('submit:')));
+ assert.equal(f.action('services',{query:'  Carpenter for custom oak door  ',country:'KW'}),true);assert.equal(f.posts.at(-1).q,'Carpenter for custom oak door');assert.equal(f.posts.at(-1).country,'KW');assert.equal(f.action('services',{query:' '}),false);
+ assert.equal(f.action('services',{query:'x'.repeat(250)}),true);assert.equal(f.posts.at(-1).q.length,180);assert.ok(!f.records.some(x=>x.startsWith('submit:')));
+ f.connect({state:()=>({busy:true})});assert.equal(f.action('services',{query:'Woodwork'}),false);
  let adapter;const context={window:{FindziaHubBridge:{connectSpace:x=>adapter=x}},state:{auth:true,image:'photo',itemId:0},pointFocus:{id:0},submitting:false,view(){},selected:()=>({items:[{id:0,name_en:'wood wall',name_ar:'جدار خشبي'}]}),translate:(en)=>en};
- vm.runInNewContext(transformSpace('/app.js','',{}),context);assert.equal(adapter.serviceQuery(),'Installation: wood wall');
+ vm.runInNewContext(transformSpace('/app.js','',{}),context);assert.equal(adapter.serviceQuery(),'Make and install: wood wall');
 });
 test('all home entrance and instruction labels are pretranslated, with no forbidden wording',()=>{
  const context={window:{}};vm.runInNewContext(read('../source/findzia-home-copy.js'),context);const copy=context.window.FindziaHomeCopy;

@@ -7,16 +7,8 @@
   if(!root||!['shop','one','space'].includes(project))return;
   const copy=key=>window.FindziaHomeCopy?.get(root.dataset.lang||document.documentElement.lang,key)||'';
   function text(node,value){if(node&&node.textContent!==value)node.textContent=value;}
-  if(project==='space'){
-   function serviceEntry(){
-    const target=root.querySelector('.piece-selection-content')||root.querySelector('.stage-hint');
-    if(!target)return;
-    let button=target.querySelector('[data-home-service]');
-    if(!button){button=document.createElement('button');button.type='button';button.className='home-service-link';button.dataset.homeService='';button.setAttribute('data-no-i18n','');button.onclick=()=>window.FindziaHubBridge?.action('services');target.append(button);}
-    text(button,copy('serviceAction'));
-   }
-   new MutationObserver(serviceEntry).observe(root,{childList:true,subtree:true,attributes:true,attributeFilter:['data-lang']});serviceEntry();return;
-  }
+  // Space owns per-element actions; never inject a second generic service button.
+  if(project==='space')return;
   const home=root.querySelector('[data-dark-home]'),main=home?.querySelector('.fz-dark-main');if(!main)return;
   root.dataset.homeFocus='true';
   let title=main.querySelector('.fz-dark-title'),description=main.querySelector('.fz-dark-description');

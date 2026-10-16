@@ -41,6 +41,6 @@ if(/__ASSET_|__ANALYTICS__/.test(html))throw Error('Unresolved hub asset');
 emit('/','index.html',html,'html');manifest.routes['/index.html']=manifest.routes['/'];manifest.routes['/home']=manifest.routes['/'];manifest.routes['/home/']=manifest.routes['/'];
 const sitemapEntry=manifest.routes['/sitemap.xml'];
 const sitemap=readFileSync(resolve(out,sitemapEntry.file),'utf8').replace('</urlset>','<url><loc>https://findzia.com/search</loc></url></urlset>');writeFileSync(resolve(out,sitemapEntry.file),sitemap);sitemapEntry.sha256=hash(sitemap);
-const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261016.7';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
-manifest.hub='20261016.7';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
+const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261016.8';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
+manifest.hub='20261016.8';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
 console.log('Findzia Home: Design, Products and Services; One inside Products.');

@@ -39,7 +39,7 @@ function action(name,data={}){
  if(name==='state')return state();
  if(name==='country'){applyCountry(data.country);return true}
  if(name==='query'){const changed=setQuery(data.query);publishState();return changed;}
- if(name==='services'&&project==='space'){if(space?.state().busy)return false;post({type:'navigate',project:'services',q:space?.serviceQuery?.()||'',country:read('findzia-market-country-v1')||''});return true;}
+ if(name==='services'&&project==='space'){if(space?.state().busy)return false;const q=String(typeof data.query==='string'?data.query:space?.serviceQuery?.()||'').trim().slice(0,180);if(q.length<2)return false;post({type:'navigate',project:'services',q,country:/^[A-Z]{2}$/.test(data.country||'')?data.country:read('findzia-market-country-v1')||''});return true;}
  if(name==='menu')return click('[data-dark-menu-open]');
  if(name==='market')return click('[data-dark-market-open]');
  if(name==='account'){pendingAccount=true;openAccount();return true}
