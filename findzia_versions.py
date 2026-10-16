@@ -19,10 +19,14 @@ for _name in ('FINDZIA_ACCOUNT_ORIGINS', 'WEB_ALLOWED_ORIGINS'):
 
 import main as original
 from findzia_services import install_services
+from findzia_service_photo import identify_service
 from findzia_spaces_gateway import SpacesImageGateway, PATHS as SPACES_PATHS
 
 install_services(original.app, original._serper_json, original.COUNTRY_NAMES,
-                 lambda: bool(original.SERPER_API_KEY))
+                 lambda: bool(original.SERPER_API_KEY),
+                 vision=lambda image: identify_service(image, key=original.GEMINI_API_KEY,
+                                                       model=original.PHOTO_IDENTITY_MODEL),
+                 safe_get=original._web_safe_get)
 
 original.CACHE_DB_PATH += '.original-a332321'
 # main initializes these at import time, before the version-specific path above.

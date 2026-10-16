@@ -13,7 +13,7 @@
 .svc-page [hidden],.svc-market [hidden]{display:none!important}
 .svc-page :is(button,input,select),.svc-market :is(button,input,select){font:inherit}
 .svc-page :is(button,a),.svc-market :is(button,summary){touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-.svc-page :is(button,a,input,select):focus-visible,.svc-market :is(button,summary,input,select):focus-visible{outline:3px solid #b27b48;outline-offset:3px}
+.svc-page :is(button,a,input,select):focus-visible,.svc-market :is(button,summary,input,select):focus-visible{outline:2px solid var(--svc-green);outline-offset:3px}
 .svc-page svg,.svc-market svg{width:20px;height:20px;flex:none}
 .svc-page [data-icon],.svc-market [data-icon]{display:inline-flex;align-items:center;justify-content:center;flex:none}
 .svc-main{padding-top:10px}
@@ -87,7 +87,6 @@
 .svc-card-detail{border-top:1px solid var(--svc-line);margin-top:10px;padding-top:8px;color:var(--svc-muted);font-size:14px;overflow-wrap:anywhere}.svc-card-detail p{margin:3px 0;line-height:1.6}
 .svc-phone{display:inline-flex;align-items:center;min-height:44px;color:var(--svc-ink);text-decoration:none}
 .svc-extra-links{display:flex;gap:16px}.svc-extra-links a{display:flex;gap:5px;align-items:center;min-height:44px;text-underline-offset:4px}
-.svc-pagination{display:flex;align-items:center;justify-content:center;gap:18px;margin-top:12px}.svc-pagination button{min-height:44px;min-width:80px;padding:8px 12px;border:1px solid var(--svc-line);border-radius:11px;background:var(--svc-surface);color:var(--svc-ink);font-size:14px}.svc-pagination button:disabled{opacity:.4}.svc-pagination span{font-size:13px;font-variant-numeric:tabular-nums}
 .svc-results-note{font-size:12px;color:var(--svc-muted);line-height:1.6;text-align:center;margin:12px 0 0}
 .svc-message{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:14px;border:1px solid var(--svc-line);border-radius:14px;margin:12px 0;background:var(--svc-soft)}.svc-message p{margin:0;flex:1;min-width:180px;font-size:14px}.svc-message button{border:0;background:var(--svc-green);color:white;border-radius:10px;padding:10px 14px;min-height:44px;font-size:14px}
 .svc-loading{width:6px;height:6px;background:var(--svc-ink);border-radius:50%;box-shadow:9px 0 0 var(--svc-muted),18px 0 0 var(--svc-line);margin-inline:0 20px;animation:svc-breathe 1s ease-in-out infinite;flex:none}
@@ -116,3 +115,26 @@
 }
 @media(max-width:360px){.svc-page{padding-inline:12px}.svc-category-visual{height:75px}.svc-category-label{font-size:12px}.svc-intro h1{font-size:27px}.svc-directory-list{grid-template-columns:1fr}.svc-lead{font-size:13px}}
 @media(prefers-reduced-motion:reduce){.svc-page *,.svc-market *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Quiet input focus, with a visible green keyboard cue instead of a boxed field. */
+[data-services] .svc-page input:focus,[data-services] .svc-page input:focus-visible,[data-services] .svc-market input:focus,[data-services] .svc-market input:focus-visible{outline:none!important;box-shadow:none!important}
+.svc-query-field:focus-within{border-color:var(--svc-green);box-shadow:0 1px 0 var(--svc-green)}
+.svc-manual-fields input:focus{border-bottom:2px solid var(--svc-green)}
+.svc-directory-search:focus-within{border-color:var(--svc-green)!important}
+.svc-photo-entry{display:flex;gap:8px;margin:0 0 4px}
+.svc-camera{display:flex;align-items:center;gap:12px;flex:1;min-width:0;min-height:68px;padding:12px 14px;border:1px solid var(--svc-line);border-radius:16px;background:var(--svc-soft);color:var(--svc-ink);text-align:start}
+.svc-camera>span:nth-child(2){flex:1}.svc-camera strong{display:block;font-size:15px;font-weight:600}.svc-camera small{display:block;font-size:12px;font-weight:400;color:var(--svc-muted);margin-top:3px;line-height:1.5}.svc-camera>[data-icon=camera] svg{width:25px;height:25px}
+.svc-gallery{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:65px;min-height:68px;padding:8px;border:1px solid var(--svc-line);border-radius:16px;background:var(--svc-surface);color:var(--svc-muted);font-size:12px!important}
+.svc-photo-privacy{font-size:11px;line-height:1.5;color:var(--svc-muted);margin:6px 3px 14px}
+.svc-photo-panel{padding:12px;margin:12px 0;border:1px solid var(--svc-line);border-radius:16px;background:var(--svc-surface)}
+.svc-photo-heading{display:flex;align-items:center;gap:12px}.svc-photo-heading>div{flex:1}.svc-photo-heading img{width:64px;height:64px;object-fit:cover;border-radius:10px}.svc-photo-heading h2{font-size:16px;line-height:1.6;margin:0}.svc-photo-heading p{font-size:13px;color:var(--svc-muted);margin:4px 0 0}.svc-photo-heading button{border:0;background:transparent;color:var(--svc-muted);font-size:24px!important;min-width:44px;min-height:44px;align-self:start}
+.svc-photo-options{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.svc-photo-options:empty{display:none}.svc-photo-options button{flex:1;min-height:46px;border:1px solid var(--svc-line);border-radius:10px;padding:8px 12px;background:var(--svc-soft);color:var(--svc-ink);font-size:14px!important}
+/* One continuous list. Four compact cards fit a typical phone results viewport. */
+.svc-cards{grid-template-columns:1fr;gap:7px}
+.svc-card{padding:8px 11px;border-radius:13px;animation:none}
+.svc-card-heading{min-height:36px;gap:8px}.svc-card-heading>[data-icon]{width:27px;height:27px;border-radius:8px}.svc-card-heading>[data-icon] svg{width:18px;height:18px}
+.svc-card h3{flex:1;min-width:0;font-size:14px;line-height:18px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+.svc-card-heading .svc-rating{flex:none;align-self:center;font-size:12px;margin:0;gap:3px;white-space:nowrap}
+.svc-card-actions{margin-top:5px;gap:7px}.svc-card-actions :is(a,button){min-height:44px;padding:6px;font-size:13px}.svc-card-actions .svc-detail-toggle{min-width:60px}
+.svc-full-title{font-weight:600;color:var(--svc-ink)}
+@media(max-width:600px){.svc-results-head{gap:8px}.svc-results h2{font-size:19px}.svc-result-meta{margin:0 0 6px;gap:8px}.svc-result-meta p{font-size:12px}.svc-sort select{font-size:12px;min-height:36px}.svc-results-head button{font-size:12px;padding:6px 10px}.svc-photo-entry{margin-top:2px}.svc-card h3{font-size:14px}.svc-card{padding:8px 10px}.svc-cards{gap:7px}}

@@ -24,18 +24,16 @@ export function serviceSearchCredits(status){
   :status.remaining;
 }
 
-export function serviceResultsPage(items,sort='relevance',requestedPage=0){
+export function serviceResults(items,sort='relevance'){
  const ordered=[...items];
  if(sort==='rating')ordered.sort((a,b)=>(b.rating||0)-(a.rating||0)||(b.reviews||0)-(a.reviews||0));
- const pages=Math.max(1,Math.ceil(ordered.length/4));
- const page=Math.min(pages-1,Math.max(0,Math.trunc(Number(requestedPage)||0)));
- return {items:ordered.slice(page*4,page*4+4),page,pages,total:ordered.length};
+ return {items:ordered,total:ordered.length};
 }
 
-// Click-to-chat is offered for published international numbers; registration is not asserted.
-export function serviceWhatsApp(tel){
- const number=String(tel||'').replace(/^tel:/,'');
- return /^\+[1-9]\d{6,14}$/.test(number)?'https://wa.me/'+number.slice(1):'';
+// The server supplies an explicit link found on the business's published website.
+export function serviceWhatsApp(row){
+ if(!row?.whatsapp_source||row.whatsapp_source!==row.website||!/^https?:\/\//.test(row.whatsapp_source))return '';
+ return /^https:\/\/wa\.me\/[1-9]\d{6,14}$/.test(row.whatsapp||'')?row.whatsapp:'';
 }
 export function serviceLocation(data){
  const country=String(data?.countryCode||'').toUpperCase();

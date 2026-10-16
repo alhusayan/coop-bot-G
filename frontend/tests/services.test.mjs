@@ -18,7 +18,7 @@ test('services trial is separate, unindexed, and connects the original account a
  }finally{await new Promise(r=>server.close(r));}
 });
 
-import {initialServiceCountry,serviceSearchCredits,serviceResultsPage} from '../source/findzia-services-state.js';
+import {initialServiceCountry,serviceSearchCredits,serviceResults} from '../source/findzia-services-state.js';
 test('service market uses Findzia preferences and supported browser regions',()=>{
  const read=values=>key=>values[key]||'';
  assert.equal(initialServiceCountry(read({'findzia-market-country-v1':'gb'}),{zone:'Asia/Kuwait'}),'GB');
@@ -37,25 +37,23 @@ test('service searches distinguish design-only trial credits from usable credit'
  assert.equal(serviceSearchCredits(null),null);
 });
 
-test('four-card pages retain every result and sort the complete result set',()=>{
- const rows=Array.from({length:9},(_,i)=>({title:String(i+1),rating:i+1}));
- const pages=[0,1,2].map(page=>serviceResultsPage(rows,'relevance',page));
- assert.deepEqual(pages.map(p=>p.items.length),[4,4,1]);
- assert.deepEqual(pages.flatMap(p=>p.items.map(r=>r.title)),rows.map(r=>r.title));
- assert.deepEqual(serviceResultsPage(rows,'rating',0).items.map(r=>r.title),['9','8','7','6']);
- assert.equal(serviceResultsPage(rows,'relevance',99).page,2);
- assert.equal(serviceResultsPage(rows,'relevance',-1).page,0);
- assert.equal(serviceResultsPage([]).items.length,0);
- assert.equal(serviceResultsPage(rows.slice(0,4)).pages,1);
+test('continuous results retain every row and sort the complete set',()=>{
+ const rows=Array.from({length:12},(_,i)=>({title:String(i+1),rating:i+1}));
+ assert.deepEqual(serviceResults(rows).items,rows);
+ assert.deepEqual(serviceResults(rows,'rating').items.map(r=>r.title),[...rows].reverse().map(r=>r.title));
+ assert.equal(serviceResults([]).items.length,0);
  assert.equal(rows[0].title,'1');
 });
 
 import {serviceWhatsApp,serviceLocation} from '../source/findzia-services-state.js';
 import {serviceDirectory,serviceCount} from '../source/findzia-services-catalog.js';
-test('WhatsApp links use complete published international numbers only',()=>{
- assert.equal(serviceWhatsApp('tel:+96555551234'),'https://wa.me/96555551234');
- assert.equal(serviceWhatsApp('tel:+442071234567'),'https://wa.me/442071234567');
- for(const tel of ['tel:55551234','tel:+012345678','tel:+96555','javascript:alert(1)',null])assert.equal(serviceWhatsApp(tel),'');
+test('WhatsApp requires an explicit safe link and its published business source',()=>{
+ const row={tel:'tel:+96555551234',website:'https://example.com',whatsapp_source:'https://example.com',whatsapp:'https://wa.me/96555551234'};
+ assert.equal(serviceWhatsApp(row),'https://wa.me/96555551234');
+ assert.equal(serviceWhatsApp({tel:row.tel}),'');
+ assert.equal(serviceWhatsApp({...row,whatsapp_source:''}),'');
+ assert.equal(serviceWhatsApp({...row,whatsapp_source:'https://unrelated.example'}),'');
+ for(const whatsapp of ['https://wa.me.evil.com/96555551234','https://wa.me/abc','javascript:alert(1)','https://wa.me/96555551234?text=hello',null])assert.equal(serviceWhatsApp({...row,whatsapp}),'');
 });
 test('location resolves an area and supported country without inventing either',()=>{
  assert.deepEqual(serviceLocation({countryCode:'KW',locality:'Salmiya',city:'Salmiya'}),{country:'KW',area:'Salmiya'});
