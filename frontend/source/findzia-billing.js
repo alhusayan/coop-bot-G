@@ -4,7 +4,7 @@
 /* Final-credit completion; existing wallet warmup and payment recovery. */
 (() => {
   'use strict';
-  const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
+  const searches = new Set(['/api/services/search','/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
     '/api/search/more','/api/search/more/stream','/api/search/markets/stream','/api/refine/search/stream']);
   const uid = () => crypto.randomUUID().replace(/-/g,'');
   function abortable(work, signal) {
