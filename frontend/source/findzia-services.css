@@ -20,3 +20,6 @@
 .svc-result-tools{display:flex;align-items:center;flex-wrap:wrap;gap:12px}.svc-result-tools button{min-height:44px;padding:8px 15px;background:var(--svc-surface);border:1px solid var(--svc-line);border-radius:12px;color:var(--svc-ink);font-size:14px}
 .svc-card-actions a{min-height:50px;font-size:14px;white-space:normal;overflow-wrap:anywhere;text-align:center}.svc-card-actions a.svc-call{min-height:54px;font-size:16px;flex-wrap:wrap}.svc-card small,.svc-address{font-size:14px}.svc-card-top>div:last-child{min-width:0}.svc-card-actions bdi{white-space:nowrap}.svc-rating{flex-wrap:wrap}
 @media(max-width:520px){.svc-result-tools{width:100%;justify-content:space-between}.svc-result-tools .svc-sort{width:auto;flex:1;justify-content:flex-end}.svc-result-tools .svc-sort>span{display:none}.svc-card{border-radius:18px}.svc-result-tools select{max-width:165px}.svc-page[data-has-results=true] .svc-results{padding-top:24px}}
+
+/* Services explains search-only balances beside its own form. */
+[data-services] .fzb-search-notice.fzb-credit-card{display:none}
