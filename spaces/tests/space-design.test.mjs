@@ -36,7 +36,7 @@ test('decor scope continues to preserve built features and invalid subjects rema
  await assert.rejects(detectRoom({}, {judge:async()=>({is_space:false,is_room:true,type:'other'})}),/NOT_A_ROOM/);
 });
 
-test('bare-land request completes all designs, and reopening a retail-free concept does not restart inventory',async t=>{
+test('bare-land request completes all designs, and reopening an explicitly empty concept does not restart inventory',async t=>{
  const directory=mkdtempSync(join(tmpdir(),'spaces-site-test-'));
  process.env.NODE_ENV='production';process.env.SPACES_TRIAL_TOKEN='site-test';process.env.SPACES_DATA_DIR=directory;
  process.env.GEMINI_API_KEY='local-test-only';process.env.SERPER_API_KEY='local-test-only';
@@ -51,7 +51,7 @@ test('bare-land request completes all designs, and reopening a retail-free conce
    let result;
    if(prompt.startsWith('Identify the photographed SPACE'))result={is_space:true,is_room:false,type:'empty_land',setting:'land',is_empty:true,room_en:'Empty plot',target:{label:'Villa',brief:'فيلا على أرض فاضية',required_functions:['Villa','Outdoor access']}};
    else if(prompt.startsWith('Compare the original space/site'))result={meets_brief:true,site_preserved:true};
-   else if(prompt.startsWith('Identify ALL distinct'))result={items:[],no_retail_items:true};
+   else if(prompt.startsWith('Identify ALL distinct'))result={items:[],no_actionable_items:true};
    else throw Error('Unexpected model request');
    parts=[{text:JSON.stringify(result)}];
   }

@@ -263,3 +263,9 @@ html[data-findzia-theme=dark] .piece-selection-media .piece-clear{background:#19
 #design-form .segments{flex-wrap:wrap}
 #design-form .segments label{flex:1 1 110px;min-width:0}
 #design-request{line-height:1.6}
+
+/* One clear primary route for fitted work; retail remains available where relevant. */
+.piece-selection-content .piece-search-button.is-secondary{background:transparent;color:var(--ink);border:1px solid var(--line);box-shadow:none}
+#other-work-form{display:grid;gap:16px;margin-top:20px}
+#other-work-form label{font-size:14px;color:var(--muted)}
+#other-work-query{width:100%;min-width:0;box-sizing:border-box;font-size:16px}

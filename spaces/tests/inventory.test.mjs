@@ -34,11 +34,11 @@ test('repair is confined to one explicitly selected failed empty design and runs
  failed.inventory_repair_version=1;assert.equal(inventoryRepairTarget(jobs,id,'1'),null);
 });
 
-test('an explicitly retail-free architectural concept finishes immediately, but malformed detections still fail',async()=>{
+test('an explicitly empty scene finishes immediately, but retail-free work and malformed detections do not',async()=>{
  let calls=0;
- assert.deepEqual(await identifyPieces({}, {judge:async()=>{calls++;return {items:[],no_retail_items:true};}}),[]);
+ assert.deepEqual(await identifyPieces({}, {judge:async()=>{calls++;return {items:[],no_actionable_items:true};}}),[]);
  assert.equal(calls,1);
- for(const response of [{no_retail_items:true},{items:[{name_en:'Lamp'}],no_retail_items:true}])await assert.rejects(identifyPieces({}, {judge:async()=>response}),/NO_ITEMS/);
+ for(const response of [{no_actionable_items:true},{items:[{name_en:'Lamp'}],no_actionable_items:true}])await assert.rejects(identifyPieces({}, {judge:async()=>response}),/NO_ITEMS/);
 });
 
 test('visible patches are validated and clipped to the named product instead of using an adjacent object',()=>{
@@ -64,4 +64,21 @@ test('refresh keeps valid paid results and identifiers but cannot reuse a correc
  assert.notEqual(result[0].id,'1');assert.equal(result[0].original_view,undefined);
  assert.equal(result[1].id,'2');assert.deepEqual(result[1].original_view,previous[1].original_view);assert.deepEqual(result[1].design_picks,previous[1].design_picks);
  assert.equal(new Set(result.map(x=>x.id)).size,3);
+});
+
+
+test('custom work is open-ended and its bilingual intent survives inventory corrections',async()=>{
+ const {applyInventoryReview}=await import('../inventory.mjs');
+ const [item]=normalizeInventory({items:[{name_en:'Curved acoustic timber screen',name_ar:'فاصل خشبي منحني',category:'unlisted_trade',mode:'quote',search_kind:'service',service_query_en:'Joinery company for curved acoustic timber screen',service_query_ar:'شركة نجارة لتفصيل فاصل خشبي منحني',surface:'object',box:[100,100,800,400]}]});
+ assert.equal(item.category,'other');assert.equal(item.search_kind,'service');assert.equal(item.name_ar,'فاصل خشبي منحني');
+ const [fixed]=applyInventoryReview([item],{corrections:[{id:item.id,box:[110,110,790,390]}]});
+ assert.equal(fixed.service_query_ar,item.service_query_ar);assert.equal(fixed.search_kind,'service');assert.equal(fixed.name_ar,item.name_ar);
+ const [door]=normalizeInventory({items:[{name_en:'Oak door',category:'door',search_kind:'both',mode:'ready',surface:'object',box:[0,0,800,300]}]});
+ assert.equal(door.search_kind,'both');assert.equal(door.status,'idle');
+});
+
+test('no retail products does not suppress a room that still has work features',async()=>{
+ let calls=0;
+ const items=await identifyPieces({}, {judge:async()=>++calls===1?{items:[],no_retail_items:true}:{items:[{name_en:'Plaster ceiling',search_kind:'service',surface:'ceiling',mode:'quote',box:[0,0,300,1000]}]}});
+ assert.equal(calls,2);assert.equal(items[0].search_kind,'service');assert.equal(items[0].surface,'ceiling');
 });

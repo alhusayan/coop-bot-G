@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {INVENTORY_VERSION} from '../inventory.mjs';
 import assert from 'node:assert/strict';
 import {createHmac} from 'node:crypto';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync} from 'node:fs';
@@ -11,8 +12,9 @@ const cookie='spaces_session='+owner+'.'+stamp+'.'+createHmac('sha256','test-inv
 const authorization='Bearer test-customer-token-no-real-credit';
 const row={url:'https://store.example/products/chair',image:'https://images.example/chair.jpg',title:'Green chair',store:'Local store',price:'134 USD',price_amount:134,currency:'USD',price_contract:'findzia-money-v1',price_display_ready:true,price_display_currency:'USD',market_scope:'local',match_type:'similar',classification_final:true,identity_review_status:'completed',visual_axes:{category:'same',subtype:'same',color:'same'},audited_media_path:'/api/media/verified/test-chair'};
 const pieces=['1','2'].map(id=>({id,name_en:'Chair '+id,mode:'ready',box:[100,100,700,700],crop:'crop-0-'+id+'.jpg',status:'idle',phase:'queued',offers:[],alternatives:[]}));
+pieces.push({id:'3',name_en:'Fitted wall finish',mode:'quote',search_kind:'service',box:[0,0,1000,1000],crop:'crop-0-3.jpg',status:'idle',offers:[],alternatives:[]});
 mkdirSync(join(root,id));for(const item of pieces)writeFileSync(join(root,id,item.crop),'test pixels '+item.id);
-writeFileSync(join(root,'state.json'),JSON.stringify({quota:{},jobs:{[id]:{id,owner,created:Date.now(),room:'Living room',options:{market:'US',language:'en'},designs:[{image:'design-0.jpg',status:'ready',items:pieces,matching_version:3,search_revision:13,grouping_version:1,shop_requested:true}]}}}));
+writeFileSync(join(root,'state.json'),JSON.stringify({quota:{},jobs:{[id]:{id,owner,created:Date.now(),room:'Living room',options:{market:'US',language:'en'},designs:[{image:'design-0.jpg',status:'ready',items:pieces,matching_version:3,inventory_version:INVENTORY_VERSION,search_revision:13,grouping_version:1,shop_requested:true}]}}}));
 const {createServer}=await import('../server.mjs');
 
 test('room navigation is free; a point starts only its original search and replay cannot charge twice',async()=>{
@@ -35,6 +37,7 @@ test('room navigation is free; a point starts only its original search and repla
   assert.equal((await post('/focus/1',{request_id:'1'.repeat(32)},{Origin:'http://localhost',Authorization:authorization})).status,403);
   assert.equal(calls.length,0);
   const searchHeaders={Authorization:authorization,Origin:base};
+  const serviceOnly=await post('/focus/3',{request_id:'a'.repeat(32)},searchHeaders);assert.equal(serviceOnly.status,409);assert.equal((await serviceOnly.json()).error,'SERVICE_REQUIRED');assert.equal(calls.length,0,'service work never authorizes a product search');
   assert.equal((await post('/focus/1',{request_id:'1'.repeat(32),country:'KW',language:'en'},searchHeaders)).status,202);
   await post('/focus/1',{request_id:'2'.repeat(32)},searchHeaders);await post('/search/1',{request_id:'3'.repeat(32)},searchHeaders);
   let job=await read();assert.equal(calls.length,1);assert.equal(job.designs[0].items[1].status,'idle');

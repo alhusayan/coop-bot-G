@@ -4,6 +4,7 @@ import {createOriginalLayer} from './original-results.js?v=20261016-guide1';
 import {bindStoreLinks} from './store-links.js';
 import {mountFindzia} from './findzia-shell.js?v=20261015-ios2';
 import {pieceViews,pickPhotoCandidates} from './hotspots.js';
+import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} from './piece-intent.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
@@ -136,22 +137,23 @@ function searchSeconds(item){const start=pointStarted.get(searchKey(item))||item
 function elapsedLabel(item){return searchSeconds(item)+(shell?.getLanguage()==='ar'?' ث':'s');}
 let photoGuideSeen=false;try{photoGuideSeen=localStorage.getItem('findzia-piece-guide-seen')==='1';}catch{}
 function photoMarkup(items){
- if(!items.length||['analyzing','adapting'].includes(selected().status))return '';
+ if(['analyzing','adapting'].includes(selected().status))return '';
  const item=items.find(x=>pointFocus?.key===keyFor(x)),busy=pieceBusy(item);
  const view=item&&(pieceViews([item]).find(v=>v.marker===pointFocus?.marker)||pieceViews([item])[0]);
  let outline='';
  const candidate=!item&&!photoGuideSeen?pieceViews(items).filter(v=>!v.background).sort((a,b)=>(b.box[2]-b.box[0])*(b.box[3]-b.box[1])-(a.box[2]-a.box[0])*(a.box[3]-a.box[1]))[0]:null;
- const guide=candidate?`<button class="piece-coach" data-ui-key="piece-coach" data-action="select-piece" data-id="${esc(candidate.id)}" data-marker="${esc(candidate.marker)}" style="top:${Math.max(15,Math.min(85,(candidate.box[0]+candidate.box[2])/20))}%;left:${Math.max(24,Math.min(76,(candidate.box[1]+candidate.box[3])/20))}%" aria-label="${esc(translate('Choose a piece in this photo','اختر قطعة من الصورة'))}"><span class="coach-dot" aria-hidden="true">${icon('plus',true)}</span><span>${esc(translate('Tap a piece to find it.','اضغط على قطعة للعثور عليها.'))}</span></button>`:'';
+ const guide=candidate?`<button class="piece-coach" data-ui-key="piece-coach" data-action="select-piece" data-id="${esc(candidate.id)}" data-marker="${esc(candidate.marker)}" style="top:${Math.max(15,Math.min(85,(candidate.box[0]+candidate.box[2])/20))}%;left:${Math.max(24,Math.min(76,(candidate.box[1]+candidate.box[3])/20))}%" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}"><span class="coach-dot" aria-hidden="true">${icon('plus',true)}</span><span>${esc(translate('Tap to shop or find a pro','اضغط للشراء أو طلب مختص'))}</span></button>`:'';
  if(view){const [top,left,bottom,right]=view.box;outline=`<span class="piece-outline${busy?' is-searching':''}" style="top:${top/10}%;left:${left/10}%;width:${(right-left)/10}%;height:${(bottom-top)/10}%" aria-hidden="true"><i></i><i></i><i></i><i></i>${busy?'<span class="piece-scan"></span>':''}</span>`;}
- return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose a piece in this photo','اختر قطعة من الصورة'))}" aria-busy="${busy}"></button>${outline}${guide}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
+ return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}" aria-busy="${busy}"></button>${outline}${guide}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
 }
 function feedbackMarkup(item){
  if(!item)return '';
- const busy=pieceBusy(item),saved=!!resultView(item),checked=item.phase==='complete'||item.status==='error',free=saved||originalLayer.has(searchKey(item));
- const caption=busy?searchCopy(item):item.error?(messages[item.error]||messages.SEARCH_FAILED):saved?translate('Saved options','خيارات محفوظة'):item.status==='kept'?translate('Keep your own piece','الاحتفاظ بقطعتك الحالية'):checked?translate('No close matches yet','لم نعثر على نتائج قريبة من هذه القطعة.'):translate('Ready to find this piece','جاهز للبحث عن هذه القطعة');
+ const shop=canShopPiece(item),service=canServicePiece(item),name=pieceName(item,shell?.getLanguage()),busy=pieceBusy(item),saved=!!resultView(item),checked=item.phase==='complete'||item.status==='error',free=saved||originalLayer.has(searchKey(item));
+ const caption=!shop?translate('Made or fitted by a specialist','يحتاج تنفيذ أو تفصيل من مختص'):service&&!busy&&!saved&&!item.error&&!checked&&item.status!=='kept'?translate('Buy it or find someone to fit it','اشترِ القطعة أو ابحث عن مختص لتركيبها'):busy?searchCopy(item):item.error?(messages[item.error]||messages.SEARCH_FAILED):saved?translate('Saved options','خيارات محفوظة'):item.status==='kept'?translate('Keep your own piece','الاحتفاظ بقطعتك الحالية'):checked?translate('No close matches yet','لم نعثر على نتائج قريبة من هذه القطعة.'):translate('Ready to find this piece','جاهز للبحث عن هذه القطعة');
  const action=free?'item':checked?'search-item':'start-piece';
  const button=free?translate('View options','عرض الخيارات'):translate('Find in stores','ابحث في المتاجر');
- return `<article class="piece-selection-card${busy?' is-searching':''}" data-ui-key="${esc(keyFor(item))}"><div class="piece-selection-media"><img src="${esc(item.crop||selected().image)}" alt="${esc(item.name_en)}" decoding="async">${!busy?`<button class="piece-clear" data-action="clear-piece" aria-label="${esc(translate('Clear selection','إلغاء التحديد'))}">${icon('close',true)}</button>`:''}</div><div class="piece-selection-content"><div class="piece-selection-summary"><strong dir="auto">${esc(item.name_en)}</strong><p role="status">${busy?'<span class="search-spinner" aria-hidden="true"></span>':''}${esc(caption)}${busy?` <span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span>`:''}</p></div>${busy?'<div class="piece-search-track" aria-hidden="true"><span></span></div>':`<button class="piece-search-button" data-action="${action}" data-id="${item.id}"><span>${esc(button)}</span><span>${free?icon('forward',true):esc(translate('2 credits','رصيدان'))}</span></button>`}</div></article>`;
+ const actions=(service?`<button class="piece-search-button" data-action="service-piece" data-id="${esc(item.id)}"><span>${esc(translate('Find a specialist','ابحث عن مختص'))}</span>${icon('forward',true)}</button>`:'')+(shop?`<button class="piece-search-button${service?' is-secondary':''}" data-action="${action}" data-id="${esc(item.id)}"><span>${esc(button)}</span><span>${free?icon('forward',true):esc(translate('2 credits','رصيدان'))}</span></button>`:'');
+ return `<article class="piece-selection-card${busy?' is-searching':''}" data-ui-key="${esc(keyFor(item))}"><div class="piece-selection-media"><img src="${esc(item.crop||selected().image)}" alt="${esc(name)}" decoding="async">${!busy?`<button class="piece-clear" data-action="clear-piece" aria-label="${esc(translate('Clear selection','إلغاء التحديد'))}">${icon('close',true)}</button>`:''}</div><div class="piece-selection-content"><div class="piece-selection-summary"><strong dir="auto">${esc(name)}</strong><p role="status">${busy?'<span class="search-spinner" aria-hidden="true"></span>':''}${esc(caption)}${busy?` <span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span>`:''}</p></div>${busy?'<div class="piece-search-track" aria-hidden="true"><span></span></div>':actions}</div></article>`;
 }
 function selectPiece(id,marker){
  const items=selected()?.items||[],item=items.find(x=>x.id===id);if(!item)return;
@@ -168,12 +170,27 @@ function pickFromPhoto(event,button){
  const rect=button.getBoundingClientRect();if(!rect.width||!rect.height)return;
  const hits=pickPhotoCandidates(selected()?.items||[],(event.clientX-rect.left)/rect.width*1000,(event.clientY-rect.top)/rect.height*1000);
  if(hits.length>1)return browsePieces(hits);
- const hit=hits[0];if(hit)selectPiece(hit.id,hit.marker);else toast(translate('Tap closer to a piece, or choose from All pieces.','اضغط بالقرب من القطعة، أو اخترها من «جميع القطع».'));
+ const hit=hits[0];if(hit)selectPiece(hit.id,hit.marker);else requestOtherWork();
 }
 function browsePieces(candidates=null){
  const all=selected()?.items||[],items=candidates?candidates.map(hit=>{const item=all.find(x=>x.id===hit.id),view=item?.occurrences?.find(v=>String(v.id)===hit.marker);return item?{...item,marker:hit.marker,crop:view?.crop||item.crop}:null;}).filter(Boolean):all;
- showSheet(`<div class="sheet-body"><h2>${esc(translate('Pieces in your room','قطع غرفتك'))}</h2><p class="pieces-note">${esc(translate('Choose a piece to see it in your room.','اختر قطعة لتحديد موقعها في الصورة.'))}</p><div class="piece-picker-list">${items.map(item=>`<button class="piece-picker-row" data-action="select-piece" data-id="${item.id}" data-marker="${esc(item.marker||item.id)}"><img src="${esc(item.crop||selected().image)}" alt="" loading="lazy"><span><strong>${esc(item.name_en)}</strong><small>${esc(pieceBusy(item)?searchCopy(item):resultView(item)?translate('Saved options','خيارات محفوظة'):translate('Select piece','اختيار القطعة'))}</small></span>${icon('forward',true)}</button>`).join('')}</div></div>`,'pieces');
+ showSheet(`<div class="sheet-body"><h2>${esc(translate('In your design','في تصميمك'))}</h2><p class="pieces-note">${esc(translate('Choose what you need','اختر ما تحتاجه'))}</p><div class="piece-picker-list">${items.map(item=>`<button class="piece-picker-row" data-action="select-piece" data-id="${item.id}" data-marker="${esc(item.marker||item.id)}"><img src="${esc(item.crop||selected().image)}" alt="" loading="lazy"><span><strong>${esc(pieceName(item,shell?.getLanguage()))}</strong><small>${esc(pieceBusy(item)?searchCopy(item):resultView(item)?translate('Saved options','خيارات محفوظة'):canServicePiece(item)?translate('Find a specialist','ابحث عن مختص'):translate('Find in stores','ابحث في المتاجر'))}</small></span>${icon('forward',true)}</button>`).join('')}</div><button class="secondary wide" data-action="other-work">${esc(translate('Something else in the photo','شيء آخر في الصورة'))}</button></div>`,'pieces');
 }
+function openServiceRequest(query){
+ query=String(query||'').trim().slice(0,180);if(query.length<2)return;
+ if(window.FindziaHubBridge){if(window.FindziaHubBridge.action('services',{query,country:countryCode()}))closeSheet();return;}
+ location.assign(serviceDestination(query,countryCode()));
+}
+function findSpecialist(id){
+ const item=selected()?.items.find(x=>x.id===id);if(!item)return;
+ openServiceRequest(serviceQuery(item,shell?.getLanguage()));
+}
+function requestOtherWork(){
+ showSheet(`<div class="sheet-body"><h2>${esc(translate('What do you need here?','شنو تحتاج هنا؟'))}</h2><form id="other-work-form"><label for="other-work-query">${esc(translate('Describe the work','اكتب المطلوب'))}</label><input id="other-work-query" type="text" minlength="2" maxlength="180" required dir="auto" placeholder="${esc(translate('e.g. custom wall decoration','مثلاً: تفصيل ديكور الحائط'))}"><button class="primary wide" type="submit">${esc(translate('Find a specialist','ابحث عن مختص'))}</button></form></div>`,'other-work');
+ $('#other-work-form').addEventListener('submit',event=>{event.preventDefault();openServiceRequest($('#other-work-query').value);});
+ $('#other-work-query').focus();
+}
+
 function renderShop(){
  const d=selected();if(!d)return;
  $('#selected-title').textContent=d.title;
@@ -181,10 +198,10 @@ function renderShop(){
  $('#compare-label').textContent=state.compare?'After':'Before';$('[data-action="compare"]').setAttribute('aria-pressed',String(state.compare));$('#hotspots').classList.toggle('hidden',state.compare);
  const items=d.items||[],preparing=d.status==='analyzing',adapting=d.status==='adapting',conceptOnly=d.inventory_complete&&!items.length&&!preparing&&!adapting&&!d.error;
  const pending=items.find(pieceBusy);if(pending&&!items.some(x=>pointFocus?.key===keyFor(x)))pointFocus={key:keyFor(pending),id:pending.id,waiting:true};
- patchHTML($('.stage-hint'),conceptOnly?`<span><strong>${esc(translate('Your design concept','تصورك التصميمي'))}</strong></span>`:`<span><strong>${esc(translate('Shop this room','تسوّق قطع التصميم'))}</strong><small>${esc(translate('Tap a piece to see store options','اضغط على أي قطعة لعرض خيارات المتاجر'))}</small></span><button class="browse-pieces" data-action="pieces" ${!items.length||preparing||adapting?'disabled':''}>${esc(translate('All pieces','جميع القطع'))}${icon('chevron',true)}</button>`);
+ patchHTML($('.stage-hint'),conceptOnly?`<span><strong>${esc(translate('Your design concept','تصورك التصميمي'))}</strong></span>`:`<span><strong>${esc(translate('Bring it to life','نفّذ تصميمك'))}</strong><small>${esc(translate('Tap to shop or find a specialist','اضغط للشراء أو البحث عن مختص'))}</small></span><button class="browse-pieces" data-action="pieces" ${!items.length||preparing||adapting?'disabled':''}>${esc(translate('All elements','جميع العناصر'))}${icon('chevron',true)}</button>`);
  $('#shop-count').textContent='';$('#search-progress').classList.add('hidden');$('#summary-button').classList.add('hidden');$('#items-list').replaceChildren();
  $('#empty-items').classList.toggle('hidden',items.length>0&&!preparing&&!adapting);
- if(!items.length||preparing||adapting)$('#empty-items').innerHTML=conceptOnly?`<p>${esc(translate('Your design is ready. This concept has no individual store pieces.','تصميمك جاهز. لا يتضمن هذا التصور قطعًا منفردة للتسوّق.'))}</p>`:d.error?`<p>${esc(messages[d.error]||'We couldn’t identify the pieces.')}</p><button class="secondary" data-action="choose" data-index="${state.design}">Try again</button>`:`<span class="search-spinner" aria-hidden="true"></span><p role="status">${esc(adapting?translate('Updating your design…','جارٍ تحديث تصميمك…'):translate('Finding the pieces in your room…','جارٍ تحديد القطع في غرفتك…'))}</p>`;
+ if(!items.length||preparing||adapting)$('#empty-items').innerHTML=conceptOnly?`<p>${esc(translate('Your design is ready. Tap the photo to request the work you need.','تصميمك جاهز. اضغط على الصورة واكتب العمل المطلوب.'))}</p>`:d.error?`<p>${esc(messages[d.error]||'We couldn’t identify the pieces.')}</p><button class="secondary" data-action="choose" data-index="${state.design}">Try again</button>`:`<span class="search-spinner" aria-hidden="true"></span><p role="status">${esc(adapting?translate('Updating your design…','جارٍ تحديث تصميمك…'):translate('Finding the elements in your design…','جارٍ تحديد عناصر تصميمك…'))}</p>`;
  patchHTML($('#hotspots'),photoMarkup(items));
  const current=items.find(x=>pointFocus?.key===keyFor(x)),busy=pieceBusy(current);
  patchHTML($('#piece-feedback'),feedbackMarkup(current));renderDesignPicks();
@@ -238,6 +255,7 @@ const originalLayer=createOriginalLayer({request:api,getLanguage:()=>shell?.getL
 });
 async function openItem(id,{retry=false}={}){
  const item=selected()?.items.find(x=>x.id===id);if(!item)return;
+ if(!canShopPiece(item))return findSpecialist(id);
  closeSheet();pointFocus={key:keyFor(item),id,marker:pointFocus?.key===keyFor(item)?pointFocus.marker:undefined,waiting:false};
  await originalLayer.open({key:searchKey(item),name:item.name_en,crop:item.crop,market:countryCode(),room:state.job.id,design:state.design,item:item.id,
   readOnly:!!state.job.demo,newSearch:retry,view:retry?null:resultView(item),picks:picksFor(item)});renderShop();
@@ -269,6 +287,8 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'compare':state.compare=!state.compare;renderShop();break;
  case 'photo-pick':pickFromPhoto(e,el);break;
  case 'pieces':browsePieces();break;
+ case 'service-piece':findSpecialist(id);break;
+ case 'other-work':requestOtherWork();break;
  case 'select-piece':selectPiece(id,el.dataset.marker);break;
  case 'clear-piece':pointFocus=null;renderShop();break;
  case 'start-piece':await openItem(id);break;

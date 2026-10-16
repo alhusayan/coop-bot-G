@@ -47,3 +47,9 @@ test('the same review repairs wrong boxes before identity grouping and never mer
  const result=await groupIdenticalPieces(rows,{}, {judge:async()=>({corrections:[{id:'1',name_en:'Sofa',category:'sofa',box:[300,250,350,750],selection_boxes:[[300,250,350,750]]}],additions:[{name_en:'Desk',category:'desk',box:[350,200,700,850]}],groups:verdict.groups})});
  assert.equal(result.length,3);assert.deepEqual(result[0].box,[300,250,350,750]);assert.equal(result[2].name_en,'Desk');
 });
+
+
+test('service-only features and different fulfillment intents never merge into retail quantities',()=>{
+ assert.equal(mergeIdentityGroups(chairs.map(x=>({...x,search_kind:'service'})),verdict).length,2);
+ assert.equal(mergeIdentityGroups([{...chairs[0],search_kind:'both'},chairs[1]],verdict).length,2);
+});

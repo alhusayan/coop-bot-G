@@ -37,3 +37,18 @@ test('visible selection patches do not select the occluded sofa through a desk a
  assert.deepEqual(pickPhotoCandidates(items,300,500).map(x=>x.id),['desk']);
  assert.deepEqual(pickPhotoCandidates(items,500,330).map(x=>x.id),['sofa']);
 });
+
+
+test('doors, fitted decoration and uncovered finishes are selectable without stealing furniture taps',()=>{
+ const items=[{id:'wall',name_en:'Limewash wall',surface:'wall',box:[0,0,1000,1000]},
+ {id:'door',name_en:'Oak door',surface:'object',search_kind:'both',box:[100,50,900,300]},
+ {id:'decor',name_en:'Timber screen',surface:'object',search_kind:'service',box:[100,700,900,950]},
+ {id:'chair',name_en:'Chair',box:[500,400,900,650]}];
+ assert.equal(pickPhotoPiece(items,100,500).id,'door');
+ assert.equal(pickPhotoPiece(items,800,500).id,'decor');
+ assert.equal(pickPhotoPiece(items,500,700).id,'chair');
+ assert.equal(pickPhotoPiece(items,500,200).id,'wall');
+ const floor=[{id:'floor',surface:'floor',box:[0,0,1000,1000]},{id:'rug',category:'rug',box:[300,100,900,900]}];
+ assert.equal(pickPhotoPiece(floor,500,500).id,'rug');
+ assert.equal(pickPhotoPiece(floor,50,900).id,'floor');
+});
