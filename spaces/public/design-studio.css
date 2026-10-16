@@ -160,3 +160,12 @@ body:has(#setup:not(.hidden))>footer,body:has(#designs:not(.hidden))>footer,body
 .original-results-blocked button{width:100%;min-height:48px;margin-bottom:14px}
 .original-results-blocked button[hidden]{display:none!important}
 .original-results-frame[hidden]{display:none!important}
+
+/* First-use guidance is anchored to a detected piece, not a floating banner. */
+.piece-coach{position:absolute;z-index:3;transform:translate(-50%,-50%)!important;display:flex;flex-direction:column;align-items:center;gap:6px;background:transparent;border:0;color:white;max-width:150px;padding:0;cursor:pointer;font-size:12px;line-height:1.35;text-align:center;touch-action:manipulation}
+.piece-coach>span:last-child{background:#183d30ed;border:1px solid #ffffff70;border-radius:12px;padding:6px 9px;box-shadow:0 2px 12px #0002}
+.coach-dot{display:grid;place-items:center;width:44px;height:44px;border:1px solid #fff;border-radius:50%;background:#183d30d9;box-shadow:0 0 0 7px #ffffff30;animation:coach-invite 1.7s ease-out 3}
+.piece-coach:focus-visible{outline:2px solid white;outline-offset:8px;border-radius:12px}
+@keyframes coach-invite{0%,100%{box-shadow:0 0 0 5px #ffffff25}50%{box-shadow:0 0 0 15px #ffffff08}}
+@media(prefers-reduced-motion:reduce){.coach-dot{animation:none}}
+#design-form .generation-cost{margin:10px 0 0;font-size:12px;line-height:1.5}
