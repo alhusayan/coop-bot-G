@@ -45,7 +45,7 @@ class ServicesTests(unittest.TestCase):
         client, provider, runtime = self.client({'places': [{'title': 'Fixture business', 'address': 'Salmiya, Kuwait', 'phoneNumber': '2222 1234', 'cid': '123456789'}]})
         response = self.search(client)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['items'][0]['tel'], 'tel:22221234')
+        self.assertEqual(response.json()['items'][0]['tel'], 'tel:+96522221234')
         self.assertEqual(runtime.outcomes, [True])
         args = provider.call_args.args
         self.assertEqual(args[0], 'places')
@@ -88,6 +88,17 @@ class ServicesTests(unittest.TestCase):
             {'title': 'Tools for sale', 'address': 'Salmiya', 'category': 'Hardware store'},
             {'title': 'Plumber fixture', 'address': 'Salmiya', 'category': 'Plumber'}]}
         self.assertEqual([r['title'] for r in listings(data)], ['Plumber fixture'])
+
+    def test_international_contacts_keep_country_dialling_rules(self):
+        for raw, country, expected in [
+            ('020 7946 0018', 'GB', 'tel:+442079460018'),
+            ('02 3661 8300', 'IT', 'tel:+390236618300'),
+            ('٢٢٢٢ ١٢٣٤', 'KW', 'tel:+96522221234'),
+            ('+44 20 7946 0018', 'KW', 'tel:+442079460018')]:
+            with self.subTest(country=country, raw=raw):
+                self.assertEqual(phone(raw, country)[1], expected)
+        self.assertEqual(phone('2222 1234'), ('', ''))
+        self.assertEqual(phone('2222 1234567890', 'KW'), ('', ''))
 
 
 if __name__ == '__main__':
