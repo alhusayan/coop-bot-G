@@ -59,7 +59,7 @@ def listings(data, country=None):
         # Do not present a retail-only listing as a service provider.
         if category.casefold() in {'hardware store', 'electrical supply store',
                 'plumbing supply store', 'building materials store', 'furniture store',
-                'electronics store', 'متجر أدوات', 'متجر أجهزة', 'متجر مواد بناء'}:
+                'electronics store', 'متجر أدوات', 'متجر خردوات', 'متجر أجهزة', 'متجر مواد بناء'}:
             continue
         cid = str(place.get('cid') or '')
         if not title or not address:

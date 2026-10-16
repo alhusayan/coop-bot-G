@@ -86,6 +86,7 @@ class ServicesTests(unittest.TestCase):
     def test_retail_listing_is_not_presented_as_a_tradesperson(self):
         data = {'places': [
             {'title': 'Tools for sale', 'address': 'Salmiya', 'category': 'Hardware store'},
+            {'title': 'أدوات للبيع', 'address': 'السالمية', 'category': 'متجر خردوات'},
             {'title': 'Plumber fixture', 'address': 'Salmiya', 'category': 'Plumber'}]}
         self.assertEqual([r['title'] for r in listings(data)], ['Plumber fixture'])
 
