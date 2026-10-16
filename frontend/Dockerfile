@@ -5,7 +5,7 @@ COPY package.json trial.json ./
 COPY scripts ./scripts
 COPY source ./source
 COPY test-version ./test-version
-RUN node scripts/build.mjs && node scripts/build-test.mjs
+RUN npm run build
 
 FROM public.ecr.aws/docker/library/node:22-alpine
 ENV NODE_ENV=production PORT=8080
