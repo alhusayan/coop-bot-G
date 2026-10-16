@@ -15,3 +15,11 @@ export function initialServiceCountry(read,{zone='',languages=[]}={}){
  for(const locale of languages){const region=String(locale).match(/[-_]([a-z]{2})(?:$|[-_])/i)?.[1]?.toUpperCase();if(serviceCountries.includes(region))return region;}
  return 'US';
 }
+
+// Design-only trial credits cannot fund a service search.
+export function serviceSearchCredits(status){
+ if(!status)return null;
+ return status.credit_unit==='flexible'
+  ?(status.flexible_remaining||0)+(status.free_searches||0)*2
+  :status.remaining;
+}
