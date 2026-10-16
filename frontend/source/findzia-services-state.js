@@ -31,3 +31,16 @@ export function serviceResultsPage(items,sort='relevance',requestedPage=0){
  const page=Math.min(pages-1,Math.max(0,Math.trunc(Number(requestedPage)||0)));
  return {items:ordered.slice(page*4,page*4+4),page,pages,total:ordered.length};
 }
+
+// Click-to-chat is offered for published international numbers; registration is not asserted.
+export function serviceWhatsApp(tel){
+ const number=String(tel||'').replace(/^tel:/,'');
+ return /^\+[1-9]\d{6,14}$/.test(number)?'https://wa.me/'+number.slice(1):'';
+}
+export function serviceLocation(data){
+ const country=String(data?.countryCode||'').toUpperCase();
+ if(!serviceCountries.includes(country))return null;
+ const parts=[data.locality,data.city].filter(v=>typeof v==='string'&&v.trim().length>1).map(v=>v.trim());
+ const area=[...new Set(parts)].join(', ').slice(0,120);
+ return area?{area,country}:null;
+}
