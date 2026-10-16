@@ -319,6 +319,6 @@ document.addEventListener('contextmenu',event=>{if(event.target.closest?.('.desi
 
 // The short CTA stays independent from the transparent credit cost beneath it.
 const discoverLabels={en:'Discover designs',ar:'اكتشف التصاميم',de:'Designs entdecken',fr:'Découvrez les designs',it:'Scopri i design',es:'Descubre diseños',pt:'Descubra designs',tr:'Tasarımları keşfet',ru:'Откройте дизайны',ja:'デザインを発見',zh:'探索设计',ko:'디자인 둘러보기',hi:'डिज़ाइन खोजें',ur:'ڈیزائن دریافت کریں',id:'Jelajahi desain',ms:'Terokai reka bentuk',nl:'Ontdek ontwerpen'};
-function refreshDiscoverLabel(){const label=document.getElementById('discover-label');if(label)label.textContent=discoverLabels[document.documentElement.lang]||discoverLabels.en;}
+function refreshDiscoverLabel(){const label=document.getElementById('discover-label'),text=discoverLabels[document.documentElement.lang]||discoverLabels.en;if(label&&label.textContent!==text)label.textContent=text;}
 refreshDiscoverLabel();
 new MutationObserver(refreshDiscoverLabel).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
