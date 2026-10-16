@@ -80,8 +80,8 @@ def identify_service(image, *, key, model):
                 'objects are broken, or infer invisible faults. Use unknown with no options for '
                 'unreadable, unrelated images or when no service can be reasonably inferred. '
                 'Never identify people, infer sensitive traits, diagnose illnesses, or give '
-                'repair/medical advice. For health images only suggest an appropriate licensed '
-                'care service, with status choose. Never invent providers or contact information.'
+                'repair/medical advice. When there is no plausible home-related need, use '
+                'unknown and let the user clarify. Never invent providers or contact information.'
             )}]},
             'contents': [{'role': 'user', 'parts': [
                 {'inlineData': {'mimeType': 'image/jpeg', 'data': image}},
