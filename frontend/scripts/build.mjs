@@ -129,8 +129,8 @@ serviceHeader=serviceHeader.replace('<div class="fz-brand"','<a href="/" class="
 const serviceAssets=Object.fromEntries(['i18n','support','account','billing'].map(name=>[name,assets.get('findzia-'+name+'.js')]));
 serviceAssets.state=assets.get('findzia-services-state.js');
 serviceAssets.catalog=assets.get('findzia-services-catalog.js');
-serviceAssets.images=Object.fromEntries(['ac','plumbing','electrical','cleaning','moving','garden'].map(name=>{
- const bytes=read('services-art/'+name+'.webp'),file='assets/service-'+name+'.'+hash(bytes).slice(0,16)+'.webp';
+serviceAssets.images=Object.fromEntries(['ac','plumbing','electrical','cleaning','moving','garden','carpentry'].map(name=>{
+ const bytes=read(name==='carpentry'?'hub-art/home-carpentry.webp':'services-art/'+name+'.webp'),file='assets/service-'+name+'.'+hash(bytes).slice(0,16)+'.webp';
  return [name,emit('/'+file,file,bytes,'webp',true)];
 }));
 const serviceBody=`<style data-services-brand></style>${compressedBrand}${serviceStyles}<link rel="stylesheet" href="${assets.get('findzia-services.css')}"><div id="shopify-section-${section}"><section class="fz-home" id="findzia-home-${section}" data-services data-services-version="20261016-camera-reset" data-lang="en" dir="ltr" data-home-state="empty" data-theme="light" data-service-assets='${JSON.stringify(serviceAssets)}'><div class="fz-dark-home" data-dark-home>${serviceHeader}</div><dialog class="fz-dark-menu" id="fz-dark-menu-${section}" data-dark-menu aria-label="Menu"><div class="fz-dark-menu-head"><h2>Menu</h2><button class="fz-dark-menu-close" type="button" data-dark-menu-close aria-label="Close">×</button></div></dialog>${read('findzia-services.html')}</section></div><script type="module" src="${assets.get('findzia-services.js')}"></script>`;

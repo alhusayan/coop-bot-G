@@ -25,6 +25,7 @@
   panel.append(chrome,header,hero,grid);return panel;
  }
  function mount(root){
+  if(['shop','one'].includes(document.documentElement.dataset.hubProject))return;
   const home=root.querySelector('[data-dark-home]');if(!home||root.fzStoreScene||!ART)return;
   const scene=el('div','fz-store-scene'),world=el('div','fz-store-world');scene.setAttribute('aria-hidden','true');scene.setAttribute('data-no-i18n','');scene.inert=true;scene.append(world);root.prepend(scene);
   const planes=POSITIONS.map((point,i)=>{const plane=el('div','fz-store-plane');plane.style.setProperty('--store-delay',-(i*7.31%48)+'s');plane.append(card(STORES[i%STORES.length]));world.append(plane);return plane;});

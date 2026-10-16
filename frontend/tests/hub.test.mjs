@@ -12,13 +12,13 @@ let server,origin;
 before(async()=>{server=createServer({FINDZIA_PAYMENT_PROVIDER:'paddle'});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));origin='http://127.0.0.1:'+server.address().port});
 after(()=>new Promise(resolve=>server.close(resolve)));
 const get=path=>fetch(origin+path,{redirect:'manual'});
-test('one selection section, four large image cards, all local assets available',async()=>{
+test('one selection section, three home entrances, all local assets available',async()=>{
  const response=await get('/'),html=await response.text();assert.equal(response.status,200);
- assert.equal([...html.matchAll(/class="project-card /g)].length,4);assert.equal([...html.matchAll(/class="project-grid"/g)].length,1);assert.doesNotMatch(html,/class="hero"|intent-picker|faq-section|__ASSET_/);
- for(const path of ['/search','/trial/one-55321448a0352f1ff18b','/space','/trial/services'])assert.ok(html.includes('href="'+path+'"'));
+ assert.equal([...html.matchAll(/class="project-card /g)].length,3);assert.equal([...html.matchAll(/class="project-grid"/g)].length,1);assert.doesNotMatch(html,/class="hero"|intent-picker|faq-section|__ASSET_/);
+ for(const path of ['/search','/space','/trial/services'])assert.ok(html.includes('href="'+path+'"'));
  assert.match(html,/<div class="project-grid">\s*<a[^>]+data-project="space"/);assert.match(html,/data-t="spaceDetail"/);assert.match(html,/<dialog id="project-layer"/);assert.equal([...html.matchAll(/<header\b/g)].length,1);assert.doesNotMatch(html,/class="layer-toolbar"/);assert.ok(html.indexOf('</header>')<html.indexOf('<dialog id="project-layer"'));assert.match(html,/<form id="header-search"[^>]+hidden/);
  for(const asset of new Set([...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]))){const r=await get(asset);assert.equal(r.status,200,asset);assert.match(r.headers.get('cache-control'),/immutable/)}
- const css=read('../source/findzia-hub.css');assert.match(css,/height:var\(--hub-height\)/);assert.match(css,/grid-template-areas:"space one" "space shop" "space services"/);assert.match(css,/env\(safe-area-inset-bottom\)/);assert.match(css,/prefers-reduced-motion/);
+ const css=read('../source/findzia-hub.css');assert.match(css,/height:var\(--hub-height\)/);assert.match(css,/grid-template-areas:"space shop" "space services"/);assert.match(css,/env\(safe-area-inset-bottom\)/);assert.match(css,/prefers-reduced-motion/);
 });
 test('only project documents allow same-origin embedding; home and payment files retain protections',async()=>{
  const home=await get('/');assert.match(home.headers.get('content-security-policy'),/frame-src 'self'/);assert.equal(home.headers.get('x-frame-options'),'DENY');
@@ -32,11 +32,12 @@ function hubFixture(href='https://findzia.com/',saved={}){
  class Element{constructor(dataset={}){this.dataset=dataset;this.attributes={};this.listeners={};this.children=[];this.style={setProperty:(key,value)=>this.style[key]=value};this.hidden=false;this.value='';this.textContent='';this.open=false;this.options=[];}addEventListener(name,fn){(this.listeners[name]??=[]).push(fn)}fire(name,event={}){for(const fn of this.listeners[name]||[])fn({target:this,button:0,preventDefault(){},...event})}setAttribute(key,value){this.attributes[key]=value}append(el){this.children.push(el);if(el.tagName==='option')this.options.push(el)}prepend(el){this.children.unshift(el)}remove(){this.removed=true}focus(){this.focused=true}blur(){this.focused=false}show(){this.open=true;this.modal=false}showModal(){this.open=true;this.modal=true}getBoundingClientRect(){return{height:72}}toggleAttribute(key,value){if(value)this.attributes[key]='';else delete this.attributes[key]}replaceChildren(...items){this.children=items;this.options=[]}close(){this.open=false}querySelector(selector){return node(selector)}}
  const nodes=new Map(),node=key=>{if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key)};
  const groups={};for(const key of ['language','theme-toggle','account'])groups['[data-'+key+']']=[new Element(),new Element()];groups['[data-project]']=['shop','one','space','services'].map(project=>new Element({project}));groups['[data-t]']=['choose','shop','one','space','services','loading','retry'].map(t=>new Element({t}));groups['[data-language-name]']=[new Element(),new Element()];groups['.account-dot']=[new Element(),new Element()];groups['[data-camera-source]']=['camera','photos'].map(cameraSource=>new Element({cameraSource}));
+ groups['[data-product-mode]']=['shop','one'].map(productMode=>new Element({productMode}));
  const html=new Element();html.lang='ar';html.dataset.theme='light';const location=new URL(href),messages=[],frames=[],listeners={},stored=new Map(Object.entries(saved)),sessions=new Map(),history=[];
  const document={documentElement:html,activeElement:groups['[data-project]'][0],querySelector:node,querySelectorAll:key=>groups[key]||[],createElement:tag=>{const el=new Element();el.tagName=tag;if(tag==='iframe'){el.contentWindow={postMessage:(data,origin)=>messages.push({data,origin})};frames.push(el)}return el}};
  const window={innerHeight:620,visualViewport:{height:560,scale:1,addEventListener:(name,fn)=>listeners['viewport-'+name]=fn},FindziaAppearance:{apply:()=>({theme:stored.get('findzia-appearance-v1')||'light'})},addEventListener:(name,fn)=>listeners[name]=fn};
  const context={window,document,location,URL,localStorage:{getItem:key=>stored.get(key),setItem:(key,value)=>stored.set(key,value)},sessionStorage:{getItem:key=>sessions.get(key)},history:{state:null,pushState:(state,_,url)=>{history.push(url);location.href=new URL(url,location).href},replaceState:(state,_,url)=>{location.href=new URL(url,location).href}},setTimeout:()=>1,clearTimeout(){}};
- vm.runInNewContext(read('../source/findzia-hub.js'),context);
+ vm.runInNewContext(read('../source/findzia-home-copy.js'),context);vm.runInNewContext(read('../source/findzia-hub.js'),context);
  return{nodes,node,groups,html,window,location,messages,frames,listeners,stored,history};
 }
 test('open, close, reopen and browser back preserve a single layer; forged messages ignored',()=>{
@@ -70,7 +71,7 @@ test('Space allowlist covers app assets, uploads, selections, catalog and media,
  for(const path of ['/space','/space/','/app.js','/findzia/account.js','/markets.js','/api/config','/api/jobs',`/api/jobs/${id}`,`/api/jobs/${id}/select/0`,`/api/jobs/${id}/catalog/2/12`,`/api/jobs/${id}/product-details/${'a'.repeat(64)}`,`/media/${id}/original.jpg`])assert.equal(isSpacePath(path),true,path);
  for(const path of ['https://evil.example/','//evil.example/','/api/admin','/../../secret','/media/../secret','/app.js/evil','/%2f%2fevil.example'])assert.equal(isSpacePath(path),false,path);
  const market="export function marketLanguage(market,read=()=>null){return read('spaces-language-choice-'+market+'-v1')||'en';}";const transformed=transformSpace('/markets.js',market,{});assert.equal(vm.runInNewContext(transformed.replace('export ','')+';marketLanguage("JP", key=>key==="findzia-lang"?"ar":null)'),'ar');
- const html=transformSpace('/space','<html><head><script src="/app.js?v=existing"></script></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);assert.match(html,/app.js\?v=existing&hubHeader=20261016.5/);
+ const html=transformSpace('/space','<html><head><script src="/app.js?v=existing"></script></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);assert.match(html,/app.js\?v=existing&hubHeader=20261016.7/);
 });
 test('Space proxy preserves same-origin session cookies, streams POST bodies and rewrites framing',async()=>{
  async function run(path,method,body,replyBody,replyHeaders){let options,uploaded='';const req=new PassThrough();req.url=path;req.method=method;req.headers={cookie:'fz_spaces=existing',authorization:'Bearer test',origin:'https://findzia.com','content-type':'application/json','sec-fetch-site':'same-origin',host:'untrusted.example'};
@@ -136,4 +137,24 @@ test('direct section links enter unified shell, while payment callbacks stay wit
   let redirected;const location=new URL('https://findzia.com'+path+'?q=chair&country=KW');location.replace=value=>redirected=value;const window={};vm.runInNewContext(read('../source/findzia-hub-bridge.js'),{window,parent:window,location,URL,URLSearchParams});const dest=new URL(redirected);assert.equal(dest.pathname,'/');assert.equal(dest.searchParams.get('project'),project);assert.equal(dest.searchParams.get('q'),'chair');
  }
  const location=new URL('https://findzia.com/search?paymentId=return');location.replace=()=>{throw Error('payment callback rewritten')};const window={addEventListener(){}};vm.runInNewContext(read('../source/findzia-hub-bridge.js'),{window,parent:window,location,URL,URLSearchParams,document:{readyState:'loading',addEventListener(){}},localStorage:{getItem:()=>null}});
+});
+
+test('product mode preserves typed intent without auto-searching, and is absent from home and services',()=>{
+ const f=hubFixture();assert.equal(f.node('#product-mode').hidden,true);
+ f.groups['[data-project]'][0].fire('click');assert.equal(f.node('#product-mode').hidden,false);f.node('#header-query').value='brass tap';
+ f.groups['[data-product-mode]'][1].fire('click');const frame=f.frames.at(-1),calls=[];frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push({name,data});return name==='state'?{}:true}};
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
+ assert.equal(new URL(frame.src).searchParams.get('hubProject'),'one');assert.equal(new URL(frame.src).searchParams.has('q'),false);assert.equal(f.node('#header-query').value,'brass tap');assert.ok(calls.some(x=>x.name==='query'&&x.data.query==='brass tap'));assert.ok(!calls.some(x=>x.name==='search'));
+ f.groups['[data-project]'][3].fire('click');assert.equal(f.node('#product-mode').hidden,true);assert.equal(f.node('#header-query').value,'');
+});
+test('design-to-service handoff carries the requested work for review without submitting a search',()=>{
+ const f=projectFixture('space');f.connect({state:()=>({ready:true,busy:false}),serviceQuery:()=> 'Wood wall panel installation'});
+ assert.equal(f.action('services'),true);assert.equal(f.posts.at(-1).project,'services');assert.equal(f.posts.at(-1).q,'Wood wall panel installation');assert.ok(!f.records.some(x=>x.startsWith('submit:')));
+ let adapter;const context={window:{FindziaHubBridge:{connectSpace:x=>adapter=x}},state:{auth:true,image:'photo',itemId:0},pointFocus:{id:0},submitting:false,view(){},selected:()=>({items:[{id:0,name_en:'wood wall',name_ar:'جدار خشبي'}]}),translate:(en)=>en};
+ vm.runInNewContext(transformSpace('/app.js','',{}),context);assert.equal(adapter.serviceQuery(),'Installation: wood wall');
+});
+test('all home entrance and instruction labels are pretranslated, with no forbidden wording',()=>{
+ const context={window:{}};vm.runInNewContext(read('../source/findzia-home-copy.js'),context);const copy=context.window.FindziaHomeCopy;
+ for(const lang of copy.languages)for(const key of ['choose','space','shop','one','services','instruction','serviceAction','photoUnknown'])assert.ok(copy.get(lang,key),lang+' '+key);
+ assert.equal(copy.get('ar','services'),'خدمات البيت');assert.equal(copy.get('ar','one'),'اختَر لي');
 });

@@ -5,7 +5,7 @@ const read=(key,fallback='')=>{try{return localStorage.getItem(key)||fallback;}c
 const write=(key,value)=>{try{localStorage.setItem(key,value);}catch{}};
 const {serviceCountries:codes,initialServiceCountry,serviceSearchCredits,serviceResults,serviceWhatsApp,serviceLocation}=await import(assets.state);
 let country=initialServiceCountry(read,{zone:Intl.DateTimeFormat().resolvedOptions().timeZone,languages:navigator.languages||[navigator.language]});
-let language=read('findzia-lang',navigator.language?.startsWith('ar')?'ar':'en')==='ar'?'ar':'en';
+let language=read('findzia-lang',navigator.language?.split('-')[0]||'en');
 const {serviceDirectory}=await import(assets.catalog);
 let locating=false,locationSequence=0,pendingPhoto=null,photoSequence=0,searchAbort=null;
 let generation=0,busy=false,retrieving=false,results=null,ready=false,creditConfig=null;
@@ -16,11 +16,14 @@ Object.assign(copy.ar,{allServices:'كل الخدمات',directoryIntro:'كل ا
 
 Object.assign(copy.en,{newSearch:'New search',camera:'Show us with a photo',cameraHint:'Take a photo. Find the right service.',gallery:'Photos',photoPrivacy:'AI analyses your photo to suggest a service.',photoReady:'Find help from your photo',photoPreparing:'Preparing your photo…',photoAnalysing:'Identifying the service and finding nearby help…',photoChoose:'Which service do you need? Choose to see nearby specialists.',photoUnknown:'We couldn’t identify a service. Try a clearer photo or choose a service below. No credits used.',photoInvalid:'This photo could not be read. Try a JPG, PNG or another photo.',photoUnavailable:'Photo recognition is unavailable right now. Try again or choose a service. No credits used.',removePhoto:'Remove photo',photoLocation:'Choose your area to find the right specialist.',photoRetry:'Try photo again'});
 Object.assign(copy.ar,{newSearch:'بحث جديد',camera:'صوّر اللي تحتاجه',cameraHint:'صوّر المشكلة، ونلقى لك الخدمة.',gallery:'الصور',photoPrivacy:'نحلل صورتك بالذكاء الاصطناعي لاقتراح الخدمة.',photoReady:'نلقى الخدمة من صورتك',photoPreparing:'نجهز صورتك…',photoAnalysing:'نتعرف على الخدمة ونبحث لك عن مختص قريب…',photoChoose:'شنو الخدمة اللي تحتاجها؟ اختار ونطلع لك المختصين.',photoUnknown:'ما قدرنا نحدد الخدمة. جرّب صورة أوضح أو اختار الخدمة تحت. ما انخصم رصيد.',photoInvalid:'ما قدرنا نقرأ الصورة. جرّب صورة JPG أو PNG أو صوّر مرة ثانية.',photoUnavailable:'تحليل الصور مو متاح حالياً. جرّب مجدداً أو اختار الخدمة. ما انخصم رصيد.',removePhoto:'إزالة الصورة',photoLocation:'حدد منطقتك عشان نلقى المختص المناسب.',photoRetry:'حلل الصورة مرة ثانية'});
-const t=k=>copy[language][k]||copy.en[k]||k;
+Object.assign(copy.en,{title:'Home services',services:'Home services',intro:'Take a photo or describe what your home needs.',directoryIntro:'Design, installation, repairs and care.',queryExample:'e.g. Carpenter, lighting, cleaning…',photoReady:'What does your home need?',photoChoose:'What do you need here? Choose a service or describe it above.',photoUnknown:'What do you need in this photo? Type the service above. No credits used.'});
+Object.assign(copy.ar,{title:'خدمات البيت',services:'خدمات البيت',intro:'صوّر أو اكتب شنو يحتاج بيتك.',directoryIntro:'تصميم، تنفيذ، صيانة وتنظيف.',queryExample:'مثلاً: نجار، إضاءة، تنظيف…',photoReady:'شنو يحتاج بيتك؟',photoChoose:'شنو تحتاج بالصورة؟ اختر خدمة أو اكتبها في الأعلى.',photoUnknown:'شنو تحتاج بالصورة؟ اكتب الخدمة في الأعلى. ما انخصم رصيد.'});
+const homeText=key=>window.FindziaHomeCopy?.get(language,key);
+const t=k=>{const key={title:'services',services:'services',need:'servicesQuery',queryExample:'servicesQuery',intro:'instruction',photoChoose:'servicesQuery',photoUnknown:'photoUnknown',search:'serviceAction'}[k];return key&&homeText(key)||(copy[language]?.[k])||window.FindziaI18n?.t(copy.en[k],copy.ar[k],root)||copy.en[k]||k};
 const icons={camera:'<path d="M3 7h4l2-3h6l2 3h4v14H3z"/><circle cx="12" cy="13" r="4"/>',image:'<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1"/><path d="m3 17 6-6 4 4 3-3 5 5"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',locate:'<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/>',whatsapp:'<path d="M20.4 11.6a8.4 8.4 0 0 1-12.6 7.3L3 20.3l1.4-4.7a8.4 8.4 0 1 1 16-4Z"/><path d="m8 7 2 3-1 1c1 2 2 3 4 4l1-1 3 2c-2 4-11-3-10-7Z"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/>',pin:'<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/>',arrow:'<path d="M4 12h16m-6-6 6 6-6 6"/>',ac:'<path d="M12 2v20M3.3 7l17.4 10M3.3 17 20.7 7M9 4l3 3 3-3M9 20l3-3 3 3M3 10l4-1-1-4m15 9-4 1 1 4M6 19l1-4-4-1m15-9-1 4 4 1"/>',plumbing:'<path d="M6 3h6v6h6v6h-6V9H6zM4 3h10M18 13v7M15 20h6M4 9h4"/>',electrical:'<path d="m13 2-9 12h7l-1 8 10-13h-7z"/>',cleaning:'<path d="m17 2-7 12M8 11l6 4-4 7-8-5 6-6ZM16 7h5m-2-2v4M4 3v4M2 5h4"/>',moving:'<path d="M2 5h13v12H2zM15 9h4l3 4v4h-7M6 5v5h5V5"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/>',garden:'<path d="M12 22V10M12 15C4 15 2 9 3 5c6 0 9 4 9 10ZM12 11c0-7 5-9 9-9 0 6-3 10-9 9Z"/>',business:'<path d="M3 10V5h18v5M3 10c0 3 5 3 5 0 0 3 8 3 8 0 0 3 5 3 5 0M4 13v8h16v-8M9 21v-6h6v6"/>',call:'<path d="m4 3 4-1 3 5-3 3a15 15 0 0 0 6 6l3-3 5 3-1 4c-1 5-20-9-17-17Z"/>',web:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c-5 6-5 12 0 18 5-6 5-12 0-18Z"/>'};
 function icon(name){const wrap=document.createElement('span');wrap.dataset.icon=name;wrap.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(icons[name]||icons.business)+'</svg>';return wrap;}
 function node(tag,cls,text){const el=document.createElement(tag);if(cls)el.className=cls;if(text!==undefined)el.textContent=text;return el;}
-const cats=[['ac','Air conditioning','تكييف','Air conditioning repair','تصليح تكييف'],['plumbing','Plumbing','سباكة','Plumber','سباك'],['electrical','Electrical','كهرباء','Electrician','كهربائي'],['cleaning','Cleaning','تنظيف','Cleaning services','خدمات تنظيف'],['moving','Moving','نقل عفش','Moving company','نقل عفش'],['garden','Gardens','حدائق','Gardening services','تنسيق حدائق']];
+const cats=[['ac','Air conditioning','تكييف','Air conditioning repair','تصليح تكييف'],['plumbing','Plumbing','صحي','Plumber','صحي'],['electrical','Electrical','كهرباء','Electrician','كهربائي'],['cleaning','Cleaning','تنظيف','Cleaning services','خدمات تنظيف'],['carpentry','Carpentry & decor','نجارة وديكور','Carpenter and interior decoration','نجار وديكور داخلي'],['garden','Gardens','حدائق','Gardening services','تنسيق حدائق']];
 function countryName(code){try{return new Intl.DisplayNames([language],{type:'region'}).of(code);}catch{return code;}}
 function flag(code){return [...code].map(c=>String.fromCodePoint(127397+c.charCodeAt(0))).join('');}
 function countries(){for(const select of [$('#svc-country'),$('[data-profile-market-select]')]){select.replaceChildren(...codes.map(code=>new Option(flag(code)+' '+countryName(code),code)));select.value=country;}const trigger=$('[data-dark-market-open]');$('[data-dark-market-flag]').textContent=flag(country);trigger.setAttribute('aria-label',t('preferences')+' · '+countryName(country));}
@@ -38,7 +41,7 @@ function chooseService(query){
  target.focus({preventScroll:true});$('#svc-form').scrollIntoView({behavior:motion(),block:'nearest'});
 }
 function localize(){
- root.dataset.lang=language;root.dir=language==='ar'?'rtl':'ltr';document.documentElement.lang=language;document.documentElement.dir=root.dir;
+ root.dataset.lang=language;root.dir=['ar','ur'].includes(language)?'rtl':'ltr';document.documentElement.lang=language;document.documentElement.dir=root.dir;
  for(const el of root.querySelectorAll('[data-copy]'))text(el,t(el.dataset.copy));
  for(const el of root.querySelectorAll('[data-placeholder]'))el.placeholder=t(el.dataset.placeholder);
  for(const el of root.querySelectorAll('[data-copy-aria]'))el.setAttribute('aria-label',t(el.dataset.copyAria));
@@ -107,7 +110,7 @@ function renderDirectory(){
  const custom=$('#svc-directory-custom');custom.hidden=term.length<2;text(custom,t('customService')+' “'+$('#svc-directory-query').value.trim()+'”');
 }
 const motion=()=>matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth';
-function setLanguage(value){language=value==='ar'?'ar':'en';write('findzia-lang',language);window.FindziaLocale?.choose(language);window.FindziaI18n?.set(root,language);localize();}
+function setLanguage(value){language=window.FindziaHomeCopy?.languages.includes(value)?value:'en';write('findzia-lang',language);window.FindziaLocale?.choose(language);window.FindziaI18n?.set(root,language);localize();}
 function setCountry(value){if(!codes.includes(value))return;country=value;write('findzia-services-country-v1',country);countries();}
 function notice(message,loading=false){const box=$('#svc-message');box.replaceChildren();box.hidden=!message;if(!message)return;if(loading)box.append(node('span','svc-loading'));box.append(node('p','',message));}
 function safeLink(raw,protocols=['https:','http:']){try{const url=new URL(raw);return protocols.includes(url.protocol)?url.href:'';}catch{return '';}}
@@ -189,7 +192,7 @@ function photoChoices(photo){
  const box=$('#svc-photo-options');box.replaceChildren();
  $('#svc-photo-panel').hidden=false;$('#svc-suggestions').hidden=false;
  $('#svc-photo-description').textContent=t(photo.status==='unknown'?'photoUnknown':'photoChoose');
- for(const option of photo.options||[]){const button=node('button','',option[language]);button.type='button';button.onclick=()=>{if(busy)return;chooseService(option[language]);$('#svc-form').requestSubmit();};box.append(button);}
+ for(const option of photo.options||[]){const button=node('button','',option[language==='ar'?'ar':'en']);button.type='button';button.onclick=()=>{if(busy)return;chooseService(option[language==='ar'?'ar':'en']);$('#svc-form').requestSubmit();};box.append(button);}
  // The image is discarded after analysis; choosing a service performs only a text search.
  pendingPhoto=null;$('#svc-query').required=true;
  $('#svc-photo-panel').scrollIntoView({behavior:motion(),block:'start'});
@@ -210,7 +213,8 @@ window.addEventListener('popstate',()=>resetHome());window.addEventListener('pag
 $('#svc-locate').onclick=()=>locateArea();$('#svc-manual').onclick=()=>manualArea();$('#svc-area').oninput=()=>{updateLocation();remember();};
 const directory=$('#svc-directory');$('#svc-browse').onclick=()=>{directory.showModal();};$('#svc-directory-close').onclick=()=>directory.close();$('#svc-directory-query').oninput=renderDirectory;$('#svc-directory-custom').onclick=()=>{directory.close();chooseService($('#svc-directory-query').value.trim());};
 root.querySelectorAll('.svc-page [data-icon],.svc-directory [data-icon]').forEach(el=>el.replaceWith(icon(el.dataset.icon)));
-localize();restore();resetHome(false);history.replaceState({findziaServices:'home'},'',location.href);updateLocation();syncSelection();window.FindziaAppearance?.apply(root);
+const languageSelect=$('[data-profile-language-select]');for(const code of window.FindziaHomeCopy?.languages||[]){if(![...languageSelect.options].some(o=>o.value===code)){let name=code;try{name=new Intl.DisplayNames([code],{type:'language'}).of(code)}catch{}languageSelect.add(new Option(name,code));}}
+localize();restore();resetHome(false);const entryQuery=new URL(location.href).searchParams.get('q');if(entryQuery)chooseService(entryQuery.slice(0,200));history.replaceState({findziaServices:'home'},'',location.href);updateLocation();syncSelection();window.FindziaAppearance?.apply(root);
 $('#svc-form').setAttribute('data-dark-form','');
 $('#svc-form').addEventListener('submit',async event=>{
  event.preventDefault();if(busy)return;if(!ready){notice(t('unavailable'));return;}

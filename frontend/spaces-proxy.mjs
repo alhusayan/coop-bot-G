@@ -5,10 +5,10 @@ const assets=new Set(['app.js','request.js','room-state.js','live-view.js','styl
 for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js','fonts/OFL-Cairo.txt'])assets.add('/findzia/'+name);
 export function isSpacePath(path){return path==='/space'||path==='/space/'||path==='/account'||assets.has(path)||/^\/api\/(?:config|findzia-results|jobs(?:\/[a-f0-9]{24}(?:\/(?:measure|product-details(?:\/[a-f0-9]{64})?|catalog\/[0-2]\/\d{1,2}|(?:select|retry|search|focus|replace|results|picks)(?:\/\d+)?))?)?)$/.test(path)||/^\/(?:media|lens-media)\/[a-f0-9]{24}\/[a-zA-Z0-9_.-]+$/.test(path)}
 export function transformSpace(path,text,bridge){
- if(path==='/space'||path==='/space/'||path==='/account')return text.replace(/src=(["'])(\/app\.js(?:\?[^"']*)?)\1/g,(_,quote,url)=>`src=${quote}${url}${url.includes('?')?'&':'?'}hubHeader=20261016.5${quote}`).replace('</head>',`<link rel="stylesheet" href="${bridge.style}"><script src="${bridge.script}"></script></head>`);
+ if(path==='/space'||path==='/space/'||path==='/account')return text.replace(/src=(["'])(\/app\.js(?:\?[^"']*)?)\1/g,(_,quote,url)=>`src=${quote}${url}${url.includes('?')?'&':'?'}hubHeader=20261016.7${quote}`).replace('</head>',`${bridge.copy?`<script src="${bridge.copy}"></script><script defer src="${bridge.focus}"></script>`:''}<link rel="stylesheet" href="${bridge.style}"><script src="${bridge.script}"></script></head>`);
  if(path==='/findzia/account.js')return text.replace('const dest=new URL(location.href);','const dest=new URL(window.FindziaHubBridge?.authReturnURL()||location.href);').replace('location.assign(url.href);','if(window.FindziaHubBridge)window.FindziaHubBridge.navigateAuth(url.href);else location.assign(url.href);');
  if(path==='/app.js')return text+`
-window.FindziaHubBridge?.connectSpace({state:()=>({ready:state.auth===true,busy:submitting,hasImage:!!state.image}),review:()=>view('setup')});
+window.FindziaHubBridge?.connectSpace({state:()=>({ready:state.auth===true,busy:submitting,hasImage:!!state.image}),review:()=>view('setup'),serviceQuery:()=>{const item=selected()?.items?.find(x=>x.id===(pointFocus?.id??state.itemId));return item?translate('Installation: ','تركيب: ')+translate(item.name_en,item.name_ar||item.name_en):translate('Home interior decoration','ديكور داخلي للمنزل')}});
 `;
  if(path==='/markets.js')return text.replace("return read('spaces-language-choice-'+market+'-v1')", "return read('findzia-lang')||read('spaces-language-choice-'+market+'-v1')");
  return text;

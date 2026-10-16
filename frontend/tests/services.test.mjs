@@ -14,7 +14,7 @@ test('services trial is separate, unindexed, and connects the original account a
   const urls=[...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]);
   for(const path of [...urls,...Object.entries(accountAssets).filter(([key])=>key!=='images').map(([,value])=>value),...Object.values(accountAssets.images)])assert.equal((await fetch(origin+path)).status,200,path);
   assert.doesNotMatch(html,/<script[^>]*findzia-(?:shell|choice|ads|analytics)\./);
-  const home=await(await fetch(origin+'/')).text();assert.match(home,/See it\. Find it\./);assert.doesNotMatch(home,/data-services/);
+  const home=await(await fetch(origin+'/')).text();assert.match(home,/class="project-grid"/);assert.doesNotMatch(home,/data-services/);
  }finally{await new Promise(r=>server.close(r));}
 });
 
@@ -61,8 +61,9 @@ test('location resolves an area and supported country without inventing either',
  assert.equal(serviceLocation({countryCode:'KW',countryName:'Kuwait'}),null);
  assert.equal(serviceLocation({countryCode:'ZZ',locality:'Unknown'}),null);
 });
-test('service directory has translated entries across broad needs',()=>{
- assert.ok(serviceDirectory.length>=15);assert.ok(serviceCount>=200);
+test('home directory includes custom work and maintenance without acting as a search whitelist',()=>{
+ assert.ok(serviceDirectory.length>=7);assert.ok(serviceCount>=90);
+ const names=serviceDirectory.flatMap(g=>g[3].map(r=>r[0]));assert.ok(names.includes('Wood wall panel installation'));assert.ok(names.includes('Home EV charger installation'));assert.ok(!names.includes('Car mechanic'));
  for(const group of serviceDirectory){assert.ok(group[0]&&group[1]&&group[3].length);for(const row of group[3])assert.ok(row[0]&&row[1]);}
 });
 test('GPS and geocoding are enabled only for the services document',async()=>{

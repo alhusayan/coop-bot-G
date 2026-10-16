@@ -1,0 +1,15 @@
+{
+  "tool": "Built-in image_gen",
+  "purpose": "Illustrative home products and home-service photography; not live offers or named providers.",
+  "encoding": "WebP quality 85; content unchanged",
+  "assets": [
+    {
+      "file": "home-products.webp",
+      "prompt": "Use case: product-mockup. Asset type: premium square photographic category image for Findzia home-products search website, must be extremely easy to recognize on a small mobile card. Primary request: a tasteful studio still life of HOME PRODUCTS, with three large recognizable items only: a cream upholstered lounge chair on the left, an elegant dark olive table lamp with a broad shade on a low pale limestone block in the center back, and a clearly recognizable brushed brass bathroom basin mixer faucet on a smaller pedestal at the right foreground. Warm beige plaster background and oak detail, natural afternoon window light, realistic materials and soft shadows, premium interior editorial photography. Compose all three items in the center 80 percent, each fully visible, focus sharp. Near-square 1024x1024. The bottom 20 percent is quieter stone and chair legs so real website text can overlay it. No text, letters, prices, logos, interface, frames, numbers, labels, shopping bags, gadgets, headphones, shoes or people. Restrained warm cream, natural stone and muted green palette, dark green brand compatibility. This image should immediately communicate furniture, lighting and home fixtures."
+    },
+    {
+      "file": "home-carpentry.webp",
+      "prompt": "Use case: photorealistic-natural. Asset type: square premium home services category photograph for Findzia. A professional carpenter seen from side at chest level carefully fitting a vertical oak slat decorative wall panel inside a refined warm cream living room. One adult worker wearing muted sage green work clothes, realistic hands holding a timber slat and a small spirit level, no unsafe tool action. Wall is partly completed so the purpose is immediately clear: custom wooden wall decor and interior installation. Worker on right-center, beautiful oak panel on left-center; composition readable on a small square card. Natural daylight, high-end editorial photography with believable wood texture, restrained beige, olive and oak colors, minimal objects. No writing, no logo, no price, no watermark, no UI. Square 1024x1024."
+    }
+  ]
+}

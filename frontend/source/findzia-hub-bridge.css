@@ -26,3 +26,15 @@ html[data-hub-account-only] .fz-account::backdrop{background:transparent}
  html[data-hub-project=space] [data-spaces-content]{padding-top:12px!important}
  @media(max-width:600px){html[data-hub-project=services] .svc-fields{grid-template-columns:minmax(0,1fr)!important}}
 }
+
+@layer findzia-hub-embed {
+ html[data-findzia-embedded] .fz-home[data-home-focus] :is(.fz-store-scene,.fz-store-toggle){display:none!important}
+ html[data-findzia-embedded] .fz-home[data-home-focus] .fz-dark-home{position:relative!important;isolation:isolate!important;background:linear-gradient(180deg,#07120e26,#07120ed9),url('__ASSET_home-products.webp__') center 45%/cover no-repeat!important;color:#fff!important}
+ html[data-findzia-embedded] .fz-home[data-home-focus] .fz-dark-main{min-height:calc(100svh - 205px)!important;align-items:center!important;justify-content:flex-end!important;gap:12px!important;padding:clamp(28px,8vh,72px) 24px!important;text-align:center!important;position:relative!important}
+ html[data-findzia-embedded] .fz-home[data-home-focus] .fz-dark-title{font-size:clamp(32px,7vw,56px)!important;line-height:1.3!important;color:#fff!important;margin:0!important}
+ html[data-findzia-embedded] .fz-home[data-home-focus] .fz-dark-description{font-size:clamp(15px,3.5vw,20px)!important;line-height:1.6!important;color:#f2f1e7!important;margin:0!important;max-width:32ch!important}
+ .home-search-hint{font:inherit!important;font-size:14px!important;line-height:1.5!important;color:#f3e2cf!important;margin:4px 0!important}
+ .home-product-examples{display:flex!important;flex-wrap:wrap!important;justify-content:center!important;gap:8px!important}
+ .home-product-examples button{font:inherit!important;font-size:13px!important;min-height:44px!important;border:1px solid #ffffff5c!important;border-radius:24px!important;padding:9px 16px!important;background:#17291f80!important;color:#fff!important;cursor:pointer!important}
+ .home-service-link{font:inherit!important;font-size:14px!important;min-height:44px!important;padding:10px 16px!important;border:1px solid var(--line,#9baa99)!important;background:transparent!important;color:inherit!important;border-radius:24px!important;cursor:pointer!important;flex-shrink:0!important}
+}

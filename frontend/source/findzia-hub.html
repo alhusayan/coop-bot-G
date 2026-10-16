@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f3f2ed">
-<meta name="description" content="من صورة مساحتك إلى تصميم والبحث عن قطعه عبر المتاجر. وقارن المنتجات، اختَر منتجك، واعثر على المختص من صورة.">
-<meta property="og:title" content="Findzia — Your world, in one place">
+<meta name="description" content="تصميم، منتجات وخدمات لبيتك. صمّم مساحتك، قارن أسعار احتياجات المنزل، وابحث عن المختصين.">
+<meta property="og:title" content="Findzia — Design, products and services for your home">
 <meta property="og:image" content="https://findzia.com__ASSET_space-story.webp__">
 <title>Findzia</title>
 <link rel="canonical" href="https://findzia.com/">
@@ -16,6 +16,7 @@
 <script src="__ASSET_findzia-boot.js__"></script>
 <script>(()=>{try{const l=localStorage.getItem('findzia-lang')||localStorage.getItem('findzia-hub-language')||navigator.language.split('-')[0];document.documentElement.lang=l;document.documentElement.dir=['ar','ur'].includes(l)?'rtl':'ltr';if(!localStorage.getItem('findzia-lang'))localStorage.setItem('findzia-lang',l);localStorage.removeItem('findzia-hub-language');}catch{}document.documentElement.dataset.theme=document.documentElement.dataset.findziaTheme||'light';})();</script>
 <link rel="stylesheet" href="__ASSET_findzia-hub.css__">
+<script src="__ASSET_findzia-home-copy.js__"></script>
 <script defer src="__ASSET_findzia-hub.js__"></script>
 __ANALYTICS__
 </head>
@@ -43,27 +44,24 @@ __ANALYTICS__
 <label class="sr-only" for="header-query" id="search-label">البحث</label><input id="header-query" type="search" maxlength="600" dir="auto" autocomplete="off" enterkeyhint="search" placeholder="ابحث عن منتج…">
 <button id="submit-search" class="icon-button" type="submit" aria-label="بحث" disabled><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg></button><span class="search-divider" aria-hidden="true"></span><button id="header-camera" class="icon-button camera-button" type="button" aria-label="البحث بالصورة" disabled><svg class="icon" aria-hidden="true"><use href="#i-camera"/></svg></button>
 </form>
+<div id="product-mode" class="product-mode" hidden><button type="button" data-product-mode="shop" data-t="compare" aria-pressed="true">قارن الأسعار</button><button type="button" data-product-mode="one" data-t="one" aria-pressed="false">اختَر لي</button></div>
 </div>
 </header>
 <main id="projects">
-<div class="collection-heading"><h1 data-t="choose">ابدأ بصورة.</h1><span dir="ltr">01 — 04</span></div>
+<div class="collection-heading"><h1 data-t="choose">كل شيء لبيتك.</h1><span dir="ltr">01 — 03</span></div>
 <div class="project-grid">
 <a href="/space" class="project-card space-card" data-project="space">
 <span class="card-image"><img src="__ASSET_space-story.webp__" alt="" width="1536" height="1024" fetchpriority="high"></span>
-<span class="card-copy"><span class="project-brand" dir="ltr">FINDZIA SPACE</span><strong data-t="space">صوّر. صمّم. تسوّق.</strong><span class="card-detail" data-t="spaceDetail">وابحث عن القطع عبر المتاجر.</span></span>
+<span class="card-copy"><strong data-t="space">صمّم بيتك</strong><span class="card-detail" data-t="spaceDetail">من صورتك إلى تصميم، ثم تسوّق القطع.</span></span>
 <span class="card-open" aria-hidden="true"><svg class="icon"><use href="#i-arrow"/></svg></span>
 </a>
-<a href="/trial/one-55321448a0352f1ff18b" class="project-card one-card" data-project="one">
-<span class="card-image"><img src="__ASSET_one-story.webp__" alt="" width="1536" height="1024"></span>
-<span class="card-copy"><span class="project-brand" dir="ltr">FINDZIA ONE</span><strong data-t="one">صوّر. نختار لك.</strong></span>
-</a>
 <a href="/search" class="project-card shop-card" data-project="shop">
-<span class="card-image"><img src="__ASSET_compare-story.webp__" alt="" width="1536" height="1024"></span>
-<span class="card-copy"><span class="project-brand" dir="ltr">FINDZIA COMPARE</span><strong data-t="shop">صوّر وقارن الأسعار.</strong></span>
+<span class="card-image"><img src="__ASSET_home-products.webp__" alt="" width="1254" height="1254"></span>
+<span class="card-copy"><strong data-t="shop">منتجات البيت</strong></span>
 </a>
 <a href="/trial/services" class="project-card services-card" data-project="services">
-<span class="card-image"><img src="__ASSET_service-story.webp__" alt="" width="1774" height="887"></span>
-<span class="card-copy"><span class="project-brand" dir="ltr">FINDZIA SERVICES</span><strong data-t="services">صوّر المشكلة. لق المختص.</strong></span>
+<span class="card-image"><img src="__ASSET_home-carpentry.webp__" alt="" width="1254" height="1254"></span>
+<span class="card-copy"><strong data-t="services">خدمات البيت</strong></span>
 </a>
 </div>
 </main>
@@ -74,7 +72,7 @@ __ANALYTICS__
 </dialog>
 <dialog id="hub-menu" class="hub-sheet" aria-labelledby="menu-title">
 <div class="sheet-head"><h2 id="menu-title" data-ui="menu">القائمة</h2><button class="icon-button" type="button" data-dismiss="hub-menu" aria-label="إغلاق"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
-<nav class="project-nav"><button type="button" id="menu-home" data-ui="home">الرئيسية</button><button type="button" data-go="shop"><span dir="ltr">Findzia</span><small data-t="shop">صوّر وقارن الأسعار.</small></button><button type="button" data-go="one"><span dir="ltr">Findzia One</span><small data-t="one">صوّر. نختار لك.</small></button><button type="button" data-go="space"><span dir="ltr">Findzia Space</span><small data-t="space">صوّر. صمّم. تسوّق.</small></button><button type="button" data-go="services"><span dir="ltr">Findzia Services</span><small data-t="services">صوّر المشكلة. لق المختص.</small></button></nav>
+<nav class="project-nav"><button type="button" id="menu-home" data-ui="home">الرئيسية</button><button type="button" data-go="space" data-t="space">صمّم بيتك</button><button type="button" data-go="shop" data-t="shop">منتجات البيت</button><button type="button" data-go="services" data-t="services">خدمات البيت</button></nav>
 <div class="menu-bottom"><button id="section-options" type="button" data-ui="sectionOptions" hidden>خيارات القسم</button><button id="menu-preferences" type="button" data-ui="preferences">اللغة والمظهر</button></div>
 </dialog>
 <dialog id="hub-preferences" class="hub-sheet" aria-labelledby="preferences-title"><div class="sheet-head"><h2 id="preferences-title" data-ui="preferences">التفضيلات</h2><button class="icon-button" type="button" data-dismiss="hub-preferences" aria-label="إغلاق"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div><div class="preference-fields"><label><span data-ui="country">الدولة</span><select id="hub-country"></select></label><label><span data-t="language">اللغة</span><select data-language></select></label><label><span data-t="appearance">المظهر</span><select id="hub-theme"><option value="auto" data-ui="auto">تلقائي</option><option value="light" data-ui="light">فاتح</option><option value="dark" data-ui="dark">داكن</option></select></label></div></dialog>

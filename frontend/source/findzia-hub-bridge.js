@@ -38,7 +38,8 @@ function action(name,data={}){
  if(!embedded||!root)return false;
  if(name==='state')return state();
  if(name==='country'){applyCountry(data.country);return true}
- if(name==='query')return setQuery(data.query);
+ if(name==='query'){const changed=setQuery(data.query);publishState();return changed;}
+ if(name==='services'&&project==='space'){if(space?.state().busy)return false;post({type:'navigate',project:'services',q:space?.serviceQuery?.()||'',country:read('findzia-market-country-v1')||''});return true;}
  if(name==='menu')return click('[data-dark-menu-open]');
  if(name==='market')return click('[data-dark-market-open]');
  if(name==='account'){pendingAccount=true;openAccount();return true}
