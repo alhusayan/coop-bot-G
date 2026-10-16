@@ -18,7 +18,7 @@ test('services trial is separate, unindexed, and connects the original account a
  }finally{await new Promise(r=>server.close(r));}
 });
 
-import {initialServiceCountry,serviceSearchCredits} from '../source/findzia-services-state.js';
+import {initialServiceCountry,serviceSearchCredits,serviceResultsPage} from '../source/findzia-services-state.js';
 test('service market uses Findzia preferences and supported browser regions',()=>{
  const read=values=>key=>values[key]||'';
  assert.equal(initialServiceCountry(read({'findzia-market-country-v1':'gb'}),{zone:'Asia/Kuwait'}),'GB');
@@ -35,4 +35,17 @@ test('service searches distinguish design-only trial credits from usable credit'
  assert.equal(serviceSearchCredits({credit_unit:'flexible',remaining:2,free_searches:0,flexible_remaining:2}),2);
  assert.equal(serviceSearchCredits({remaining:4}),4);
  assert.equal(serviceSearchCredits(null),null);
+});
+
+test('four-card pages retain every result and sort the complete result set',()=>{
+ const rows=Array.from({length:9},(_,i)=>({title:String(i+1),rating:i+1}));
+ const pages=[0,1,2].map(page=>serviceResultsPage(rows,'relevance',page));
+ assert.deepEqual(pages.map(p=>p.items.length),[4,4,1]);
+ assert.deepEqual(pages.flatMap(p=>p.items.map(r=>r.title)),rows.map(r=>r.title));
+ assert.deepEqual(serviceResultsPage(rows,'rating',0).items.map(r=>r.title),['9','8','7','6']);
+ assert.equal(serviceResultsPage(rows,'relevance',99).page,2);
+ assert.equal(serviceResultsPage(rows,'relevance',-1).page,0);
+ assert.equal(serviceResultsPage([]).items.length,0);
+ assert.equal(serviceResultsPage(rows.slice(0,4)).pages,1);
+ assert.equal(rows[0].title,'1');
 });
