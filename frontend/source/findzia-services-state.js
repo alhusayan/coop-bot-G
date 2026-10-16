@@ -23,3 +23,11 @@ export function serviceSearchCredits(status){
   ?(status.flexible_remaining||0)+(status.free_searches||0)*2
   :status.remaining;
 }
+
+export function serviceResultsPage(items,sort='relevance',requestedPage=0){
+ const ordered=[...items];
+ if(sort==='rating')ordered.sort((a,b)=>(b.rating||0)-(a.rating||0)||(b.reviews||0)-(a.reviews||0));
+ const pages=Math.max(1,Math.ceil(ordered.length/4));
+ const page=Math.min(pages-1,Math.max(0,Math.trunc(Number(requestedPage)||0)));
+ return {items:ordered.slice(page*4,page*4+4),page,pages,total:ordered.length};
+}
