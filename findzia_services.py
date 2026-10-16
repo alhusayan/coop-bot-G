@@ -5,6 +5,7 @@ This module does not change the product search or send messages to businesses.
 """
 import asyncio
 import re
+import phonenumbers
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import Request
@@ -28,7 +29,7 @@ def website(value):
     return ''
 
 
-def phone(value):
+def phone(value, country=None):
     value = clean(value, 60).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'))
     # Some provider rows accidentally put an address in phoneNumber. Reject it.
     if not re.fullmatch(r'\+?[0-9 ().\-]+', value):
@@ -36,10 +37,18 @@ def phone(value):
     digits = re.sub(r'\D', '', value)
     if not 7 <= len(digits) <= 15:
         return '', ''
-    return value, 'tel:' + ('+' if value.startswith('+') else '') + digits
+    try:
+        number = phonenumbers.parse(value, country.upper() if country else None)
+        if not phonenumbers.is_possible_number(number):
+            return '', ''
+        return (phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.INTERNATIONAL),
+                'tel:' + phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164))
+    except phonenumbers.NumberParseException:
+        # Without a reliable country, never guess a dialling prefix.
+        return '', ''
 
 
-def listings(data):
+def listings(data, country=None):
     rows, seen = [], set()
     for place in data.get('places', [])[:30]:
         if not isinstance(place, dict):
@@ -60,7 +69,7 @@ def listings(data):
         if key in seen:
             continue
         seen.add(key)
-        number, tel = phone(place.get('phoneNumber'))
+        number, tel = phone(place.get('phoneNumber'), country)
         rating = place.get('rating')
         count = place.get('ratingCount')
         rows.append(dict(title=title, address=address, category=category,
@@ -104,5 +113,5 @@ def install_services(app, provider, countries, configured):
             return reply({'error': 'services_unavailable'}, 503)
         if not isinstance(data, dict) or not isinstance(data.get('places'), list):
             return reply({'error': 'services_unavailable'}, 503)
-        return reply({'ok': True, 'items': listings(data), 'query': query, 'area': area,
+        return reply({'ok': True, 'items': listings(data, country), 'query': query, 'area': area,
                       'country': country.upper(), 'source': 'Google Maps'})

@@ -10,10 +10,21 @@ test('services trial is separate, unindexed, and connects the original account a
   assert.match(response.headers.get('x-robots-tag'),/noindex/);assert.equal(response.headers.get('cache-control'),'no-store');
   const html=await response.text();assert.match(html,/data-services/);assert.doesNotMatch(html,/\{\{|\{%/);
   const accountAssets=JSON.parse(html.match(/data-service-assets='([^']+)'/)[1]);
-  assert.deepEqual(Object.keys(accountAssets),['i18n','support','account','billing']);
+  assert.deepEqual(Object.keys(accountAssets),['i18n','support','account','billing','state']);
   const urls=[...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]);
   for(const path of [...urls,...Object.values(accountAssets)])assert.equal((await fetch(origin+path)).status,200,path);
   assert.doesNotMatch(html,/<script[^>]*findzia-(?:shell|choice|ads|analytics)\./);
   const home=await(await fetch(origin+'/')).text();assert.match(home,/See it\. Find it\./);assert.doesNotMatch(home,/data-services/);
  }finally{await new Promise(r=>server.close(r));}
+});
+
+import {initialServiceCountry} from '../source/findzia-services-state.js';
+test('service market uses Findzia preferences and supported browser regions',()=>{
+ const read=values=>key=>values[key]||'';
+ assert.equal(initialServiceCountry(read({'findzia-market-country-v1':'gb'}),{zone:'Asia/Kuwait'}),'GB');
+ assert.equal(initialServiceCountry(read({'findzia-market-country-v1':'GB','findzia-services-country-v1':'KW'})),'KW');
+ assert.equal(initialServiceCountry(read({}),{zone:'Asia/Tokyo'}),'JP');
+ assert.equal(initialServiceCountry(read({}),{zone:'America/Vancouver'}),'CA');
+ assert.equal(initialServiceCountry(read({}),{languages:['fr-FR']}),'FR');
+ assert.equal(initialServiceCountry(read({'findzia-services-country-v1':'invalid'}),{zone:'Asia/Kuwait'}),'KW');
 });
