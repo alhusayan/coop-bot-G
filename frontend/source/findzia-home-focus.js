@@ -24,6 +24,7 @@
  function mount(){
   const doc=document.documentElement,root=document.querySelector('.fz-home'),project=doc.dataset.hubProject;
   if(!doc.dataset.findziaEmbedded||!root||!['shop','one','space','services'].includes(project))return;
+  if(project==='space'&&doc.hasAttribute('data-space-scene'))return;
   const $=selector=>document.querySelector(selector);
   const entry=document.createElement('section');entry.className='experience-entry';entry.setAttribute('data-no-i18n','');
   const content=document.createElement('div');content.className='experience-copy';

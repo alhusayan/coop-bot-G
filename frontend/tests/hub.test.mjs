@@ -69,10 +69,10 @@ test('embedded OAuth uses existing PKCE and top-level provider navigation with s
 });
 test('Space allowlist covers app assets, uploads, selections, catalog and media, rejecting proxy destinations',()=>{
  const id='a'.repeat(24);
- for(const path of ['/space','/space/','/app.js','/findzia/account.js','/markets.js','/api/config','/api/jobs',`/api/jobs/${id}`,`/api/jobs/${id}/select/0`,`/api/jobs/${id}/catalog/2/12`,`/api/jobs/${id}/product-details/${'a'.repeat(64)}`,`/media/${id}/original.jpg`])assert.equal(isSpacePath(path),true,path);
+ for(const path of ['/space','/space/','/app.js','/findzia/account.js','/markets.js','/space-scene.css','/space-scene-copy.js','/space-cover.webp','/api/config','/api/jobs',`/api/jobs/${id}`,`/api/jobs/${id}/select/0`,`/api/jobs/${id}/catalog/2/12`,`/api/jobs/${id}/product-details/${'a'.repeat(64)}`,`/media/${id}/original.jpg`])assert.equal(isSpacePath(path),true,path);
  for(const path of ['https://evil.example/','//evil.example/','/api/admin','/../../secret','/media/../secret','/app.js/evil','/%2f%2fevil.example'])assert.equal(isSpacePath(path),false,path);
  const market="export function marketLanguage(market,read=()=>null){return read('spaces-language-choice-'+market+'-v1')||'en';}";const transformed=transformSpace('/markets.js',market,{});assert.equal(vm.runInNewContext(transformed.replace('export ','')+';marketLanguage("JP", key=>key==="findzia-lang"?"ar":null)'),'ar');
- const html=transformSpace('/space','<html><head><script src="/app.js?v=existing"></script></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);assert.match(html,/app.js\?v=existing&hubHeader=20261016.8/);
+ const html=transformSpace('/space','<html><head><script src="/app.js?v=existing"></script></head></html>',{script:'/assets/bridge.js',style:'/assets/bridge.css'});assert.match(html,/src="\/assets\/bridge.js"/);assert.match(html,/app.js\?v=existing&hubHeader=20261017.3/);
 });
 test('Space proxy preserves same-origin session cookies, streams POST bodies and rewrites framing',async()=>{
  async function run(path,method,body,replyBody,replyHeaders){let options,uploaded='';const req=new PassThrough();req.url=path;req.method=method;req.headers={cookie:'fz_spaces=existing',authorization:'Bearer test',origin:'https://findzia.com','content-type':'application/json','sec-fetch-site':'same-origin',host:'untrusted.example'};
@@ -182,4 +182,15 @@ test('cached account opens its sheet again after returning home',()=>{
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
  f.node('#close-layer').fire('click');f.groups['[data-account]'][0].fire('click');
  assert.equal(f.frames.length,1);assert.equal(f.messages.at(-1).data.type,'account');assert.equal(f.node('#experience-nav').hidden,true);
+});
+
+test('native Space scene hides the persistent search and section tabs; other sections keep their composer',()=>{
+ const f=hubFixture(),open=key=>f.groups['[data-experience]'].find(x=>x.dataset.experience===key).fire('click');
+ open('space');const frame=f.frames.at(-1),calls=[];
+ frame.contentWindow.FindziaHubBridge={action:name=>{calls.push(name);return name==='state'?{scene:true,cameraReady:true}:true}};
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
+ assert.equal(f.node('#header-search').hidden,true);assert.equal(f.node('#experience-nav').hidden,true);
+ assert.ok(!calls.includes('search'));
+ open('shop');assert.equal(f.node('#header-search').hidden,false);assert.equal(f.node('#experience-nav').hidden,false);
+ open('space');assert.equal(f.node('#header-search').hidden,true);assert.equal(f.frames.length,2);
 });

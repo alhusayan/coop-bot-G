@@ -22,8 +22,8 @@ html[data-hub-account-only] .fz-account::backdrop{background:transparent}
  html[data-hub-project=services] .fz-home :is(.fz-dark-home,.svc-photo-entry,.svc-photo-privacy,.svc-query-field){display:none!important}
  html[data-hub-project=services] .svc-fields{grid-template-columns:minmax(0,1fr) auto!important}
  html[data-hub-project=space] .fz-home>.fz-dark-home{display:none!important}
- html[data-hub-project=space] [data-spaces-content] :is(.home-actions,.floating-button[data-action=upload],label[for=design-request],#design-request){display:none!important}
- html[data-hub-project=space] [data-spaces-content]{padding-top:12px!important}
+ html[data-hub-project=space]:not([data-space-scene]) [data-spaces-content] :is(.home-actions,.floating-button[data-action=upload],label[for=design-request],#design-request){display:none!important}
+ html[data-hub-project=space]:not([data-space-scene]) [data-spaces-content]{padding-top:12px!important}
  @media(max-width:600px){html[data-hub-project=services] .svc-fields{grid-template-columns:minmax(0,1fr)!important}}
 }
 
