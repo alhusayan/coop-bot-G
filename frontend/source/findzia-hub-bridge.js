@@ -16,6 +16,12 @@ if(embedded){
  document.documentElement.dataset.hubProject=project;
  if(project==='account')document.documentElement.dataset.hubAccountOnly='true';
  window.FindziaHubBridge={
+  composer(mode='query'){
+   // Same-origin direct focus retains iOS keyboard activation from the tap.
+   const selector=mode==='photo'?'#header-camera':'#header-query';
+   try{const control=parent.document.querySelector(selector);if(control&&!control.disabled){mode==='photo'?control.click():control.focus();return true}}catch{}
+   post({type:'composer',mode:mode==='photo'?'photo':'query'});return false;
+  },
   action,connectSpace(adapter){space=adapter;publishState()},
   authReturnURL(){const url=new URL(parent.location.href);url.hash='';url.searchParams.set('project',project);return url.href},
   navigateAuth(value){const url=new URL(value);if(url.protocol!=='https:'||!['https://accounts.google.com','https://appleid.apple.com'].includes(url.origin))throw Error('invalid_redirect');parent.location.assign(url.href)}
@@ -38,6 +44,7 @@ function action(name,data={}){
  if(!embedded||!root)return false;
  if(name==='state')return state();
  if(name==='country'){applyCountry(data.country);return true}
+ if(name==='prepare'){if(project==='services')root.fzRefineBridge?.newSearch?.();return action('query',data);}
  if(name==='query'){const changed=setQuery(data.query);publishState();return changed;}
  if(name==='services'&&project==='space'){if(space?.state().busy)return false;const q=String(typeof data.query==='string'?data.query:space?.serviceQuery?.()||'').trim().slice(0,180);if(q.length<2)return false;post({type:'navigate',project:'services',q,country:/^[A-Z]{2}$/.test(data.country||'')?data.country:read('findzia-market-country-v1')||''});return true;}
  if(name==='menu')return click('[data-dark-menu-open]');

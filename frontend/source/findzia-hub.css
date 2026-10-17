@@ -58,3 +58,18 @@ html[dir=rtl] .home-content h1{letter-spacing:0;font-size:clamp(30px,3.4vw,44px)
 @media(min-width:721px) and (max-aspect-ratio:1/1){.home-image{bottom:75px}.home-image img{object-position:50% 50%}.home-hero:after{background:linear-gradient(180deg,transparent 25%,#02070500 40%,#02070550 64%,#09100dfc 88%,#09100d 100%)}}
 @media(max-height:570px){.hub-shell{min-height:450px}.home-hero{min-height:350px}.home-content{padding-top:50px;padding-bottom:16px}.home-content h1{font-size:28px;margin-bottom:12px}.home-action{min-height:87px;gap:8px}.home-action-icon{width:48px;height:48px;border-radius:16px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+
+/* The room becomes a workspace inside the same rounded surface. */
+html[data-project-open] .site-header{border-bottom-color:transparent}
+#project-layer{inset:calc(var(--header-height) + 6px) 24px auto;width:calc(100% - 48px);max-width:1392px;margin-inline:auto;height:calc(var(--hub-height) - var(--header-height) - 30px);border-radius:32px;background:var(--bg);box-shadow:0 8px 32px #17251c0b}
+#project-layer[open]{animation:experience-open .42s cubic-bezier(.2,.7,.3,1)}
+.project-content{padding:0;isolation:isolate}.project-content iframe{display:block;min-width:0}.project-content iframe[hidden]{display:none!important}
+#layer-status{color:#fffdf5;background:linear-gradient(180deg,#09100d00 35%,#09100d 100%),url('__ASSET_home-calm.webp__') center 55%/cover;justify-content:flex-end;padding:32px;text-shadow:0 1px 8px #0008}
+.experience-nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:10px max(16px,calc((100% - 520px)/2)) 13px;background:#09100d;color:#fffdf5;flex:none;direction:inherit}
+.experience-nav button{min-height:53px;min-width:0;padding:8px 6px;border:1px solid transparent;background:transparent;border-radius:17px;color:#c5cdc4;display:flex;align-items:center;justify-content:center;gap:10px;font:inherit;font-size:14px;transition:background .2s,color .2s}
+.experience-nav button[aria-current=true]{background:#dce7d6;color:#203326;border-color:#dce7d6}
+.experience-nav button:focus-visible{outline:2px solid #fffdf5;outline-offset:2px}.experience-nav button:not([aria-current=true]):hover{background:#ffffff12;color:#fff}
+@keyframes experience-open{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+@media(max-width:720px){#project-layer{inset:calc(var(--header-height) + 4px) 14px auto;width:calc(100% - 28px);height:calc(var(--hub-height) - var(--header-height) - 18px);border-radius:26px}.experience-nav{padding:9px 12px 11px;gap:5px}.experience-nav button{flex-direction:column;gap:5px;font-size:12px;line-height:1.3;min-height:62px;padding:7px 2px;border-radius:16px}.experience-nav .icon{width:22px;height:22px}}
+@media(max-height:450px){#project-layer{inset-inline:10px;width:calc(100% - 20px);height:calc(var(--hub-height) - var(--header-height) - 10px)}.experience-nav{padding-block:4px}.experience-nav button{min-height:40px;flex-direction:row}}
+@media(prefers-reduced-motion:reduce){#project-layer[open]{animation:none}.experience-nav button{transition:none}}

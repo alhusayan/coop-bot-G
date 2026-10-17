@@ -16,11 +16,12 @@ const files={
 };
 const assets={};
 for(const [key,path] of Object.entries(files)){
- let body=readFileSync(resolve(source,path));if(key.endsWith('.css'))body=Buffer.from(body.toString().replace(/__ASSET_(.*?)__/g,(_,name)=>{if(!assets[name])throw Error('Missing CSS asset '+name);return assets[name]}));const ext=key.split('.').at(-1),file='assets/'+key.replace('.'+ext,'.'+hash(body).slice(0,16)+'.'+ext);
+ let body=readFileSync(resolve(source,path));if(key==='findzia-hub-bridge.css')body=Buffer.concat([body,readFileSync(resolve(source,'findzia-experience.css'))]);if(key.endsWith('.css'))body=Buffer.from(body.toString().replace(/__ASSET_(.*?)__/g,(_,name)=>{if(!assets[name])throw Error('Missing CSS asset '+name);return assets[name]}));const ext=key.split('.').at(-1),file='assets/'+key.replace('.'+ext,'.'+hash(body).slice(0,16)+'.'+ext);
  assets[key]=emit('/'+file,file,body,ext,true);
 }
-const bridgeTags=`<script src="${assets['findzia-home-copy.js']}"></script><script defer src="${assets['findzia-home-focus.js']}"></script><link rel="stylesheet" href="${assets['findzia-hub-bridge.css']}"><script src="${assets['findzia-hub-bridge.js']}"></script>`;
-manifest.hubBridge={script:assets['findzia-hub-bridge.js'],style:assets['findzia-hub-bridge.css'],copy:assets['findzia-home-copy.js'],focus:assets['findzia-home-focus.js']};
+const fonts='<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">';
+const bridgeTags=`${fonts}<script src="${assets['findzia-home-copy.js']}"></script><script defer src="${assets['findzia-home-focus.js']}"></script><link rel="stylesheet" href="${assets['findzia-hub-bridge.css']}"><script src="${assets['findzia-hub-bridge.js']}"></script>`;
+manifest.hubBridge={fonts,script:assets['findzia-hub-bridge.js'],style:assets['findzia-hub-bridge.css'],copy:assets['findzia-home-copy.js'],focus:assets['findzia-home-focus.js']};
 // Keep original account and billing modules in each project.
 const originalEntry=manifest.routes['/'];
 let original=readFileSync(resolve(out,originalEntry.file),'utf8').replace('<link rel="canonical" href="https://findzia.com/">','<link rel="canonical" href="https://findzia.com/search">');
@@ -41,6 +42,6 @@ if(/__ASSET_|__ANALYTICS__/.test(html))throw Error('Unresolved hub asset');
 emit('/','index.html',html,'html');manifest.routes['/index.html']=manifest.routes['/'];manifest.routes['/home']=manifest.routes['/'];manifest.routes['/home/']=manifest.routes['/'];
 const sitemapEntry=manifest.routes['/sitemap.xml'];
 const sitemap=readFileSync(resolve(out,sitemapEntry.file),'utf8').replace('</urlset>','<url><loc>https://findzia.com/search</loc></url></urlset>');writeFileSync(resolve(out,sitemapEntry.file),sitemap);sitemapEntry.sha256=hash(sitemap);
-const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261017.1';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
-manifest.hub='20261017.1';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
+const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261017.2';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
+manifest.hub='20261017.2';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
 console.log('Findzia Home: Design, Products and Services; One inside Products.');
