@@ -94,12 +94,13 @@
       for(const char of major)add(big,char,/\d/.test(char)?'major:'+ --place:'');number.append(big);
       if(minor){small.append(el('span','fz-one-punctuation','.'));let index=0;for(const char of minor)add(small,char,'minor:'+index++);number.append(small);}
       const units=major.replace(/\D/g,'').length*.64+(major.match(/,/g)||[]).length*.27+minor.length*.32+1.15;
-      number.style.fontSize=`clamp(22px,${Math.min(15,78/units)}vw,${Math.min(72,430/units)}px)`;
+      number.style.fontSize=document.documentElement.hasAttribute('data-findzia-embedded')?`clamp(18px,${Math.min(10,64/units)}vw,${Math.min(46,300/units)}px)`:`clamp(22px,${Math.min(15,78/units)}vw,${Math.min(72,430/units)}px)`;
       this.node.append(number,el('span','fz-one-currency',currency));this.node.dataset.spinning=String(rolling);
       this.canAnimate=typeof this.cells[0]?.out.animate==='function';
     }
     flip(cell,digit,duration,done,direction=1){
       const epoch=this.epoch;
+      if(document.documentElement.hasAttribute('data-findzia-embedded')){this.paint(cell,digit);cell.motions=[cell.node.animate([{opacity:.35,transform:'translateY(4px)'},{opacity:1,transform:'translateY(0)'}],{duration:Math.max(150,duration),easing:'ease-out'})];cell.timer=setTimeout(()=>{if(epoch!==this.epoch)return;cell.motions.forEach(a=>a.cancel());cell.motions=[];done();},Math.max(150,duration));return;}
       cell.next=digit;cell.node.dataset.direction=direction<0?'up':'down';
       cell.upper.firstElementChild.textContent=String(direction<0?cell.digit:digit);
       cell.lower.firstElementChild.textContent=String(direction<0?digit:cell.digit);
@@ -123,7 +124,7 @@
       if(reduced()||!this.canAnimate){this.cells.forEach(c=>this.paint(c,c.target));this.node.dataset.spinning='false';done();return;}
       const epoch=this.epoch;let remaining=this.cells.length;this.moving=true;
       this.cells.forEach((cell,i)=>{
-        const steps=landing?3+i%3:2+i%2;let step=0;
+        const steps=document.documentElement.hasAttribute('data-findzia-embedded')?1:landing?3+i%3:2+i%2;let step=0;
         const run=()=>{
           if(epoch!==this.epoch)return;
           const last=++step===steps,digit=last?cell.target:(cell.digit+direction+10)%10;
@@ -159,7 +160,7 @@
       if(next){this.activeOffer=next;this.idleStep=0;this.onQuote(next);}
       const source=this.activeOffer;if(!source)return;
       let money=source.money,real=true;
-      if(!next&&!reduced()){
+      if(!next&&!reduced()&&!document.documentElement.hasAttribute('data-findzia-embedded')){
         // Small excursions around the last REAL quote, then return to it.
         // These transient frames are never announced or logged as store prices.
         this.idleStep++;
@@ -174,7 +175,7 @@
       this.move(money,()=>{
         if(!this.live)return;
         this.node.setAttribute('aria-label',real?formatMoney(source.money)+(source.store?' · '+source.store:''):this.label);
-        if(reduced()&&!this.queue.length)return;
+        if((reduced()||document.documentElement.hasAttribute('data-findzia-embedded'))&&!this.queue.length)return;
         this.liveTimer=setTimeout(()=>this.play(),real?300:80);
       },next?260:210);
     }
@@ -241,6 +242,14 @@
     settle(source,alt){this.stop();this.swap(source,alt,true);}
   }
 
+  // Three quiet frames suggest browsing; they never imply measured progress.
+  function searchMotif(){
+    const motif=el('span','fz-one-image-placeholder fz-search-motif');motif.setAttribute('aria-hidden','true');
+    const drawings=['<path d="M5 5h14v14H5zM8 14l3-3 5 5"/><circle cx="14.5" cy="8.5" r="1"/>','<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/>','<path d="M5 8h14v12H5zM9 8V6a3 3 0 0 1 6 0v2"/>'];
+    for(const drawing of drawings){const card=el('i','fz-search-slip');card.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'+drawing+'</svg>';motif.append(card);}
+    return motif;
+  }
+
   class SearchLog {
     constructor(node){this.node=node;this.entries=[];this.seen=new Map();this.limit=7;}
     clear(){this.entries=[];this.seen.clear();this.activeKey='';this.node.replaceChildren();}
@@ -262,11 +271,11 @@
     const text=k=>{const lang=(root.dataset.lang||'en').split('-')[0],i=keys.indexOf(k);return i>=0?(COPY[lang]||COPY.en)[i]:(EXTRA[lang]||EXTRA.en)[extraKeys.indexOf(k)]||k;};
     const box=el('section','fz-one');box.hidden=true;box.setAttribute('aria-label','Findzia');body.before(box);
     const heading=el('h2','fz-one-heading'),stage=el('div','fz-one-stage'),aura=el('div','fz-one-aura'),image=el('img','fz-one-image'),imageBack=el('img','fz-one-image'),scan=el('div','fz-one-scan');scan.setAttribute('aria-hidden','true');
-    const placeholder=el('span','fz-one-image-placeholder','⌕');placeholder.setAttribute('aria-hidden','true');image.alt='';image.decoding='async';image.hidden=true;
+    const placeholder=searchMotif();placeholder.setAttribute('aria-hidden','true');image.alt='';image.decoding='async';image.hidden=true;
     const shade=el('div','fz-one-shade');shade.setAttribute('aria-hidden','true');
     imageBack.alt='';imageBack.decoding='async';imageBack.hidden=true;
     const photos=new PhotoSequence(image,imageBack,placeholder);
-    const badge=el('span','fz-one-badge');stage.append(aura,placeholder,image,imageBack,shade,scan,heading,badge);
+    const badge=el('span','fz-one-badge');stage.append(aura,placeholder,image,imageBack,shade,heading,badge);
     const title=el('h3','fz-one-title'),specs=el('p','fz-one-specs'),price=el('div','fz-one-price');price.setAttribute('role','img');
     const priceSource=el('p','fz-one-price-source');priceSource.hidden=true;
     const merchant=el('div','fz-one-merchant'),store=el('p','fz-one-store'),shipping=el('p','fz-one-shipping');merchant.append(store,shipping);
@@ -348,7 +357,7 @@
     }
     function celebrate(){
       if(celebrated||disposed)return;celebrated=true;box.dataset.state='selected';heading.textContent=text('found');live.textContent=text('found')+' '+title.textContent+' '+(price.getAttribute('aria-label')||'');fit();
-      if(reduced())return;
+      if(reduced()||document.documentElement.hasAttribute('data-findzia-embedded'))return;
       for(let i=0;i<14;i++){const s=el('i','fz-one-spark');s.setAttribute('aria-hidden','true');const a=i*Math.PI*2/14,r=60+i%4*16;s.style.setProperty('--spark-x',Math.cos(a)*r+'px');s.style.setProperty('--spark-y',Math.sin(a)*r+25+'px');s.style.setProperty('--spark-r',i*37+'deg');stage.append(s);setTimeout(()=>s.remove(),1300);}
     }
     function show(value,row,manual=false){
@@ -569,7 +578,7 @@
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
     root.fzOneChoice={update,destroy,release:'157.0.16'};labels();queue();
   }
-  window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,moneyParts:parts};
+  window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,searchMotif,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
   document.addEventListener('shopify:section:load',start);

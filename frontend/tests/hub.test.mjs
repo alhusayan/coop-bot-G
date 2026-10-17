@@ -208,3 +208,19 @@ test('text focus isolates the composer and clears on dismiss, submit, and sectio
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'text-entry',active:false}});assert.equal(f.html.attributes['data-text-entry'],'','a hidden frame cannot dismiss current text focus');
  f.listeners.message({origin:'https://findzia.com',source:active.contentWindow,data:{findziaHub:true,type:'text-entry',active:false}});assert.equal(f.html.attributes['data-text-entry'],undefined);
 });
+
+test('flag opens the shared country control; GPS changes and cached sections share the chosen market',()=>{
+ const f=hubFixture();f.groups['[data-project]'][3].fire('click');const frame=f.frames.at(-1),calls=[];
+ frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push({name,data});return name==='state'?{country:'KW',countries:['KW','SA'],cameraReady:true}:true}};
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
+ f.node('#open-preferences').fire('click');assert.equal(f.node('#hub-preferences').open,true);assert.ok(!calls.some(x=>x.name==='market'));
+ f.node('#hub-country').value='SA';f.node('#hub-country').fire('change');assert.equal(f.stored.get('findzia-market-country-v1'),'SA');assert.equal(calls.at(-1).name,'country');
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'market',country:'KW'}});
+ assert.equal(f.stored.get('findzia-market-country-v1'),'KW');assert.equal(f.node('#market-flag').textContent,'🇰🇼');
+});
+test('service GPS market changes publish to the parent instead of remaining only in the area form',()=>{
+ const f=projectFixture('services');f.node('[data-profile-market-select]').value='SA';
+ for(const fn of f.events['findzia:market-change'])fn({detail:{country:'SA'}});
+ assert.ok(f.posts.some(x=>x.type==='market'&&x.country==='SA'));
+ assert.ok(f.posts.some(x=>x.type==='header-state'&&x.country==='SA'));
+});

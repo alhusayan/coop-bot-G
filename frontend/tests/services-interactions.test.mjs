@@ -62,3 +62,13 @@ test('results use a short heading and labelled icon-only contacts',()=>{
  for(const contact of actions.children.slice(0,2)){assert.equal(contact.textContent,'');assert.ok(contact.attrs['aria-label'].includes('Fixture carpenter'));assert.ok(contact.children.length)}
  assert.equal(actions.children[0].href,'tel:+96555551234');assert.equal(actions.children[1].href,'https://wa.me/96555551234');
 });
+
+test('switching country clears in-flight results and restores only that country’s saved area',()=>{
+ const f=fixture(),saved=new Map();f.context.read=k=>saved.get(k);f.context.write=(k,v)=>saved.set(k,v);f.context.codes=['KW','SA'];f.context.locationSequence=0;f.context.locating=false;f.context.syncSelection=()=>{};
+ f.run(section('const areaStorageKey=','function clearPhoto'));
+ f.$('#svc-area').value='Salmiya';f.run('remember()');f.context.country='SA';f.$('#svc-area').value='Riyadh';f.run('remember()');
+ let aborted=0;f.context.searchAbort={abort:()=>aborted++};f.context.busy=true;f.context.retrieving=true;f.context.results={items:[{title:'Old city'}]};
+ f.run(section('const changeCountry=','$('+'\'#svc-country\').onchange'));
+ f.run("changeCountry('KW')");assert.equal(f.context.country,'KW');assert.equal(f.$('#svc-area').value,'Salmiya');assert.equal(aborted,1);assert.equal(f.context.busy,false);assert.equal(f.context.results,null);assert.equal(f.$('#svc-results').hidden,true);
+ f.run("changeCountry('SA')");assert.equal(f.$('#svc-area').value,'Riyadh');
+});

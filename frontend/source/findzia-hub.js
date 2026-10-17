@@ -90,7 +90,7 @@ window.addEventListener('message',event=>{
  if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else query.focus();}
  if(data.type==='header-state')headerState(data);
  if(data.type==='text-entry'){childTyping=data.active===true;html.toggleAttribute('data-text-entry',queryFocused||childTyping);$('#experience-nav').inert=queryFocused||childTyping;}
- if(data.type==='market'&&/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;save('findzia-market-country-v1',currentCountry);save('findzia-services-country-v1',currentCountry);render()}
+ if(data.type==='market'&&/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;save('findzia-market-country-v1',currentCountry);save('findzia-services-country-v1',currentCountry);save('findzia-market-country-ts-v1',String(Date.now()));render()}
  if(data.type==='close')closeProject();
  if(data.type==='navigate'&&Object.hasOwn(projects,data.project)){const url=new URL(location.href);for(const key of ['q','country']){url.searchParams.delete(key);if(typeof data[key]==='string'&&data[key].length<=1000)url.searchParams.set(key,data[key])}history.replaceState(history.state,'',url.pathname+url.search);if(active===data.project){pendingQuery=data.q??null;if(isReady)ready()}else openProject(data.project,{carryQuery:true,prefill:typeof data.q==='string'?data.q:null});}
  if(data.type==='language'&&Object.hasOwn(languages,data.language))setLanguage(data.language,false);
@@ -103,7 +103,7 @@ all('[data-go]').forEach(button=>button.addEventListener('click',()=>{$('#hub-me
 $('#menu-home').addEventListener('click',()=>{$('#hub-menu').close();closeProject()});
 $('#home-link').addEventListener('click',event=>{if(active){event.preventDefault();closeProject()}});
 $('#section-options').addEventListener('click',()=>{$('#hub-menu').close();if(!action('menu'))notice('loading')});
-$('#open-preferences').addEventListener('click',()=>{if(active&&isReady&&action('market'))return;preferences()});
+$('#open-preferences').addEventListener('click',preferences);
 $('#menu-preferences').addEventListener('click',()=>{$('#hub-menu').close();preferences()});
 $('#hub-theme').addEventListener('change',event=>{save('findzia-appearance-v1',event.target.value);syncTheme();send({type:'preferences',language:lang,theme:event.target.value})});
 $('#hub-country').addEventListener('change',event=>{const value=event.target.value;if(!marketOptions.includes(value))return;currentCountry=value;save('findzia-market-country-v1',value);save('findzia-services-country-v1',value);save('findzia-market-country-ts-v1',String(Date.now()));save('findzia_manual_market_v1',value);action('country',{country:value});render()});

@@ -7,14 +7,14 @@
     if(root.dataset.choicePreview==='true'||root.fzSearchWait||!bridge?.searchWaitRows||!shared||!body)return;
     const box=el('section','fz-one fz-search-wait'),stage=el('div','fz-one-stage');
     box.hidden=true;box.dataset.state='pending';box.setAttribute('data-no-i18n','');
-    const aura=el('div','fz-one-aura'),placeholder=el('span','fz-one-image-placeholder');
-    placeholder.textContent='⌕';placeholder.setAttribute('aria-hidden','true');
+    const aura=el('div','fz-one-aura'),placeholder=shared.searchMotif();
+    placeholder.setAttribute('aria-hidden','true');
     const image=el('img','fz-one-image');image.hidden=true;image.alt='';
     const shade=el('div','fz-one-shade'),scan=el('div','fz-one-scan');scan.setAttribute('aria-hidden','true');
     const heading=el('h2','fz-one-heading');heading.setAttribute('role','status');
     const details=el('div','fz-one-details'),logBox=el('div','fz-one-log'),caption=el('div','fz-one-log-caption'),lines=el('div','fz-one-log-lines');
     lines.setAttribute('aria-hidden','true');logBox.append(caption,lines);details.append(logBox);
-    stage.append(aura,placeholder,image,shade,scan,heading,details);
+    stage.append(aura,placeholder,image,shade,heading,details);
     const actions=el('div','fz-one-actions'),cancel=el('button','fz-one-small');cancel.type='button';actions.append(cancel);
     box.append(stage,actions);body.before(box);
     const log=new shared.SearchLog(lines);

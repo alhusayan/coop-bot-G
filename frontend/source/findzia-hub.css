@@ -96,3 +96,7 @@ html[data-query-focus] .product-mode{display:none}
 #project-layer{transition:top .35s cubic-bezier(.2,.75,.25,1),height .35s cubic-bezier(.2,.75,.25,1)}
 @keyframes search-focus-in{from{opacity:0}to{opacity:1}}
 @media(prefers-reduced-motion:reduce){.header-search,.header-search input,.header-search .camera-button,.header-search .search-divider,.experience-nav,.experience-nav button,#project-layer,.home-action{transition:none!important}.search-dismiss{animation:none!important}}
+
+.hub-sheet [data-dismiss]{width:44px;height:44px;padding:13px;border:0;border-radius:8px;background:transparent;opacity:.65;box-shadow:none}
+.hub-sheet [data-dismiss] .icon{width:18px;height:18px;stroke-width:1.5}
+.hub-sheet [data-dismiss]:focus-visible{outline:1px solid var(--muted);outline-offset:-7px}

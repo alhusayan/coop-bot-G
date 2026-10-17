@@ -8,7 +8,7 @@ const zones={
  'Australia/Sydney':'AU','Australia/Melbourne':'AU','Australia/Perth':'AU','Australia/Brisbane':'AU'
 };
 export function initialServiceCountry(read,{zone='',languages=[]}={}){
- for(const key of ['findzia-services-country-v1','findzia-market-country-v1']){
+ for(const key of ['findzia-market-country-v1','findzia-services-country-v1']){
   const value=String(read(key)||'').toUpperCase();if(serviceCountries.includes(value))return value;
  }
  if(zones[zone])return zones[zone];

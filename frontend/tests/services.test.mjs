@@ -22,7 +22,7 @@ import {initialServiceCountry,serviceSearchCredits,serviceResults} from '../sour
 test('service market uses Findzia preferences and supported browser regions',()=>{
  const read=values=>key=>values[key]||'';
  assert.equal(initialServiceCountry(read({'findzia-market-country-v1':'gb'}),{zone:'Asia/Kuwait'}),'GB');
- assert.equal(initialServiceCountry(read({'findzia-market-country-v1':'GB','findzia-services-country-v1':'KW'})),'KW');
+ assert.equal(initialServiceCountry(read({'findzia-market-country-v1':'GB','findzia-services-country-v1':'KW'})),'GB');
  assert.equal(initialServiceCountry(read({}),{zone:'Asia/Tokyo'}),'JP');
  assert.equal(initialServiceCountry(read({}),{zone:'America/Vancouver'}),'CA');
  assert.equal(initialServiceCountry(read({}),{languages:['fr-FR']}),'FR');

@@ -129,3 +129,69 @@
  @media(prefers-reduced-motion:reduce){html[data-findzia-embedded] .experience-primary{animation:none!important}}
 }
 @keyframes experience-action-focus{from{opacity:0;transform:translateY(7px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}
+
+@layer findzia-hub-embed {
+ html[data-hub-project=services] .svc-country-label{display:none!important}
+ html[data-hub-project=services] .svc-manual-fields{grid-template-columns:minmax(0,1fr)!important}
+}
+
+/* A paper-and-sage search scene, shared by Compare and Pick for me. */
+@layer findzia-hub-embed {
+ html[data-findzia-embedded] .fz-home .fz-one{width:100%!important;max-width:860px!important;padding:4px 10px 10px!important;margin:0 auto!important;gap:10px!important;color:var(--ink)!important;font-family:'DM Sans','Noto Sans Arabic',Arial,sans-serif!important}
+ html[data-findzia-embedded] .fz-home .fz-one .fz-one-stage{height:clamp(390px,var(--one-image-height,440px),620px)!important;min-height:0!important;width:100%!important;border:1px solid var(--line)!important;border-radius:24px!important;background:var(--paper)!important;color:var(--ink)!important;box-shadow:none!important;overflow:hidden!important}
+ html[data-findzia-embedded] .fz-one :is(.fz-one-aura,.fz-one-shade,.fz-one-scan,.fz-one-spark){display:none!important}
+ html[data-findzia-embedded] .fz-one .fz-one-heading{inset:20px 20px auto!important;max-width:none!important;text-align:start!important;background:none!important;border:0!important;border-radius:0!important;padding:0!important;box-shadow:none!important;backdrop-filter:none!important;color:var(--ink)!important;text-shadow:none!important;font-size:14px!important;line-height:1.5!important;font-weight:400!important}
+ html[data-findzia-embedded] .fz-home .fz-one .fz-one-image{inset:60px 18px auto!important;width:calc(100% - 36px)!important;height:calc(100% - 280px)!important;object-fit:contain!important;object-position:center!important;border-radius:16px!important}
+ html[data-findzia-embedded] .fz-home .fz-search-wait .fz-one-image{height:calc(100% - 215px)!important;opacity:1!important}
+ html[data-findzia-embedded] .fz-one .fz-search-motif{inset:58px 0 235px!important;opacity:1!important;display:flex!important;justify-content:center!important;align-items:center!important;color:var(--green)!important;font-size:16px!important}
+ html[data-findzia-embedded] .fz-search-wait .fz-search-motif{inset-block-end:175px!important}
+ html[data-findzia-embedded] .fz-search-slip{--slip-x:0px;--slip-r:0deg;position:absolute!important;display:grid!important;place-items:center!important;width:78px!important;height:96px!important;border:1px solid var(--line)!important;border-radius:18px!important;background:var(--paper)!important;box-shadow:0 10px 24px #20332608!important;transform:translateX(var(--slip-x)) rotate(var(--slip-r));animation:findzia-browse 3.6s ease-in-out infinite!important}
+ html[data-findzia-embedded] .fz-search-slip:first-child{--slip-x:-52px;--slip-r:-12deg;opacity:.6;animation-delay:-.6s!important}
+ html[data-findzia-embedded] .fz-search-slip:nth-child(2){z-index:1!important;background:var(--light)!important}
+ html[data-findzia-embedded] .fz-search-slip:last-child{--slip-x:52px;--slip-r:12deg;opacity:.6;animation-delay:-1.2s!important}
+ html[data-findzia-embedded] .fz-search-slip svg{width:30px!important;height:30px!important}
+ html[data-findzia-embedded] .fz-one .fz-one-details{padding:18px 20px 20px!important;gap:6px!important;color:var(--ink)!important;text-shadow:none!important}
+ html[data-findzia-embedded] .fz-one :is(.fz-one-title,.fz-one-specs,.fz-one-store,.fz-one-shipping,.fz-one-price-source,.fz-one-currency,.fz-one-glyph,.fz-one-price-wait){color:var(--ink)!important;text-shadow:none!important}
+ html[data-findzia-embedded] .fz-one .fz-one-title{font-size:20px!important;line-height:1.45!important}
+ html[data-findzia-embedded] .fz-one :is(.fz-one-specs,.fz-one-shipping,.fz-one-price-source){color:var(--muted)!important}
+ html[data-findzia-embedded] .fz-one .fz-one-price{background:none!important;border:0!important;box-shadow:none!important;border-radius:0!important;min-height:48px!important;height:auto!important;padding:0!important;margin:4px 0!important;color:var(--ink)!important;gap:8px!important}
+ html[data-findzia-embedded] .fz-one .fz-one-number{font-family:inherit!important;font-weight:500!important;letter-spacing:-1px!important}
+ html[data-findzia-embedded] .fz-one :is(.fz-one-reel,.fz-one-face){background:none!important;box-shadow:none!important;border:0!important;border-radius:0!important;color:var(--ink)!important}
+ html[data-findzia-embedded] .fz-one .fz-one-reel:before,html[data-findzia-embedded] .fz-one .fz-one-reel:after{display:none!important}
+ html[data-findzia-embedded] .fz-one .fz-one-price-wait{font-size:24px!important;animation:none!important}
+ html[data-findzia-embedded] .fz-one .fz-one-log{border-top:1px solid var(--line)!important;padding-top:10px!important;margin-top:10px!important}
+ html[data-findzia-embedded] .fz-one .fz-one-log-caption{font-size:11px!important;color:var(--muted)!important;line-height:1.5!important}
+ html[data-findzia-embedded] .fz-one .fz-one-log-caption:before{background:var(--green)!important;box-shadow:none!important}
+ html[data-findzia-embedded] .fz-one .fz-one-log-lines{height:98px!important}
+ html[data-findzia-embedded] .fz-one .fz-one-log-line{height:18px!important;min-height:18px!important;font:400 10px/18px 'DM Sans','Noto Sans Arabic',Arial,sans-serif!important}
+ html[data-findzia-embedded] .fz-one :is(.fz-one-log-mark,.fz-one-log-site,.fz-one-log-price){color:var(--ink)!important}
+ html[data-findzia-embedded] .fz-one .fz-one-log-product{color:var(--muted)!important}
+ html[data-findzia-embedded] .fz-one .fz-one-actions{gap:4px!important;flex-wrap:wrap!important;padding:0!important}
+ html[data-findzia-embedded] .fz-one .fz-one-small{font-size:12px!important;flex:0 1 auto!important;min-width:70px!important;padding-inline:10px!important;color:var(--ink)!important}
+ html[data-findzia-embedded] .fz-one .fz-one-icon{border:0!important;background:none!important;border-radius:12px!important;box-shadow:none!important;color:var(--muted)!important}
+ html[data-findzia-embedded] .fz-one .fz-one-open{background:#dce7d6!important;color:#203326!important;box-shadow:none!important;border:0!important;border-radius:16px!important;font-weight:500!important}
+ html[data-findzia-embedded] .fz-one .fz-one-badge{background:var(--light)!important;border:0!important;color:var(--ink)!important;inset:18px 16px auto auto!important}
+ html[data-findzia-embedded] .fz-one[data-state=question] .fz-one-stage{height:auto!important;min-height:320px!important;padding-top:60px!important}
+ html[data-findzia-embedded] .fz-one[data-state=question] :is(.fz-one-image,.fz-search-motif){display:none!important}
+ html[data-findzia-embedded] .fz-one[data-state=question] .fz-one-details{position:relative!important;inset:auto!important}
+ html[data-findzia-embedded] .fz-one :is(.fz-one-question-note,.fz-one-answer-detail,.fz-one-question-skip){color:var(--muted)!important}
+ html[data-findzia-embedded] .fz-one .fz-one-answer{background:var(--light)!important;color:var(--ink)!important;border:1px solid var(--line)!important;box-shadow:none!important}
+ html[data-findzia-embedded] .fz-one .fz-one-answer-arrow{color:var(--green)!important}
+ html[data-findzia-embedded] .fz-one:is([data-state=selected],[data-state=settling]) .fz-one-stage{display:flex!important;flex-direction:column!important;height:auto!important;min-height:0!important;padding-top:58px!important}
+ html[data-findzia-embedded] .fz-one:is([data-state=selected],[data-state=settling]) .fz-one-image{position:relative!important;inset:auto!important;align-self:center!important;width:calc(100% - 32px)!important;height:clamp(180px,38svh,420px)!important;order:1!important}
+ html[data-findzia-embedded] .fz-one:is([data-state=selected],[data-state=settling]) .fz-one-image:not([data-active=true]){display:none!important}
+ html[data-findzia-embedded] .fz-one:is([data-state=selected],[data-state=settling]) .fz-one-details{position:relative!important;inset:auto!important;width:100%!important;order:2!important}
+ html[data-findzia-embedded] .fz-one:is([data-state=selected],[data-state=settling]) .fz-one-heading{max-width:43%!important}
+ html[data-findzia-embedded] .fz-one:not([data-state=pending]) .fz-search-motif{display:none!important}
+ html[data-findzia-embedded] .fz-one [hidden]{display:none!important}
+ @media(prefers-reduced-motion:reduce){html[data-findzia-embedded] .fz-search-slip{animation:none!important}}
+}
+@keyframes findzia-browse{0%,100%{transform:translateX(var(--slip-x)) translateY(0) rotate(var(--slip-r))}50%{transform:translateX(var(--slip-x)) translateY(-7px) rotate(var(--slip-r))}}
+
+/* Close is a quiet affordance with a full touch target, never the primary action. */
+@layer findzia-hub-embed {
+ html[data-findzia-embedded] :is(.svc-dialog-head>button,[data-dark-menu-close],.fza-header>.fza-round:last-child,.fz-guide-close,.fz-one-dialog-head>button,.fz-insights-close,[data-preferences-close],[data-refine-close],.fz-camera-head>button:first-child){display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:none!important;width:44px!important;height:44px!important;min-width:44px!important;min-height:44px!important;padding:12px!important;border:0!important;border-radius:8px!important;background:transparent!important;box-shadow:none!important;font-size:21px!important;line-height:1!important;font-weight:300!important;color:inherit!important;opacity:.65!important}
+ html[data-findzia-embedded] :is(.svc-dialog-head>button,[data-dark-menu-close],.fza-header>.fza-round:last-child,.fz-guide-close,.fz-one-dialog-head>button,.fz-insights-close,[data-preferences-close],[data-refine-close],.fz-camera-head>button:first-child):focus-visible{outline:1px solid currentColor!important;outline-offset:-7px!important}
+ html[data-findzia-embedded] :is(.svc-dialog-head>button,[data-dark-menu-close],.fza-header>.fza-round:last-child,.fz-guide-close,.fz-one-dialog-head>button,.fz-insights-close,[data-preferences-close],[data-refine-close],.fz-camera-head>button:first-child) svg{width:18px!important;height:18px!important;stroke-width:1.5!important}
+ html[data-findzia-embedded] #svc-directory-title:focus{outline:0!important}
+}
