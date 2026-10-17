@@ -30,6 +30,11 @@ test('clean photo selection is free and opens the original layer without a Space
  const context=vm.createContext({document,window,console,sceneText,designPresentation,createStyleTour,MutationObserver:window.MutationObserver,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,bindStoreLinks,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
  try{
   vm.runInContext(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),context);
+  let photoOpens=0;document.querySelector('#file-input').click=()=>photoOpens++;
+  await vm.runInContext('init()',context);
+  document.querySelector('[data-action=add-photo]').click();
+  assert.equal(photoOpens,1,'one tap invokes the native photo picker synchronously');
+  assert.equal(dialog.open,false,'no duplicate source chooser');
   document.querySelector('[data-action=options]').click();assert.equal(preferences.open,true);
   document.querySelector('#design-request').value='Keep the door';
   document.querySelector('[data-action=options-done]').click();assert.equal(preferences.open,false);

@@ -8,7 +8,7 @@ import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} 
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene1';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene3';
 import {sceneText} from './space-scene-copy.js?v=20261017-scene1';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
@@ -221,7 +221,7 @@ function showSheet(html,mode){
  else localCatalog.clear();
  const key=mode==='item'?`${state.job.id}:${state.design}:${state.itemId}`:mode;
  const preserve=$('#sheet').open&&sheetMode===mode&&$('#sheet-content').dataset.viewKey===key,top=$('#sheet').scrollTop;
- sheetMode=mode;
+ sheetMode=mode;$('#sheet').dataset.mode=mode;
  if(preserve)patchHTML($('#sheet-content'),html);else $('#sheet-content').innerHTML=html;
  $('#sheet-content').dataset.viewKey=key;
  if(!$('#sheet').open){$('#sheet').showModal();}
@@ -276,7 +276,7 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'studio-play':styleTour.toggle();break;
  case 'design-slide':{const grid=$('#design-grid'),card=grid.querySelector('[data-design-index="'+index+'"]');if(card)grid.scrollBy({left:card.getBoundingClientRect().left-grid.getBoundingClientRect().left,behavior:reduced?'instant':'smooth'});break;}
  case 'home':resetRoom();view('home');break;
- case 'add-photo':showSheet(`<div class="scene-source"><button class="scene-primary" data-action="camera">${icon('camera')}${esc(sceneText(document.documentElement.lang,'take'))}</button><button class="scene-primary" data-action="upload">${icon('folder')}${esc(sceneText(document.documentElement.lang,'photos'))}</button></div>`,'photo-source');break;
+ case 'add-photo':$('#file-input').click();break;
  case 'options':$('#space-options').showModal();break;
  case 'options-done':$('#space-options').close();break;
  case 'upload':if(sheetMode==='photo-source')closeSheet();$('#file-input').click();break;
