@@ -21,6 +21,7 @@ for(const code of ['credits_exhausted','credits_unavailable'])test('results laye
  const {document,window}=parseHTML('<html><body><section id="findzia-home-spaces"></section></body></html>');globalThis.document=document;
  window.HTMLElement.prototype.showModal=function(){this.open=true;};window.HTMLElement.prototype.close=function(){this.open=false;};
  globalThis.fetch=async()=>new Response('crop',{headers:{'Content-Type':'image/jpeg'}});
+ document.querySelector('#findzia-home-spaces').fzBilling={refresh(){},renderStamp:()=> 'catalog',renderCreditPacks(body){const row=document.createElement('button');row.textContent='Starter · 14 credits · $7.77';body.replaceChildren(row);return true;}};
  const layer=createOriginalLayer({request:async()=>({ok:true}),getLanguage:()=> 'en'});
  let attempts=0,allow=false;
  try{
@@ -37,7 +38,7 @@ for(const code of ['credits_exhausted','credits_unavailable'])test('results laye
   Object.defineProperty(frame,'contentDocument',{value:child.document});Object.defineProperty(frame,'contentWindow',{value:{Event:child.window.Event,File}});
   frame.dispatchEvent(new window.Event('load'));await settle();await settle();
   const panel=document.querySelector('.original-results-blocked');assert.equal(panel.hidden,false);assert.equal(frame.hidden,true);
-  assert.equal(panel.querySelector('.primary').hidden,code!=='credits_exhausted');
+  assert.equal(panel.querySelector('.primary').hidden,true);assert.equal(panel.querySelector('.text-button').hidden,code==='credits_exhausted');if(code==='credits_exhausted')assert.match(panel.querySelector('.original-credit-packs').textContent,/14 credits.*7\.77/);
   if(code==='credits_exhausted')assert.match(panel.textContent,/out of search credits/);else assert.match(panel.textContent,/Could not check/);
   t.mock.timers.tick(40000);await settle();assert.equal(attempts,1);assert.equal(panel.hidden,false,'deadline must not replace the balance error');
   allow=true;panel.querySelector('.text-button').click();await settle();await settle();

@@ -55,7 +55,7 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
  root.addEventListener('click',event=>{
   if(event.target.closest?.('[data-account-provider],[data-dark-settings],[data-profile-settings],.fz-account button'))rememberAccountRoom();
  },true);
- for(const name of ['i18n','motion','support','account','billing'])await import('./findzia/'+name+'.js'+(['account','billing'].includes(name)?'?v=20261015-ios2':''));
+ for(const name of ['i18n','motion','support','account','billing'])await import('./findzia/'+name+'.js'+(['account','billing'].includes(name)?'?v=20261017-scene5':''));
  // resumeLogin opens its own status view and owns the original code exchange.
  if(accountReturn.legacy&&!accountReturn.auth)root.fzAccount.open(accountReturn.view);
  const done=root.querySelector('[data-account-close]');

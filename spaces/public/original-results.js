@@ -24,8 +24,9 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  const waiting=document.createElement('div');waiting.className='original-results-waiting';waiting.setAttribute('aria-hidden','true');
  waiting.innerHTML='<span class="search-spinner"></span><span class="results-skeletons"><i></i><i></i></span>';body.append(waiting);
  const blocked=document.createElement('section');blocked.className='original-results-blocked';blocked.hidden=true;blocked.setAttribute('role','status');
+ const packs=document.createElement('div');packs.className='original-credit-packs';let packsKey='';
  const blockedTitle=document.createElement('h2'),blockedText=document.createElement('p'),addCredits=document.createElement('button'),retryBlocked=document.createElement('button');
- addCredits.type=retryBlocked.type='button';addCredits.className='primary';retryBlocked.className='text-button';blocked.append(blockedTitle,blockedText,addCredits,retryBlocked);body.append(blocked);
+ addCredits.type=retryBlocked.type='button';addCredits.className='primary';retryBlocked.className='text-button';blocked.append(blockedTitle,blockedText,packs,addCredits,retryBlocked);body.append(blocked);
  addCredits.addEventListener('click',()=>{close();openAccountModal('plans');});
  retryBlocked.addEventListener('click',()=>{if(current&&!current.busy&&!current.loading)run(current);});
  bar.append(thumbnail,heading,back);layer.append(bar,tools,body);document.body.append(layer);
@@ -60,7 +61,14 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    blockedTitle.hidden=!credits;
    blockedText.textContent=credits?text('Add credits to keep searching.','أضف رصيدًا لمواصلة البحث.'):session.blockedMessage;
    addCredits.hidden=!credits;addCredits.textContent=text('Add credits','إضافة رصيد');
-   retryBlocked.textContent=text('Try again','حاول مجددًا');
+   retryBlocked.textContent=text('Try again','حاول مجددًا');retryBlocked.hidden=credits;packs.hidden=!credits;
+   if(credits){
+    const billing=document.querySelector('#findzia-home-spaces')?.fzBilling;
+    const key=session.key+'|'+getLanguage()+'|'+(billing?.renderStamp?.('plans')||'');
+    if(packsKey!==key||!packs.childElementCount){packsKey=key;billing?.renderCreditPacks?.(packs,{onChoose:close});}
+    addCredits.hidden=!!packs.childElementCount;
+   }
+
   }
   const searching=!isBlocked&&!!(session.busy||session.loading);
   const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');

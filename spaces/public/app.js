@@ -1,15 +1,15 @@
 import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
-import {createOriginalLayer} from './original-results.js?v=20261016-guide1';
+import {createOriginalLayer} from './original-results.js?v=20261017-scene5';
 import {bindStoreLinks} from './store-links.js';
-import {mountFindzia} from './findzia-shell.js?v=20261015-ios2';
+import {mountFindzia} from './findzia-shell.js?v=20261017-scene5';
 import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} from './piece-intent.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene4';
-import {sceneText} from './space-scene-copy.js?v=20261017-scene4';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene5';
+import {sceneText} from './space-scene-copy.js?v=20261017-scene5';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 bindStoreLinks(document);
@@ -305,7 +305,7 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'designs':pointFocus=null;closeSheet();view('designs');break;
  case 'choose':await choose(index);break;
  case 'retry':el.disabled=true;generationStarted=Date.now();if(await changeJob('/retry',{design:index})){renderKey='';renderDesigns();poll();}break;
- case 'original':showSheet(`<img class="preview-photo" src="${esc(state.job.original)}" alt="Original room"><div class="preview-actions"><h3>Your original room</h3></div>`,'preview');break;
+ case 'original':showSheet(`<figure class="original-preview"><figcaption>${esc(translate('Your original room','صورتك الأصلية'))}</figcaption><img src="${esc(state.job.original)}" alt="${esc(translate('Your original room','صورتك الأصلية'))}"></figure>`,'preview');break;
  case 'compare':state.compare=!state.compare;renderShop();break;
  case 'photo-pick':pickFromPhoto(e,el);break;
  case 'pieces':browsePieces();break;
