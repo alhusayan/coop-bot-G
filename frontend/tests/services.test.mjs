@@ -14,7 +14,7 @@ test('services trial is separate, unindexed, and connects the original account a
   const urls=[...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]);
   for(const path of [...urls,...Object.entries(accountAssets).filter(([key])=>key!=='images').map(([,value])=>value),...Object.values(accountAssets.images)])assert.equal((await fetch(origin+path)).status,200,path);
   assert.doesNotMatch(html,/<script[^>]*findzia-(?:shell|choice|ads|analytics)\./);
-  const home=await(await fetch(origin+'/')).text();assert.match(home,/class="project-grid"/);assert.doesNotMatch(home,/data-services/);
+  const home=await(await fetch(origin+'/')).text();assert.match(home,/class="home-hero"/);assert.doesNotMatch(home,/data-services/);
  }finally{await new Promise(r=>server.close(r));}
 });
 
@@ -46,6 +46,7 @@ test('continuous results retain every row and sort the complete set',()=>{
 });
 
 import {serviceWhatsApp,serviceLocation} from '../source/findzia-services-state.js';
+import {savedServiceArea,normalizeServiceArea} from '../source/findzia-services-state.js';
 import {serviceDirectory,serviceCount} from '../source/findzia-services-catalog.js';
 test('WhatsApp requires an explicit safe link and its published business source',()=>{
  const row={tel:'tel:+96555551234',website:'https://example.com',whatsapp_source:'https://example.com',whatsapp:'https://wa.me/96555551234'};
@@ -60,6 +61,16 @@ test('location resolves an area and supported country without inventing either',
  assert.deepEqual(serviceLocation({countryCode:'GB',locality:'Camden',city:'London'}),{country:'GB',area:'Camden, London'});
  assert.equal(serviceLocation({countryCode:'KW',countryName:'Kuwait'}),null);
  assert.equal(serviceLocation({countryCode:'ZZ',locality:'Unknown'}),null);
+});
+test('saved areas validate persisted values and spelling assistance respects country and ambiguity',()=>{
+ assert.deepEqual(savedServiceArea('{"area":" Salmiya ","country":"kw"}'),{area:'Salmiya',country:'KW'});
+ for(const raw of ['not-json','null','{}','{"area":{},"country":"KW"}','{"area":"London","country":"ZZ"}'])assert.equal(savedServiceArea(raw),null);
+ for(const [input,country,expected] of [
+  ['السالميه','KW','السالمية'],['السالمبة','KW','السالمية'],['Salmiyaa','KW','Salmiya'],['Hawali','KW','Hawally'],
+  ['الرياضض','SA','الرياض'],['Dubia','AE','Dubai'],['Lonodn','GB','London'],['الرقعي','KW','الرقعي'],
+  ['Slamiya','KW','Slamiya'], // Equally close to Salmiya and Shamiya: leave it alone.
+  ['Abu Dhabi','KW','Abu Dhabi'],['St Albans','GB','St Albans'],['حولي، الكويت','KW','حولي، الكويت'],['Block 10','KW','Block 10']
+ ])assert.equal(normalizeServiceArea(input,country),expected,input);
 });
 test('home directory includes custom work and maintenance without acting as a search whitelist',()=>{
  assert.ok(serviceDirectory.length>=7);assert.ok(serviceCount>=90);

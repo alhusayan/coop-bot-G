@@ -47,12 +47,11 @@
    const main=$('#services-main');if(!main)return;main.prepend(entry);doc.dataset.experience='services';
    primary.onclick=()=>$('#svc-browse')?.click();
    const form=$('#svc-form'),photo=$('#svc-photo-panel'),page=$('.svc-page');
-   const request=document.createElement('h2');request.className='experience-request';request.setAttribute('dir','auto');request.setAttribute('data-no-i18n','');form.prepend(request);
    state=()=>{
     const value=$('#svc-query').value.trim(),hasPhoto=!photo.hidden,results=page.dataset.hasResults==='true';
     const stage=results?'results':value||hasPhoto?'request':'start';
     if(doc.dataset.experienceStage!==stage)doc.dataset.experienceStage=stage;
-    entry.hidden=stage!=='start';setText(request,value);request.hidden=!value;
+    entry.hidden=stage!=='start';
    };
    document.addEventListener('findzia:header-state',state);$('#svc-query').addEventListener('input',state);
    observe=[page,photo,form,$('#svc-submit')];

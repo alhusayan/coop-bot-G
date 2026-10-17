@@ -3,7 +3,7 @@ const root=document.querySelector('[data-services]'),$=s=>root.querySelector(s);
 const api='https://api.findzia.com',assets=JSON.parse(root.dataset.serviceAssets);
 const read=(key,fallback='')=>{try{return localStorage.getItem(key)||fallback;}catch{return fallback;}};
 const write=(key,value)=>{try{localStorage.setItem(key,value);}catch{}};
-const {serviceCountries:codes,initialServiceCountry,serviceSearchCredits,serviceResults,serviceWhatsApp,serviceLocation}=await import(assets.state);
+const {serviceCountries:codes,initialServiceCountry,serviceSearchCredits,serviceResults,serviceWhatsApp,serviceLocation,savedServiceArea,normalizeServiceArea}=await import(assets.state);
 let country=initialServiceCountry(read,{zone:Intl.DateTimeFormat().resolvedOptions().timeZone,languages:navigator.languages||[navigator.language]});
 let language=read('findzia-lang',navigator.language?.split('-')[0]||'en');
 const {serviceDirectory}=await import(assets.catalog);
@@ -11,8 +11,8 @@ let locating=false,locationSequence=0,pendingPhoto=null,photoSequence=0,searchAb
 let generation=0,busy=false,retrieving=false,results=null,ready=false,creditConfig=null;
 const copy={en:{home:'Findzia home',credits:'Your credits',eyebrow:'FINDZIA · SERVICES',title:'What do you need?',intro:'Choose a service. Find someone nearby.',need:'What do you need?',where:'City or area',queryExample:'Or type any service…',areaExample:'e.g. Salmiya',search:'Find someone nearby',country:'Country',costPending:'Search uses your Findzia credits.',popular:'A place to start',any:'Something else? Just type the service you need.',sort:'Sort by',relevance:'Best match',rating:'Highest rated',resultsNote:'Google Maps listings · Confirm details with the provider.',step1:'Tell us what you need',step1body:'A service and an area. That’s all.',step2:'Meet your options',step2body:'See business details and published reviews.',step3:'Make the connection',step3body:'Call or visit their website directly.',services:'Services',preview:'Preview · Made to make life easier.',preferences:'Your preferences',language:'Language',appearance:'Appearance',auto:'Automatic',light:'Light',dark:'Dark',close:'Close',call:'Call',website:'Website',maps:'Map',noPhone:'No phone number published',noRating:'No published rating',empty:'No specialists found for this search. Try a nearby area or a more specific service. No credits used.',failed:'We couldn’t complete this search. Please try again.',waiting:'Finding specialists for',slow:'Still checking local listings. Your results will appear here.',checking:'Checking your credits…',unavailable:'Couldn’t connect to your account. Reload the page to try again.',reload:'Reload',reviews:'reviews',source:'Google Maps',count:'results',cost:'credits per search · No results, no charge.',free:'Search is currently free.',remaining:'credits',edit:'Change',cancel:'Cancel',details:'Details',noSearchCredit:'You need more search credits. Add credits to continue.',addCredits:'Add credits'},ar:{home:'فاينزيا الرئيسية',credits:'رصيدك',eyebrow:'فاينزيا · الخدمات',title:'شنو تحتاج؟',intro:'اختار الخدمة، ونلقى لك مختص قريب.',need:'شنو تحتاج؟',where:'المدينة أو المنطقة',queryExample:'أو اكتب أي خدمة تحتاجها…',areaExample:'مثلاً: السالمية',search:'ابحث عن مختص قريب',country:'الدولة',costPending:'البحث من رصيدك في فاينزيا.',popular:'من وين نبدأ؟',any:'تحتاج خدمة ثانية؟ اكتبها في خانة البحث.',sort:'ترتيب حسب',relevance:'الأكثر صلة',rating:'الأعلى تقييماً',resultsNote:'بيانات خرائط Google · تأكد من التفاصيل مع المختص.',step1:'قل لنا شنو تحتاج',step1body:'اسم الخدمة والمنطقة. وبس.',step2:'شوف خياراتك',step2body:'بيانات المختصين وتقييماتهم المنشورة.',step3:'تواصل مباشرة',step3body:'اتصل أو افتح موقعهم بكل سهولة.',services:'الخدمات',preview:'نسخة تجريبية · عشان تصير حياتك أسهل.',preferences:'تفضيلاتك',language:'اللغة',appearance:'المظهر',auto:'تلقائي',light:'فاتح',dark:'داكن',close:'إغلاق',call:'اتصل',website:'الموقع',maps:'الخرائط',noPhone:'رقم الهاتف غير منشور',noRating:'لا يوجد تقييم منشور',empty:'ما لقينا مختصين لهذا البحث. جرّب منطقة قريبة أو وصف أوضح للخدمة. ما انخصم رصيد.',failed:'تعذّر إكمال البحث. حاول مرة ثانية.',waiting:'نبحث لك عن مختصين في',slow:'ما زلنا نبحث في القوائم المحلية. النتائج بتظهر هنا.',checking:'نتحقق من رصيدك…',unavailable:'تعذّر الاتصال بحسابك. حدّث الصفحة للمحاولة مجددًا.',reload:'تحديث الصفحة',reviews:'تقييم',source:'خرائط Google',count:'نتائج',cost:'أرصدة للبحث · البحث بدون نتائج مجاني.',free:'البحث مجاني حالياً.',remaining:'رصيد',edit:'تعديل',cancel:'إلغاء',details:'التفاصيل',noSearchCredit:'رصيد البحث غير كافٍ. أضف رصيدًا لمتابعة البحث.',addCredits:'إضافة رصيد'}};
 
-Object.assign(copy.en,{allServices:'All services',directoryIntro:'Find help for every part of life.',directorySearch:'Search all services…',customService:'Search for',useLocation:'Use my location',enterArea:'Enter area',changeArea:'Change',locating:'Finding your area…',locationDenied:'Location permission was denied. You can enter your area below.',locationFailed:'We couldn’t find your area. Please enter it below.',locationUnsupported:'This country is not supported yet. Choose a country and area below.',chooseArea:'Choose your area to find nearby help.',whatsapp:'WhatsApp',resultsNote:'Google Maps listings · Contact details published by each business.'});
-Object.assign(copy.ar,{allServices:'كل الخدمات',directoryIntro:'كل اللي تحتاجه، في مكان واحد.',directorySearch:'ابحث في كل الخدمات…',customService:'ابحث عن',useLocation:'استخدم موقعي',enterArea:'اكتب المنطقة',changeArea:'تغيير',locating:'نحدد منطقتك…',locationDenied:'ما تم السماح بالموقع. تقدر تكتب منطقتك تحت.',locationFailed:'ما قدرنا نحدد منطقتك. اكتبها تحت ونكمل.',locationUnsupported:'هالدولة مو مدعومة حالياً. اختار الدولة والمنطقة تحت.',chooseArea:'حدد منطقتك عشان نلقى لك مختص قريب.',whatsapp:'واتساب',resultsNote:'بيانات خرائط Google · وسائل التواصل المنشورة من المختص.'});
+Object.assign(copy.en,{resultsHeading:'Results',allServices:'All services',directoryIntro:'Find help for every part of life.',directorySearch:'Search all services…',customService:'Search for',useLocation:'Use my location',enterArea:'Enter area',changeArea:'Change',locating:'Finding your area…',locationDenied:'Location permission was denied. You can enter your area below.',locationFailed:'We couldn’t find your area. Please enter it below.',locationUnsupported:'This country is not supported yet. Choose a country and area below.',chooseArea:'Choose your area to find nearby help.',whatsapp:'WhatsApp',resultsNote:'Google Maps listings · Contact details published by each business.'});
+Object.assign(copy.ar,{resultsHeading:'نتائج البحث',allServices:'كل الخدمات',directoryIntro:'كل اللي تحتاجه، في مكان واحد.',directorySearch:'ابحث في كل الخدمات…',customService:'ابحث عن',useLocation:'استخدم موقعي',enterArea:'اكتب المنطقة',changeArea:'تغيير',locating:'نحدد منطقتك…',locationDenied:'ما تم السماح بالموقع. تقدر تكتب منطقتك تحت.',locationFailed:'ما قدرنا نحدد منطقتك. اكتبها تحت ونكمل.',locationUnsupported:'هالدولة مو مدعومة حالياً. اختار الدولة والمنطقة تحت.',chooseArea:'حدد منطقتك عشان نلقى لك مختص قريب.',whatsapp:'واتساب',resultsNote:'بيانات خرائط Google · وسائل التواصل المنشورة من المختص.'});
 
 Object.assign(copy.en,{newSearch:'New search',camera:'Show us with a photo',cameraHint:'Take a photo. Find the right service.',gallery:'Photos',photoPrivacy:'AI analyses your photo to suggest a service.',photoReady:'Find help from your photo',photoPreparing:'Preparing your photo…',photoAnalysing:'Identifying the service and finding nearby help…',photoChoose:'Which service do you need? Choose to see nearby specialists.',photoUnknown:'We couldn’t identify a service. Try a clearer photo or choose a service below. No credits used.',photoInvalid:'This photo could not be read. Try a JPG, PNG or another photo.',photoUnavailable:'Photo recognition is unavailable right now. Try again or choose a service. No credits used.',removePhoto:'Remove photo',photoLocation:'Choose your area to find the right specialist.',photoRetry:'Try photo again'});
 Object.assign(copy.ar,{newSearch:'بحث جديد',camera:'صوّر اللي تحتاجه',cameraHint:'صوّر المشكلة، ونلقى لك الخدمة.',gallery:'الصور',photoPrivacy:'نحلل صورتك بالذكاء الاصطناعي لاقتراح الخدمة.',photoReady:'نلقى الخدمة من صورتك',photoPreparing:'نجهز صورتك…',photoAnalysing:'نتعرف على الخدمة ونبحث لك عن مختص قريب…',photoChoose:'شنو الخدمة اللي تحتاجها؟ اختار ونطلع لك المختصين.',photoUnknown:'ما قدرنا نحدد الخدمة. جرّب صورة أوضح أو اختار الخدمة تحت. ما انخصم رصيد.',photoInvalid:'ما قدرنا نقرأ الصورة. جرّب صورة JPG أو PNG أو صوّر مرة ثانية.',photoUnavailable:'تحليل الصور مو متاح حالياً. جرّب مجدداً أو اختار الخدمة. ما انخصم رصيد.',removePhoto:'إزالة الصورة',photoLocation:'حدد منطقتك عشان نلقى المختص المناسب.',photoRetry:'حلل الصورة مرة ثانية'});
@@ -62,13 +62,25 @@ function localize(){
 function updateLocation(){
  const area=$('#svc-area').value.trim();
  $('#svc-locate').classList.toggle('is-set',!!area);
- text($('#svc-locate-label'),locating?t('locating'):area||t('useLocation'));
- text($('#svc-manual'),area?t('changeArea'):t('enterArea'));
+ const label=locating?t('locating'):t('useLocation');
+ $('#svc-locate').setAttribute('aria-label',label);$('#svc-locate').title=label;$('#svc-locate').setAttribute('aria-busy',String(locating));
+ text($('#svc-manual'),area||t('enterArea'));$('#svc-manual').setAttribute('aria-label',area?t('changeArea')+' · '+area:t('enterArea'));
 }
 function manualArea(focus=true){
  locationSequence++;locating=false;$('#svc-locate').disabled=false;
  $('#svc-manual-fields').hidden=false;$('#svc-manual').setAttribute('aria-expanded','true');updateLocation();
- if(focus)$('#svc-area').focus({preventScroll:true});
+ if(focus){$('#svc-area').focus({preventScroll:true});keepAreaVisible();setTimeout(keepAreaVisible,320);}
+}
+function keepAreaVisible(){
+ if(document.activeElement!==$('#svc-area'))return;
+ requestAnimationFrame(()=>{
+  const input=$('#svc-area'),rect=input.getBoundingClientRect();
+  const height=Math.min(window.innerHeight,window.visualViewport?.height||window.innerHeight);
+  if(rect.bottom>height-28||rect.top<16)input.scrollIntoView({block:'center',behavior:'instant'});
+ });
+}
+function normalizeArea(){
+ $('#svc-area').value=normalizeServiceArea($('#svc-area').value,country);updateLocation();remember();
 }
 async function locateArea(){
  if(locating)return false;
@@ -76,7 +88,7 @@ async function locateArea(){
  const status=$('#svc-location-status');status.hidden=true;
  try{
   if(!navigator.geolocation)throw Error('unsupported');
-  const position=await new Promise((resolve,reject)=>navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:false,timeout:12000,maximumAge:0}));
+  const position=await new Promise((resolve,reject)=>navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:false,timeout:12000,maximumAge:300000}));
   if(sequence!==locationSequence)return false;
   const url=new URL('https://api.bigdatacloud.net/data/reverse-geocode-client');
   url.searchParams.set('latitude',position.coords.latitude.toFixed(4));url.searchParams.set('longitude',position.coords.longitude.toFixed(4));url.searchParams.set('localityLanguage',language);
@@ -87,10 +99,11 @@ async function locateArea(){
   if(!found)throw Error(data.countryCode&&!codes.includes(data.countryCode)?'country':'geocode');
   setCountry(found.country);$('#svc-area').value=found.area;
   $('#svc-manual-fields').hidden=true;$('#svc-manual').setAttribute('aria-expanded','false');
-  remember();return true;
+  write('findzia-services-location-denied','');remember();return true;
  }catch(error){
   if(sequence!==locationSequence)return false;
-  manualArea(false);status.hidden=false;status.textContent=t(error.code===1?'locationDenied':error.message==='country'?'locationUnsupported':'locationFailed');return false;
+  if(error.code===1)write('findzia-services-location-denied','1');
+  manualArea();status.hidden=false;status.textContent=t(error.code===1?'locationDenied':error.message==='country'?'locationUnsupported':'locationFailed');return false;
  }finally{if(sequence===locationSequence){locating=false;$('#svc-locate').disabled=false;updateLocation();}}
 }
 function renderDirectory(){
@@ -107,7 +120,7 @@ function renderDirectory(){
   rows.forEach(row=>{const button=node('button','',row[language==='ar'?1:0]);button.type='button';button.onclick=()=>{$('#svc-directory').close();chooseService(row[language==='ar'?1:0]);};list.append(button);});
   detail.append(list);box.append(detail);
  }
- const custom=$('#svc-directory-custom');custom.hidden=term.length<2;text(custom,t('customService')+' “'+$('#svc-directory-query').value.trim()+'”');
+ $('#svc-directory-submit').disabled=term.length<2;
 }
 const motion=()=>matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth';
 function setLanguage(value){language=window.FindziaHomeCopy?.languages.includes(value)?value:'en';write('findzia-lang',language);window.FindziaLocale?.choose(language);window.FindziaI18n?.set(root,language);localize();}
@@ -121,7 +134,7 @@ function renderResults(focus=true){
  $('#svc-results').hidden=!view.total;
  $('#svc-suggestions').hidden=!!view.total;
  $('#svc-form').hidden=!!view.total;$('#svc-photo-panel').hidden=!!view.total||!pendingPhoto;
- text($('#svc-results-title'),results.query);
+ text($('#svc-results-title'),t('resultsHeading'));
  text($('#svc-results-location'),`${results.area} · ${view.total} ${t('count')}`);
  const box=$('#svc-cards');box.replaceChildren();
  view.items.forEach((row,index)=>{
@@ -138,11 +151,11 @@ function renderResults(focus=true){
   const actions=node('div','svc-card-actions');
   const hasPhone=/^tel:\+?\d{7,15}$/.test(row.tel);
   if(hasPhone){
-   const call=link(t('call'),row.tel,'call','svc-call');
+   const call=link('',row.tel,'call','svc-call');call.title=t('call');
    call.setAttribute('aria-label',t('call')+' '+row.title+' '+row.phone);
    actions.append(call);
   }
-  const whatsapp=serviceWhatsApp(row);if(whatsapp)actions.append(link(t('whatsapp'),whatsapp,'whatsapp','svc-whatsapp'));
+  const whatsapp=serviceWhatsApp(row);if(whatsapp){const contact=link('',whatsapp,'whatsapp','svc-whatsapp');contact.title=t('whatsapp');contact.setAttribute('aria-label',t('whatsapp')+' · '+row.title);actions.append(contact);}
   const detail=node('div','svc-card-detail');detail.id=`svc-detail-${index}`;detail.hidden=true;
   const fullTitle=node('p','svc-full-title',row.title);fullTitle.dir='auto';detail.append(fullTitle);
   if(row.rating)detail.append(node('p','',`${row.rating} / 5 · ${row.reviews??'—'} ${t('reviews')}`));
@@ -159,8 +172,17 @@ function renderResults(focus=true){
  if(focus&&view.total){if(history.state?.findziaServices!=='results')history.pushState({findziaServices:'results'},'',location.href);$('#svc-results-title').focus({preventScroll:true});$('#svc-results').scrollIntoView({behavior:motion(),block:'start'});}
 }
 function showCreditLimit(){notice(t('noSearchCredit'));const button=node('button','',t('addCredits'));button.type='button';button.onclick=()=>root.fzAccount.open('plans');$('#svc-message').append(button);$('#svc-message').scrollIntoView({behavior:motion(),block:'center'});}
-function remember(){try{sessionStorage.setItem('findzia-services-area-v2',JSON.stringify({area:$('#svc-area').value,country}));sessionStorage.removeItem('findzia-services-last-v1');}catch{}}
-function restore(){try{const saved=JSON.parse(sessionStorage.getItem('findzia-services-area-v2'));if(saved&&codes.includes(saved.country)){$('#svc-area').value=saved.area||'';setCountry(saved.country);}}catch{}}
+const areaStorageKey='findzia-services-area-v3';
+function remember(){
+ const saved=savedServiceArea(JSON.stringify({area:$('#svc-area').value,country}));
+ write(areaStorageKey,saved?JSON.stringify(saved):'');
+}
+function restore(){
+ let saved=savedServiceArea(read(areaStorageKey));
+ if(!saved)try{saved=savedServiceArea(sessionStorage.getItem('findzia-services-area-v2'));}catch{}
+ if(saved&&saved.country===country){$('#svc-area').value=saved.area;remember();}
+ try{sessionStorage.removeItem('findzia-services-area-v2');sessionStorage.removeItem('findzia-services-last-v1');}catch{}
+}
 function clearPhoto(){photoSequence++;pendingPhoto=null;$('#svc-photo-panel').hidden=true;$('#svc-photo-preview').removeAttribute('src');$('#svc-photo-options').replaceChildren();$('#svc-camera-input').value='';$('#svc-gallery-input').value='';$('#svc-query').required=true;}
 function resetHome(scroll=true){
  generation++;searchAbort?.abort();searchAbort=null;locationSequence++;locating=false;busy=false;retrieving=false;results=null;
@@ -201,7 +223,7 @@ root.fzRefineBridge={api,context:()=>({country,query:$('#svc-query').value,gener
 const menu=$('[data-dark-menu]'),trigger=$('[data-dark-menu-open]');trigger.onclick=()=>{menu.showModal();trigger.setAttribute('aria-expanded','true');};$('[data-dark-menu-close]').onclick=()=>menu.close();menu.onclose=()=>trigger.setAttribute('aria-expanded','false');
 const preferences=$('#svc-market');$('[data-dark-market-open]').onclick=()=>preferences.showModal();$('#svc-market-close').onclick=()=>preferences.close();
 for(const dialog of [preferences,menu,$('#svc-directory')])dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});
-const changeCountry=value=>{if(value!==country){locationSequence++;locating=false;$('#svc-locate').disabled=false;$('#svc-area').value='';setCountry(value);updateLocation();}};
+const changeCountry=value=>{if(value!==country){locationSequence++;locating=false;$('#svc-locate').disabled=false;$('#svc-area').value='';setCountry(value);updateLocation();remember();}};
 $('#svc-country').onchange=e=>changeCountry(e.target.value);$('[data-profile-market-select]').onchange=e=>changeCountry(e.target.value);$('[data-profile-language-select]').onchange=e=>setLanguage(e.target.value);$('[data-solar-mode]').value=read('findzia-appearance-v1','auto');$('[data-solar-mode]').onchange=e=>{write('findzia-appearance-v1',e.target.value);window.FindziaAppearance?.apply(root);};
 $('#svc-credit').onclick=()=>root.fzAccount?.open('plans');$('#svc-edit').onclick=()=>{history.replaceState({findziaServices:'home'},'',location.href);resetHome();};
 $('#svc-sort').onchange=()=>renderResults(false);$('#svc-query').oninput=()=>{if(pendingPhoto){clearPhoto();$('#svc-suggestions').hidden=false;}syncSelection();};
@@ -210,8 +232,9 @@ for(const id of ['svc-camera-input','svc-gallery-input'])$('#'+id).onchange=e=>p
 $('#svc-photo-clear').onclick=()=>resetHome();
 const brand=$('.fz-brand');if(brand){brand.href='/trial/services';brand.onclick=e=>{e.preventDefault();history.replaceState({findziaServices:'home'},'',location.href);resetHome();};}
 window.addEventListener('popstate',()=>resetHome());window.addEventListener('pageshow',event=>{if(event.persisted)resetHome();});
-$('#svc-locate').onclick=()=>locateArea();$('#svc-manual').onclick=()=>manualArea();$('#svc-area').oninput=()=>{updateLocation();remember();};
-const directory=$('#svc-directory');$('#svc-browse').onclick=()=>{directory.showModal();};$('#svc-directory-close').onclick=()=>directory.close();$('#svc-directory-query').oninput=renderDirectory;$('#svc-directory-custom').onclick=()=>{directory.close();chooseService($('#svc-directory-query').value.trim());};
+$('#svc-locate').onclick=()=>locateArea();$('#svc-manual').onclick=()=>manualArea();$('#svc-area').oninput=()=>{updateLocation();remember();};$('#svc-area').onchange=normalizeArea;$('#svc-area').addEventListener('focus',keepAreaVisible);
+window.addEventListener('resize',keepAreaVisible);window.visualViewport?.addEventListener('resize',keepAreaVisible);
+const directory=$('#svc-directory');$('#svc-browse').onclick=()=>{directory.showModal();};$('#svc-directory-close').onclick=()=>directory.close();$('#svc-directory-query').oninput=renderDirectory;$('#svc-directory-form').onsubmit=event=>{event.preventDefault();const query=$('#svc-directory-query').value.trim();if(query.length<2||busy)return;directory.close();chooseService(query);$('#svc-form').requestSubmit();};
 root.querySelectorAll('.svc-page [data-icon],.svc-directory [data-icon]').forEach(el=>el.replaceWith(icon(el.dataset.icon)));
 const languageSelect=$('[data-profile-language-select]');for(const code of window.FindziaHomeCopy?.languages||[]){if(![...languageSelect.options].some(o=>o.value===code)){let name=code;try{name=new Intl.DisplayNames([code],{type:'language'}).of(code)}catch{}languageSelect.add(new Option(name,code));}}
 localize();restore();resetHome(false);const entryQuery=new URL(location.href).searchParams.get('q');if(entryQuery)chooseService(entryQuery.slice(0,200));history.replaceState({findziaServices:'home'},'',location.href);updateLocation();syncSelection();window.FindziaAppearance?.apply(root);
@@ -222,11 +245,12 @@ $('#svc-form').addEventListener('submit',async event=>{
  busy=true;const ticket=++generation;$('#svc-submit').disabled=true;$('#svc-form').setAttribute('aria-busy','true');let slowTimer;
  try{
   if(!$('#svc-area').value.trim()){
-   if(!$('#svc-manual-fields').hidden){$('#svc-area').reportValidity();return;}
+   if(!$('#svc-manual-fields').hidden||read('findzia-services-location-denied')==='1'){manualArea();$('#svc-area').reportValidity();return;}
    if(!await locateArea())return;
   }
   if(ticket!==generation)return;
   if(!$('#svc-area').checkValidity()){manualArea();$('#svc-area').reportValidity();return;}
+  normalizeArea();
   notice(t('checking'),true);
   if(!await root.fzBilling.beforeSearch({kind:pendingPhoto?'image':'text',query:$('#svc-query').value,country})){
    if(ticket!==generation)return;const status=root.fzBilling.status(),available=serviceSearchCredits(status);

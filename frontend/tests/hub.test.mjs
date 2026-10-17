@@ -43,11 +43,11 @@ function hubFixture(href='https://findzia.com/',saved={}){
 }
 test('open, close, reopen and browser back preserve a single layer; forged messages ignored',()=>{
  const f=hubFixture();assert.equal(f.html.style['--hub-height'],'560px');f.window.visualViewport.height=488;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-height'],'488px');
- for(const [index,card]of f.groups['[data-project]'].entries()){card.fire('click');const frame=f.frames.at(-1);assert.equal(f.node('#project-layer').open,true);assert.equal(new URL(frame.src).origin,'https://findzia.com');assert.equal(new URL(frame.src).searchParams.get('hubProject'),card.dataset.project);
+ for(const [index,card]of f.groups['[data-project]'].entries()){card.fire('click');const frame=f.frames.at(-1);assert.equal(f.node('#project-layer').open,true);assert.equal(f.node('#experience-nav').hidden,true);assert.equal(f.node('#projects').hidden,true);assert.equal(new URL(frame.src).origin,'https://findzia.com');assert.equal(new URL(frame.src).searchParams.get('hubProject'),card.dataset.project);
  f.listeners.message({origin:'https://evil.example',source:frame.contentWindow,data:{findziaHub:true,type:'close'}});assert.equal(f.node('#project-layer').open,true);
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});assert.equal(f.node('#layer-status').hidden,true);
  f.groups['[data-account]'][1].fire('click');assert.equal(f.messages.at(-1).data.type,'account');
- f.node('#close-layer').fire('click');assert.equal(f.node('#project-layer').open,false);assert.equal(frame.hidden,true);assert.notEqual(frame.removed,true);assert.equal(f.location.search,'');assert.equal(f.frames.length,index+1);}
+ f.node('#close-layer').fire('click');assert.equal(f.node('#project-layer').open,false);assert.equal(frame.hidden,true);assert.notEqual(frame.removed,true);assert.equal(f.location.search,'');assert.equal(f.node('#projects').hidden,false);assert.equal(f.frames.length,index+1);}
  f.groups['[data-project]'][0].fire('click');f.location.search='';f.listeners.popstate();assert.equal(f.node('#project-layer').open,false);
 });
 test('canonical language changes both ways; viewport updates and OAuth return stay in overlay',()=>{
@@ -191,7 +191,7 @@ test('native Space scene hides the persistent search and section tabs; other sec
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
  assert.equal(f.node('#header-search').hidden,true);assert.equal(f.node('#experience-nav').hidden,true);
  assert.ok(!calls.includes('search'));
- open('shop');assert.equal(f.node('#header-search').hidden,false);assert.equal(f.node('#experience-nav').hidden,false);
+ open('shop');assert.equal(f.node('#header-search').hidden,false);assert.equal(f.node('#experience-nav').hidden,true);
  open('space');assert.equal(f.node('#header-search').hidden,true);assert.equal(f.frames.length,2);
 });
 

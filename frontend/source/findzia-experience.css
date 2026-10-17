@@ -36,6 +36,7 @@
  html[data-experience=shop] .fz-home .fz-tile-media img{object-fit:contain!important}
  html[data-experience=shop] .fz-home .fz-grid{gap:14px!important}
  html[data-experience=shop] .fz-home .fz-tile{border-radius:24px!important;overflow:hidden!important}
+ html[data-experience=shop] .fz-home .fz-results-title{font-size:16px!important;line-height:1.5!important;font-weight:500!important;max-width:100%!important;margin:0!important;display:-webkit-box!important;-webkit-box-orient:vertical!important;-webkit-line-clamp:2!important;overflow:hidden!important;overflow-wrap:anywhere!important}
  /* Space: the customer's photograph is the workspace, never a tiny thumbnail. */
  html[data-experience=space] [data-spaces-content]{max-width:1180px!important;margin:0 auto!important;padding:0!important}
  html[data-experience=space] body>footer{display:none!important}
@@ -92,22 +93,20 @@
  html[data-experience=services] :is(.svc-intro,.svc-suggestions){display:none!important}
  html[data-experience=services][data-experience-stage=start] #svc-form{display:none!important}
  html[data-experience=services][data-experience-stage=request] .svc-main{padding:16px!important}
- html[data-experience=services][data-experience-stage=request] .svc-main:before{content:'';display:block;height:clamp(130px,28svh,330px);border-radius:24px 24px 0 0;background:url('__ASSET_home-calm.webp__') center 63%/cover}
- html[data-experience=services] .svc-main:has(#svc-photo-panel:not([hidden])):before{display:none!important}
- html[data-experience=services] .svc-search{border:0!important;border-radius:0 0 24px 24px!important;box-shadow:none!important;background:#09100d!important;color:#fffdf5!important;padding:22px!important;--svc-ink:#fffdf5;--svc-muted:#bbc8b6;--svc-line:#ffffff35;--svc-soft:#213126;--svc-green:#dce7d6;--svc-surface:#09100d}
- html[data-experience=services] .experience-request{font-size:22px!important;line-height:1.5!important;font-weight:500!important;margin:0 0 18px!important;color:#fffdf5!important;overflow-wrap:anywhere!important}
+ html[data-experience=services] .svc-search{border:0!important;border-radius:24px!important;box-shadow:none!important;background:#09100d!important;color:#fffdf5!important;padding:22px!important;--svc-ink:#fffdf5;--svc-muted:#bbc8b6;--svc-line:#ffffff35;--svc-soft:#213126;--svc-green:#dce7d6;--svc-surface:#09100d}
  html[data-experience=services] .svc-fields{grid-template-columns:1fr!important;gap:16px!important}
  html[data-experience=services] .svc-primary{background:#dce7d6!important;color:#203326!important;border-radius:16px!important;min-height:52px!important;width:100%!important}
- html[data-experience=services] .svc-locate{border-radius:15px!important}
+ html[data-experience=services] .svc-locate{border-radius:50%!important}
  html[data-experience=services] .svc-photo-panel{margin:0!important;border:0!important;border-radius:0!important;padding:18px!important}
  html[data-experience=services] .svc-photo-heading{flex-wrap:wrap!important}
  html[data-experience=services] .svc-photo-heading>img{width:100%!important;height:auto!important;max-height:45svh!important;object-fit:contain!important;border-radius:20px!important}
  html[data-experience=services] .svc-photo-heading h2{font-size:18px!important;font-weight:500!important}
  html[data-experience=services] .svc-message{margin:12px 16px!important;border-radius:18px!important}
  html[data-experience=services] .svc-results{padding:14px!important}
- html[data-experience=services] .svc-results h2{font-size:22px!important;font-weight:500!important}
- html[data-experience=services] .svc-card{border-radius:18px!important;padding:12px 14px!important;box-shadow:none!important}
- html[data-experience=services] .svc-card-actions :is(a,button){border-radius:12px!important;min-height:46px!important}
+ html[data-experience=services] .svc-results h2{font-size:18px!important;font-weight:500!important}
+ html[data-experience=services] .svc-card{border-radius:16px!important;padding:10px 12px!important;box-shadow:none!important}
+ html[data-experience=services] .svc-card-actions :is(a,button){min-height:44px!important}
+ html[data-experience=services] .svc-card-actions :is(.svc-call,.svc-whatsapp){border-radius:50%!important}
  html[data-experience=services] .svc-market{border-radius:24px!important}
  @media(max-width:600px){
   html[data-findzia-embedded] .experience-copy{padding:50px 20px 23px!important}
