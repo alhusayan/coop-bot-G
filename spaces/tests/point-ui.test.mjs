@@ -1,3 +1,4 @@
+import {sceneText} from '../public/space-scene-copy.js';
 import {designPresentation,createStyleTour} from '../public/design-studio.js';
 import {bindStoreLinks} from '../public/store-links.js';
 import {MARKETS,orderedMarkets,browserMarket} from '../public/markets.js';
@@ -22,12 +23,17 @@ test('clean photo selection is free and opens the original layer without a Space
  let authorizations=0,searches=0;const opens=[],timers=new Set();
  window.HTMLElement.prototype.getBoundingClientRect=()=>({width:390,height:292,top:0,left:0,right:390,bottom:292});
  const dialog=document.querySelector('#sheet');dialog.open=false;dialog.showModal=()=>{dialog.open=true;};dialog.close=()=>{dialog.open=false;};window.scrollTo=()=>{};
+ const preferences=document.querySelector('#space-options');preferences.showModal=()=>{preferences.open=true;};preferences.close=()=>{preferences.open=false;};
  document.querySelector('.fz-home').fzBilling={authorizePiece:async()=>{authorizations++;},refresh(){}};
  const fetch=async(path,options={})=>{if(path==='/api/config')return Response.json({markets:{US:{currency:'USD',en:'United States',flag:'US'},SA:{currency:'SAR',en:'Saudi Arabia',flag:'SA'}},demo:job.id});if(/\/(focus|search)\//.test(path))searches++;return Response.json(structuredClone(job));};
  globalThis.fetch=fetch;const storage={getItem:()=>null,setItem:()=>{}};
- const context=vm.createContext({document,window,console,designPresentation,createStyleTour,MutationObserver:window.MutationObserver,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,bindStoreLinks,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
+ const context=vm.createContext({document,window,console,sceneText,designPresentation,createStyleTour,MutationObserver:window.MutationObserver,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,bindStoreLinks,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
  try{
   vm.runInContext(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),context);
+  document.querySelector('[data-action=options]').click();assert.equal(preferences.open,true);
+  document.querySelector('#design-request').value='Keep the door';
+  document.querySelector('[data-action=options-done]').click();assert.equal(preferences.open,false);
+  assert.equal(document.querySelector('#design-request').value,'Keep the door');assert.equal(authorizations,0);assert.equal(searches,0);
   vm.runInContext("state.market='US'",context);await vm.runInContext('demo()',context);await vm.runInContext('choose(0)',context);
   assert.equal(document.querySelector('#furnishing-option'),null);
   assert.equal(document.querySelectorAll('.piece-coach').length,1,'first visit explains photo interaction');assert.equal(document.querySelectorAll('.hotspot').length,0);assert.equal(document.querySelectorAll('.piece-outline').length,0);
@@ -79,10 +85,10 @@ test('clean photo selection is free and opens the original layer without a Space
   assert.equal(handoffs.at(-1).query,'Custom curved ceiling');assert.equal(searches,0);assert.equal(authorizations,0);
   job.designs[0].items=[];job.designs[0].inventory_complete=true;
   await vm.runInContext('choose(0)',context);
-  assert.match(document.querySelector('.stage-hint').textContent,/Your design concept/);
+  assert.match(document.querySelector('.stage-hint').textContent,/Tap anything in your design/);
   assert.match(document.querySelector('#empty-items').textContent,/Your design is ready/);
   assert.equal(document.querySelector('#empty-items .search-spinner'),null);
-  assert.equal(document.querySelector('.browse-pieces'),null);
+  assert.equal(document.querySelector('.browse-pieces').dataset.action,'other-work');
   assert.equal(document.querySelectorAll('.piece-coach').length,0);
  }finally{for(const timer of timers)clearTimeout(timer);delete globalThis.document;delete globalThis.Image;}
 });

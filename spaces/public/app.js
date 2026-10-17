@@ -8,12 +8,13 @@ import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} 
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261016-guide1';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene1';
+import {sceneText} from './space-scene-copy.js?v=20261017-scene1';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 bindStoreLinks(document);
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
-const paths={checkCircle:'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M8 12l3 3 5-6',camera:'M4 7h4l2-3h4l2 3h4v13H4z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',plus:'M12 5v14M5 12h14',back:'M19 12H5m6-6-6 6 6 6',forward:'M5 12h14m-6-6 6 6-6 6',chevron:'m7 10 5 5 5-5',folder:'M3 6h7l2 3h9v12H3z',close:'m6 6 12 12M6 18 18 6',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4',compare:'M12 2v20M3 5h7v14H3zm11 0h7v14h-7',check:'m5 12 4 4L19 6',external:'M14 3h7v7M21 3l-11 11M9 5H3v16h16v-6',expand:'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5',more:'M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2'};
+const paths={options:'M4 7h16M4 17h16M9 4v6M15 14v6',checkCircle:'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M8 12l3 3 5-6',camera:'M4 7h4l2-3h4l2 3h4v13H4z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',plus:'M12 5v14M5 12h14',back:'M19 12H5m6-6-6 6 6 6',forward:'M5 12h14m-6-6 6 6-6 6',chevron:'m7 10 5 5 5-5',folder:'M3 6h7l2 3h9v12H3z',close:'m6 6 12 12M6 18 18 6',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4',compare:'M12 2v20M3 5h7v14H3zm11 0h7v14h-7',check:'m5 12 4 4L19 6',external:'M14 3h7v7M21 3l-11 11M9 5H3v16h16v-6',expand:'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5',more:'M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2'};
 const icon=(name,small=false)=>`<span class="icon${small?' small':''}" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${paths[name]||paths.spark}"/></svg></span>`;
 $$('[data-icon]').forEach(el=>el.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[el.dataset.icon]||paths.spark}"/></svg>`);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -75,7 +76,7 @@ function init(){
  accessCheck=(async()=>{
   try{const [config,detected]=await Promise.all([api('/api/config'),detectMarket({fallback:initialMarket})]);state.config=config;state.detectedMarket=detected;if(!marketChosen&&!state.job)state.market=detected;state.auth=true;syncMarket();shell?.setMarketLanguage();$('#auth-notice').classList.add('hidden');$('#retry-access').classList.add('hidden');return true;}
   catch(e){state.auth=e.code==='TRIAL_LINK_REQUIRED'?false:null;$('#auth-notice').textContent=state.auth===false?'This is a private preview. Open the invitation link shared with you.':'Couldn’t connect. Please try again.';$('#auth-notice').classList.remove('hidden');$('#retry-access').classList.remove('hidden');return false;}
-  finally{$$('[data-action="upload"], [data-action="camera"], [data-action="demo"]').forEach(el=>el.disabled=state.auth!==true);$('#retry-access').disabled=false;}
+  finally{$$('[data-action="add-photo"], [data-action="upload"], [data-action="camera"], [data-action="demo"]').forEach(el=>el.disabled=state.auth!==true);$('#retry-access').disabled=false;}
  })().finally(()=>accessCheck=null);
  return accessCheck;
 }
@@ -94,13 +95,13 @@ function renderDesigns(){
  if(designJob!==j.id){designJob=j.id;designArrival=[];generationStarted=Date.now();}
  j.designs.forEach((d,i)=>{if(d.image&&!designArrival.includes(i))designArrival.push(i);});
  updateImage($('#original-thumb'),j.original);
- const tour=styleTour.sync({jobId:j.id,indexes:j.designs.map((d,i)=>({d,i})).filter(({d})=>!d.image&&d.status!=='error').map(({i})=>i),active:state.view==='designs'&&!document.hidden&&!designArrival.length&&pollErrors<2,reduced:matchMedia('(prefers-reduced-motion: reduce)').matches});
+ const tour={};styleTour.stop();
  const presentation=designPresentation(j,{...tour,reduced,escape:esc,icon,translate,messages,language:shell?.getLanguage()||document.documentElement.lang,order:designArrival,reconnecting:pollErrors>1,slow:Date.now()-generationStarted>60000});
  const status=$('#generation-status');if(status.textContent!==presentation.status)status.textContent=presentation.status;
  const studio=$('#design-studio');studio.hidden=!presentation.pending;
  $('#designs').classList.toggle('is-creating',presentation.ready===0&&presentation.pending>0);
  $('#design-grid').hidden=!presentation.cards;
- $('#design-gallery-nav').hidden=presentation.ready<2;
+ $('#design-gallery-nav').hidden=j.designs.filter(d=>d.image||d.status==='error').length<2;
  const key=JSON.stringify([j.id,presentation.stage,presentation.cards]);if(key===renderKey)return;renderKey=key;
  patchHTML(studio,presentation.stage);patchHTML($('#design-grid'),presentation.cards);patchHTML($('#design-gallery-nav'),presentation.navigation);syncDesignNavigation();
 }
@@ -142,7 +143,7 @@ function photoMarkup(items){
  const view=item&&(pieceViews([item]).find(v=>v.marker===pointFocus?.marker)||pieceViews([item])[0]);
  let outline='';
  const candidate=!item&&!photoGuideSeen?pieceViews(items).filter(v=>!v.background).sort((a,b)=>(b.box[2]-b.box[0])*(b.box[3]-b.box[1])-(a.box[2]-a.box[0])*(a.box[3]-a.box[1]))[0]:null;
- const guide=candidate?`<button class="piece-coach" data-ui-key="piece-coach" data-action="select-piece" data-id="${esc(candidate.id)}" data-marker="${esc(candidate.marker)}" style="top:${Math.max(15,Math.min(85,(candidate.box[0]+candidate.box[2])/20))}%;left:${Math.max(24,Math.min(76,(candidate.box[1]+candidate.box[3])/20))}%" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}"><span class="coach-dot" aria-hidden="true">${icon('plus',true)}</span><span>${esc(translate('Tap to shop or find a pro','اضغط للشراء أو طلب مختص'))}</span></button>`:'';
+ const guide=candidate?`<button class="piece-coach" data-ui-key="piece-coach" data-action="select-piece" data-id="${esc(candidate.id)}" data-marker="${esc(candidate.marker)}" style="top:${Math.max(15,Math.min(85,(candidate.box[0]+candidate.box[2])/20))}%;left:${Math.max(24,Math.min(76,(candidate.box[1]+candidate.box[3])/20))}%" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}"><span class="coach-dot" aria-hidden="true">${icon('plus',true)}</span></button>`:'';
  if(view){const [top,left,bottom,right]=view.box;outline=`<span class="piece-outline${busy?' is-searching':''}" style="top:${top/10}%;left:${left/10}%;width:${(right-left)/10}%;height:${(bottom-top)/10}%" aria-hidden="true"><i></i><i></i><i></i><i></i>${busy?'<span class="piece-scan"></span>':''}</span>`;}
  return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}" aria-busy="${busy}"></button>${outline}${guide}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
 }
@@ -153,7 +154,7 @@ function feedbackMarkup(item){
  const action=free?'item':checked?'search-item':'start-piece';
  const button=free?translate('View options','عرض الخيارات'):translate('Find in stores','ابحث في المتاجر');
  const actions=(service?`<button class="piece-search-button" data-action="service-piece" data-id="${esc(item.id)}"><span>${esc(translate('Find a specialist','ابحث عن مختص'))}</span>${icon('forward',true)}</button>`:'')+(shop?`<button class="piece-search-button${service?' is-secondary':''}" data-action="${action}" data-id="${esc(item.id)}"><span>${esc(button)}</span><span>${free?icon('forward',true):esc(translate('2 credits','رصيدان'))}</span></button>`:'');
- return `<article class="piece-selection-card${busy?' is-searching':''}" data-ui-key="${esc(keyFor(item))}"><div class="piece-selection-media"><img src="${esc(item.crop||selected().image)}" alt="${esc(name)}" decoding="async">${!busy?`<button class="piece-clear" data-action="clear-piece" aria-label="${esc(translate('Clear selection','إلغاء التحديد'))}">${icon('close',true)}</button>`:''}</div><div class="piece-selection-content"><div class="piece-selection-summary"><strong dir="auto">${esc(name)}</strong><p role="status">${busy?'<span class="search-spinner" aria-hidden="true"></span>':''}${esc(caption)}${busy?` <span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span>`:''}</p></div>${busy?'<div class="piece-search-track" aria-hidden="true"><span></span></div>':actions}</div></article>`;
+ return `<article class="piece-selection-card${busy?' is-searching':''}${item.error||busy||checked?' has-status':''}" data-ui-key="${esc(keyFor(item))}"><div class="piece-selection-media"><img src="${esc(item.crop||selected().image)}" alt="${esc(name)}" decoding="async">${!busy?`<button class="piece-clear" data-action="clear-piece" aria-label="${esc(translate('Clear selection','إلغاء التحديد'))}">${icon('close',true)}</button>`:''}</div><div class="piece-selection-content"><div class="piece-selection-summary"><strong dir="auto">${esc(name)}</strong><p role="status">${busy?'<span class="search-spinner" aria-hidden="true"></span>':''}${esc(caption)}${busy?` <span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span>`:''}</p></div>${busy?'<div class="piece-search-track" aria-hidden="true"><span></span></div>':actions}</div></article>`;
 }
 function selectPiece(id,marker){
  const items=selected()?.items||[],item=items.find(x=>x.id===id);if(!item)return;
@@ -198,7 +199,8 @@ function renderShop(){
  $('#compare-label').textContent=state.compare?'After':'Before';$('[data-action="compare"]').setAttribute('aria-pressed',String(state.compare));$('#hotspots').classList.toggle('hidden',state.compare);
  const items=d.items||[],preparing=d.status==='analyzing',adapting=d.status==='adapting',conceptOnly=d.inventory_complete&&!items.length&&!preparing&&!adapting&&!d.error;
  const pending=items.find(pieceBusy);if(pending&&!items.some(x=>pointFocus?.key===keyFor(x)))pointFocus={key:keyFor(pending),id:pending.id,waiting:true};
- patchHTML($('.stage-hint'),conceptOnly?`<span><strong>${esc(translate('Your design concept','تصورك التصميمي'))}</strong></span>`:`<span><strong>${esc(translate('Bring it to life','نفّذ تصميمك'))}</strong><small>${esc(translate('Tap to shop or find a specialist','اضغط للشراء أو البحث عن مختص'))}</small></span><button class="browse-pieces" data-action="pieces" ${!items.length||preparing||adapting?'disabled':''}>${esc(translate('All elements','جميع العناصر'))}${icon('chevron',true)}</button>`);
+ patchHTML($('.stage-hint'),`<span>${esc(sceneText(document.documentElement.lang,'tap'))}</span><button class="browse-pieces scene-float" data-action="${conceptOnly?'other-work':'pieces'}" aria-label="${esc(translate('All elements','جميع العناصر'))}" ${preparing||adapting?'disabled':''}>${icon('more',true)}</button>`);
+ $('#shopping').classList.toggle('has-piece',!!pointFocus);
  $('#shop-count').textContent='';$('#search-progress').classList.add('hidden');$('#summary-button').classList.add('hidden');$('#items-list').replaceChildren();
  $('#empty-items').classList.toggle('hidden',items.length>0&&!preparing&&!adapting);
  if(!items.length||preparing||adapting)$('#empty-items').innerHTML=conceptOnly?`<p>${esc(translate('Your design is ready. Tap the photo to request the work you need.','تصميمك جاهز. اضغط على الصورة واكتب العمل المطلوب.'))}</p>`:d.error?`<p>${esc(messages[d.error]||'We couldn’t identify the pieces.')}</p><button class="secondary" data-action="choose" data-index="${state.design}">Try again</button>`:`<span class="search-spinner" aria-hidden="true"></span><p role="status">${esc(adapting?translate('Updating your design…','جارٍ تحديث تصميمك…'):translate('Finding the elements in your design…','جارٍ تحديد عناصر تصميمك…'))}</p>`;
@@ -274,8 +276,11 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'studio-play':styleTour.toggle();break;
  case 'design-slide':{const grid=$('#design-grid'),card=grid.querySelector('[data-design-index="'+index+'"]');if(card)grid.scrollBy({left:card.getBoundingClientRect().left-grid.getBoundingClientRect().left,behavior:reduced?'instant':'smooth'});break;}
  case 'home':resetRoom();view('home');break;
- case 'upload':$('#file-input').click();break;
- case 'camera':$('#camera-input').click();break;
+ case 'add-photo':showSheet(`<div class="scene-source"><button class="scene-primary" data-action="camera">${icon('camera')}${esc(sceneText(document.documentElement.lang,'take'))}</button><button class="scene-primary" data-action="upload">${icon('folder')}${esc(sceneText(document.documentElement.lang,'photos'))}</button></div>`,'photo-source');break;
+ case 'options':$('#space-options').showModal();break;
+ case 'options-done':$('#space-options').close();break;
+ case 'upload':if(sheetMode==='photo-source')closeSheet();$('#file-input').click();break;
+ case 'camera':if(sheetMode==='photo-source')closeSheet();$('#camera-input').click();break;
  case 'demo':await demo(el);break;
  case 'market':openMarket();break;
  case 'set-market':setMarket(id);closeSheet();break;
@@ -337,8 +342,12 @@ document.addEventListener('spaces:locale',()=>{if(state.view==='designs')renderD
 // Preserve scrolling and pinch zoom, without iOS image peek/share callouts.
 document.addEventListener('contextmenu',event=>{if(event.target.closest?.('.design-image,.design-canvas,.setup-photo,.original-peek,.preview-photo'))event.preventDefault();});
 
-// The short CTA stays independent from the transparent credit cost beneath it.
-const discoverLabels={en:'Discover designs',ar:'اكتشف التصاميم',de:'Designs entdecken',fr:'Découvrez les designs',it:'Scopri i design',es:'Descubre diseños',pt:'Descubra designs',tr:'Tasarımları keşfet',ru:'Откройте дизайны',ja:'デザインを発見',zh:'探索设计',ko:'디자인 둘러보기',hi:'डिज़ाइन खोजें',ur:'ڈیزائن دریافت کریں',id:'Jelajahi desain',ms:'Terokai reka bentuk',nl:'Ontdek ontwerpen'};
-function refreshDiscoverLabel(){const label=document.getElementById('discover-label'),text=discoverLabels[document.documentElement.lang]||discoverLabels.en;if(label&&label.textContent!==text)label.textContent=text;}
-refreshDiscoverLabel();
-new MutationObserver(refreshDiscoverLabel).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
+// The main scene has only the current action. Wishes and scope live in Options.
+function refreshSceneCopy(){
+ const language=document.documentElement.lang;
+ $$('[data-scene]').forEach(node=>{const text=sceneText(language,node.dataset.scene);if(node.textContent!==text)node.textContent=text;});
+ $('.scene-options')?.setAttribute('aria-label',sceneText(language,'options'));
+}
+refreshSceneCopy();
+new MutationObserver(refreshSceneCopy).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
+$('#space-options').addEventListener('click',event=>{if(event.target===$('#space-options')){const r=event.target.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)event.target.close();}});

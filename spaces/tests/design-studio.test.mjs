@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {parseHTML} from 'linkedom';
 import {designPresentation,createStyleTour} from '../public/design-studio.js';
+import {sceneText} from '../public/space-scene-copy.js';
 import {studioCopy} from '../public/design-studio-copy.js';
 import {patchHTML} from '../public/live-view.js';
 globalThis.document=undefined;
@@ -11,7 +12,7 @@ const job=()=>({id:'room-a',original:'/original.jpg',designs:[0,1,2].map(i=>({ti
 test('pending designs show one original-photo workspace and no disabled result cards',()=>{
  const result=designPresentation(job(),options),{document}=parseHTML(result.stage);
  assert.equal(result.cards,'');assert.equal(result.pending,3);assert.equal(result.ready,0);
- assert.equal(document.querySelectorAll('img').length,1);assert.equal(document.querySelectorAll('[data-action=studio-style]').length,3);
+ assert.equal(document.querySelectorAll('img').length,1);assert.equal(document.querySelectorAll('[data-action=studio-style]').length,0);
  assert.doesNotMatch(result.stage,/disabled|filter:blur|%|progressbar/);
 });
 test('a later-index result is immediately usable and stays first when another design arrives',t=>{
@@ -48,21 +49,20 @@ test('every supported language has complete waiting copy and live locale changes
   assert.deepEqual(Object.keys(copy),Object.keys(studioCopy.en));
   for(const [key,value] of Object.entries(copy)){assert.ok(value.trim());if(language!=='en')assert.notEqual(value,studioCopy.en[key]);}
   const p=designPresentation(job(),{...options,language});
-  assert.equal(p.status,copy['Your designs appear here as they’re ready.']);
-  assert.ok(p.stage.includes(copy['Explore each design as soon as it’s ready.']));
+  assert.equal(p.status,sceneText(language,'working'));
+  assert.ok(p.stage.includes(sceneText(language,'working')));
  }
 });
 
-test('style exploration changes the palette and copy without touching results or the original image',t=>{
- const j=job();j.designs.forEach((d,i)=>d.palette=['#112233','#445566','#778899']);
- const {document}=parseHTML('<html><body><div id="studio"></div></body></html>');t.mock.property(globalThis,'document',document);
+test('generation polls preserve the full original image without a second control panel',t=>{
+ const j=job(),{document}=parseHTML('<html><body><div id="studio"></div></body></html>');t.mock.property(globalThis,'document',document);
  const root=document.getElementById('studio');patchHTML(root,designPresentation(j,options).stage);
- const photo=root.querySelector('img'),tab=root.querySelector('[data-index="2"]');
- patchHTML(root,designPresentation(j,{...options,styleIndex:2,paused:true}).stage);
- assert.equal(root.querySelector('img'),photo);assert.equal(root.querySelector('[data-index="2"]'),tab);
- assert.equal(tab.getAttribute('aria-pressed'),'true');assert.match(root.querySelector('.studio-mood').textContent,/Style 2.*Rich textures/);
- assert.equal(root.querySelector('[data-action="studio-play"]').getAttribute('aria-label'),'Play slideshow');
- assert.equal(designPresentation(j,{...options,reduced:true}).stage.includes('data-action="studio-play"'),false);
+ const photo=root.querySelector('img');
+ patchHTML(root,designPresentation(j,{...options,slow:true}).stage);
+ assert.equal(root.querySelector('img'),photo);assert.ok(photo.closest('.scene-media'));
+ assert.equal(root.querySelectorAll('button,input,textarea').length,0);
+ assert.equal(root.querySelectorAll('.scene-wait').length,1);
+ assert.equal(root.querySelectorAll('img').length,1);
 });
 test('style tour survives polls, respects manual choice and stops off-screen, on results and with reduced motion',()=>{
  let callback,nextId=0,changed=0;const tasks=new Map();
@@ -84,4 +84,14 @@ test('design photos open the selected design directly instead of a duplicate pre
  const photo=document.querySelector('.design-image');assert.equal(photo.dataset.action,'choose');assert.equal(photo.dataset.index,'1');
  assert.equal(photo.querySelector('img').getAttribute('draggable'),'false');
  assert.doesNotMatch(readFileSync(new URL('../public/app.js',import.meta.url),'utf8'),/case 'preview':/);
+});
+
+test('preferences remain form-associated but absent from the photo scene',()=>{
+ const {document}=parseHTML(readFileSync(new URL('../public/index.html',import.meta.url),'utf8'));
+ assert.equal(document.querySelector('#setup input:not([type=hidden]),#setup textarea'),null);
+ assert.equal(document.querySelectorAll('#space-options input[name=scope]').length,3);
+ for(const field of document.querySelectorAll('#space-options input,#space-options textarea'))assert.equal(field.getAttribute('form'),'design-form');
+ assert.equal(document.querySelector('#space-options [name=scope][checked]').value,'full');
+ assert.equal(document.querySelectorAll('#home .scene-cover').length,1);
+ assert.equal(document.querySelector('#home input,#home textarea'),null);
 });
