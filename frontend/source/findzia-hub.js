@@ -13,6 +13,7 @@ const read=key=>{try{return localStorage.getItem(key)}catch{return null}},save=(
 const validLang=value=>Object.hasOwn(languages,value)?value:'en';
 const sessions=new Map();
 let isReady=false,spaceScene=false,noticeTimer=null,pendingQuery=null;
+let queryFocused=false,childTyping=false;
 let lang=validLang(read('findzia-lang')||html.lang),active=null,frame=null,returnFocus=null,loadTimer=null;
 const header=$('#main-header'),search=$('#header-search'),query=$('#header-query');
 const layer=$('#project-layer'),content=$('#project-content'),status=$('#layer-status'),retry=$('#retry-project');
@@ -27,6 +28,19 @@ const flag=code=>/^[A-Z]{2}$/.test(code)?String.fromCodePoint(...[...code].map(c
 function notice(key){const node=$('#header-notice');node.textContent=copy(key);node.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>node.hidden=true,4200)}
 // Same-origin synchronous calls preserve the tap's user activation for iOS file pickers.
 function action(name,data={}){try{return frame?.contentWindow?.FindziaHubBridge?.action?.(name,data)||false}catch{return false}}
+function searchFocus(value){
+ queryFocused=!!value;html.toggleAttribute('data-query-focus',queryFocused);
+ html.toggleAttribute('data-text-entry',queryFocused||childTyping);
+ $('#search-dismiss').hidden=false;
+ // Inert content cannot steal a tap while the keyboard is open.
+ content.inert=queryFocused;
+ $('#experience-nav').inert=queryFocused||childTyping;
+}
+function endSearchFocus(){query.blur();childTyping=false;searchFocus(false)}
+function revealFrame(){
+ if(!frame||window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return;
+ frame.animate?.([{opacity:.45,transform:'scale(.988)'},{opacity:1,transform:'scale(1)'}],{duration:420,easing:'cubic-bezier(.2,.75,.25,1)'});
+}
 function measureHeader(){const height=Math.ceil(header.getBoundingClientRect().height);if(height)html.style.setProperty('--header-height',height+'px')}
 function renderMarkets(){const select=$('#hub-country');select.replaceChildren();let names;try{names=new Intl.DisplayNames([lang],{type:'region'})}catch{}for(const code of marketOptions){const option=document.createElement('option');option.value=code;option.textContent=flag(code)+' '+(names?.of(code)||code);select.append(option)}select.value=currentCountry}
 function headerState(data){if(!data)return;if(active==='space'&&typeof data.scene==='boolean'&&spaceScene!==data.scene){spaceScene=data.scene;render();}if(typeof data.query==='string'&&document.activeElement!==query)query.value=data.query;if(/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;$('#market-flag').textContent=flag(currentCountry)}if(Array.isArray(data.countries)){const codes=data.countries.filter(c=>typeof c==='string'&&/^[A-Z]{2}$/.test(c));if(codes.length)marketOptions=codes;}$('#header-camera').disabled=!isReady||data.busy===true||data.cameraReady===false;$('#submit-search').disabled=!isReady||data.busy===true;query.disabled=!isReady;}
@@ -49,11 +63,14 @@ function mountFrame(hash=''){
 function openProject(key,{push=true,hash='',prefill=null,carryQuery=false}={}){
  if(!Object.hasOwn(projects,key))return;
  if(active===key&&layer.open)return;
+ endSearchFocus();
  frame&&(frame.hidden=true);clearTimeout(loadTimer);isReady=false;query.value='';pendingQuery=prefill;if(!active)returnFocus=document.activeElement;active=key;render();headerState({});if(!layer.open)layer.show();
  if(push){const url=new URL(location.href);if(!carryQuery)url.searchParams.delete('q');url.searchParams.set('project',key);url.hash='';history.pushState({findziaHub:true},'',url.pathname+url.search)}
  const saved=sessions.get(key);if(saved&&!hash){frame=saved.frame;frame.hidden=false;status.hidden=saved.ready;retry.hidden=true;if(saved.ready){ready();if(key==='account')send({type:'account'})}else loadTimer=setTimeout(showError,30000)}else mountFrame(hash);
+ revealFrame();
 }
 function closeProject({update=true}={}){
+ endSearchFocus();
  clearTimeout(loadTimer);if(frame)frame.hidden=true;frame=null;active=null;isReady=false;pendingQuery=null;marketOptions=defaultCountries;$('#header-notice').hidden=true;if(layer.open)layer.close();
  if(update){const url=new URL(location.href);url.searchParams.delete('project');url.searchParams.delete('q');url.searchParams.delete('country');url.hash='';history.replaceState(null,'',url.pathname+url.search)}
  syncAccount();setLanguage(read('findzia-lang')||lang,false);syncTheme();returnFocus?.focus?.({preventScroll:true});
@@ -72,6 +89,7 @@ window.addEventListener('message',event=>{
  if(data.type==='ready')ready();
  if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else query.focus();}
  if(data.type==='header-state')headerState(data);
+ if(data.type==='text-entry'){childTyping=data.active===true;html.toggleAttribute('data-text-entry',queryFocused||childTyping);$('#experience-nav').inert=queryFocused||childTyping;}
  if(data.type==='market'&&/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;save('findzia-market-country-v1',currentCountry);save('findzia-services-country-v1',currentCountry);render()}
  if(data.type==='close')closeProject();
  if(data.type==='navigate'&&Object.hasOwn(projects,data.project)){const url=new URL(location.href);for(const key of ['q','country']){url.searchParams.delete(key);if(typeof data[key]==='string'&&data[key].length<=1000)url.searchParams.set(key,data[key])}history.replaceState(history.state,'',url.pathname+url.search);if(active===data.project){pendingQuery=data.q??null;if(isReady)ready()}else openProject(data.project,{carryQuery:true,prefill:typeof data.q==='string'?data.q:null});}
@@ -89,9 +107,13 @@ $('#open-preferences').addEventListener('click',()=>{if(active&&isReady&&action(
 $('#menu-preferences').addEventListener('click',()=>{$('#hub-menu').close();preferences()});
 $('#hub-theme').addEventListener('change',event=>{save('findzia-appearance-v1',event.target.value);syncTheme();send({type:'preferences',language:lang,theme:event.target.value})});
 $('#hub-country').addEventListener('change',event=>{const value=event.target.value;if(!marketOptions.includes(value))return;currentCountry=value;save('findzia-market-country-v1',value);save('findzia-services-country-v1',value);save('findzia-market-country-ts-v1',String(Date.now()));save('findzia_manual_market_v1',value);action('country',{country:value});render()});
+query.addEventListener('focus',()=>searchFocus(true));
+search.addEventListener('focusout',event=>{if(!search.contains?.(event.relatedTarget))searchFocus(false)});
+$('#search-dismiss').addEventListener('pointerdown',event=>{event.preventDefault();endSearchFocus()});
+query.addEventListener('keydown',event=>{if(event.key==='Escape')endSearchFocus()});
 query.addEventListener('input',()=>action('query',{query:query.value}));
-search.addEventListener('submit',event=>{event.preventDefault();if(!isReady)return notice('loading');const value=action('search',{query:query.value});if(value==='needs-query'){notice('typeQuery');query.focus();return}if(value==='needs-photo'){$('#camera-source').showModal();return}if(!value)notice('unavailable');else query.blur()});
-$('#header-camera').addEventListener('click',()=>{if(!isReady)return notice('loading');if(['space','services'].includes(active))$('#camera-source').showModal();else if(!action('camera'))notice('unavailable')});
+search.addEventListener('submit',event=>{event.preventDefault();if(!isReady)return notice('loading');const value=action('search',{query:query.value});if(value==='needs-query'){notice('typeQuery');query.focus();return}if(value==='needs-photo'){endSearchFocus();action('photos');return}if(!value)notice('unavailable');else endSearchFocus()});
+$('#header-camera').addEventListener('click',()=>{if(!isReady)return notice('loading');endSearchFocus();if(['space','services'].includes(active)){if(!action('photos'))notice('unavailable')}else if(!action('camera'))notice('unavailable')});
 all('[data-camera-source]').forEach(button=>button.addEventListener('click',()=>{$('#camera-source').close();if(!action(button.dataset.cameraSource))notice('unavailable')}));
 if(window.ResizeObserver)new ResizeObserver(measureHeader).observe(header);
 window.addEventListener('storage',event=>{if(event.key==='findzia-lang')setLanguage(read('findzia-lang')||lang,false);if(event.key==='findzia-appearance-v1')syncTheme();if(event.key==='findzia-account-v1-session')syncAccount()});

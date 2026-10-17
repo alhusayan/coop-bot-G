@@ -106,7 +106,7 @@ test('persistent header remains operable outside the project layer; one composer
  f.node('#header-query').value='طاولة';f.node('#header-query').fire('input');assert.equal(calls.at(-1).data.query,'طاولة');f.node('#header-search').fire('submit');assert.equal(calls.at(-1).name,'search');
  f.node('#open-menu').fire('click');assert.equal(f.node('#hub-menu').open,true);f.node('#hub-menu').close();
  f.node('#close-layer').fire('click');assert.equal(f.node('#header-search').hidden,true);assert.equal(f.node('#projects').inert,false);
- f.groups['[data-project]'][2].fire('click');const space=f.frames.at(-1);space.contentWindow.FindziaHubBridge={action:(name)=>name==='state'?{cameraReady:true}:calls.push({name})};f.listeners.message({origin:'https://findzia.com',source:space.contentWindow,data:{findziaHub:true,type:'ready'}});f.node('#header-camera').fire('click');assert.equal(f.node('#camera-source').open,true);f.groups['[data-camera-source]'][1].fire('click');assert.equal(calls.at(-1).name,'photos');assert.equal(f.node('#camera-source').open,false);
+ f.groups['[data-project]'][2].fire('click');const space=f.frames.at(-1);space.contentWindow.FindziaHubBridge={action:(name)=>name==='state'?{cameraReady:true}:calls.push({name})};f.listeners.message({origin:'https://findzia.com',source:space.contentWindow,data:{findziaHub:true,type:'ready'}});f.node('#header-camera').fire('click');assert.equal(f.node('#camera-source').open,false);assert.equal(calls.at(-1).name,'photos');assert.equal(f.node('#camera-source').open,false);
 });
 function projectFixture(project){
  const records=[],posts=[],events={},stored=new Map(),nodes=new Map();
@@ -193,4 +193,18 @@ test('native Space scene hides the persistent search and section tabs; other sec
  assert.ok(!calls.includes('search'));
  open('shop');assert.equal(f.node('#header-search').hidden,false);assert.equal(f.node('#experience-nav').hidden,false);
  open('space');assert.equal(f.node('#header-search').hidden,true);assert.equal(f.frames.length,2);
+});
+
+// Focusing must never initiate a search or expose active background controls.
+test('text focus isolates the composer and clears on dismiss, submit, and section navigation',()=>{
+ const f=hubFixture(),q=f.node('#header-query');f.groups['[data-project]'][0].fire('click');
+ const frame=f.frames.at(-1),calls=[];frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push(name);return name==='state'?{cameraReady:true}:true}};
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
+ q.fire('focus');assert.equal(f.html.attributes['data-query-focus'],'');assert.equal(f.html.attributes['data-text-entry'],'');assert.equal(f.node('#project-content').inert,true);assert.equal(f.node('#experience-nav').inert,true);assert.ok(!calls.includes('search'));
+ f.node('#search-dismiss').fire('pointerdown');assert.equal(f.html.attributes['data-query-focus'],undefined);assert.equal(f.node('#project-content').inert,false);
+ q.fire('focus');q.value='chair';f.node('#header-search').fire('submit');assert.equal(calls.filter(x=>x==='search').length,1);assert.equal(f.html.attributes['data-text-entry'],undefined);
+ q.fire('focus');f.groups['[data-experience]'][2].fire('click');assert.equal(f.html.attributes['data-query-focus'],undefined);assert.equal(f.node('#project-content').inert,false);
+ const active=f.frames.at(-1);f.listeners.message({origin:'https://findzia.com',source:active.contentWindow,data:{findziaHub:true,type:'text-entry',active:true}});assert.equal(f.html.attributes['data-text-entry'],'');
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'text-entry',active:false}});assert.equal(f.html.attributes['data-text-entry'],'','a hidden frame cannot dismiss current text focus');
+ f.listeners.message({origin:'https://findzia.com',source:active.contentWindow,data:{findziaHub:true,type:'text-entry',active:false}});assert.equal(f.html.attributes['data-text-entry'],undefined);
 });

@@ -123,3 +123,10 @@
  @media(prefers-reduced-motion:reduce){html[data-findzia-embedded] :is(.experience-copy,.view,.experience-actions button){animation:none!important;transition:none!important}}
 }
 @keyframes experience-copy-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+@layer findzia-experience {
+ html[data-findzia-embedded] .experience-primary{animation:experience-action-focus .5s cubic-bezier(.2,.75,.25,1) both}
+ html[data-findzia-embedded] .experience-secondary{opacity:.8!important}
+ @media(prefers-reduced-motion:reduce){html[data-findzia-embedded] .experience-primary{animation:none!important}}
+}
+@keyframes experience-action-focus{from{opacity:0;transform:translateY(7px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}

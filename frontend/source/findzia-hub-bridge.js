@@ -94,6 +94,9 @@ function mount(){
  });
  document.addEventListener('click',event=>{if(!embedded)return;const link=event.target.closest('a[href]');if(!link)return;const url=new URL(link.href,location.href);if(url.origin===location.origin&&['/','/home','/home/'].includes(url.pathname)&&!url.search){event.preventDefault();post({type:'close'})}});
  if(embedded){
+  const textEntry=node=>!!node?.matches?.('textarea,input:not([type=file]):not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=button]):not([type=submit])');
+  document.addEventListener('focusin',event=>{if(textEntry(event.target))post({type:'text-entry',active:true})});
+  document.addEventListener('focusout',()=>queueMicrotask(()=>post({type:'text-entry',active:textEntry(document.activeElement)})));
   document.addEventListener('input',event=>{if(event.target.matches(querySelector()))publishState()});
   document.addEventListener('click',event=>{const choice=event.target.closest?.('[data-action="set-market"]');if(choice&&/^[A-Z]{2}$/.test(choice.dataset.id||'')){try{localStorage.setItem('findzia-market-country-v1',choice.dataset.id);localStorage.setItem('findzia-services-country-v1',choice.dataset.id)}catch{}post({type:'market',country:choice.dataset.id})}queueMicrotask(publishState)},true);
   document.addEventListener('findzia:header-state',publishState);
