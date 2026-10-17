@@ -10,7 +10,7 @@ const manifest=JSON.parse(readFileSync(resolve(out,'release.json'),'utf8'));
 const hash=body=>createHash('sha256').update(body).digest('hex');
 function emit(url,file,body,type,immutable=false){body=Buffer.from(body);const path=resolve(out,file);mkdirSync(dirname(path),{recursive:true});writeFileSync(path,body);manifest.routes[url]={file,sha256:hash(body),type,immutable};return url;}
 const files={
- 'space-story.webp':'hub-art/space-story.webp','home-products.webp':'hub-art/home-products.webp','home-carpentry.webp':'hub-art/home-carpentry.webp',
+ 'home-calm.webp':'hub-art/home-calm.webp','home-products.webp':'hub-art/home-products.webp','home-carpentry.webp':'hub-art/home-carpentry.webp',
  'findzia-home-copy.js':'findzia-home-copy.js','findzia-home-focus.js':'findzia-home-focus.js',
  'findzia-boot.js':'findzia-boot.js','findzia-hub-bridge.css':'findzia-hub-bridge.css','findzia-hub.css':'findzia-hub.css','findzia-hub.js':'findzia-hub.js','findzia-hub-bridge.js':'findzia-hub-bridge.js'
 };
@@ -41,6 +41,6 @@ if(/__ASSET_|__ANALYTICS__/.test(html))throw Error('Unresolved hub asset');
 emit('/','index.html',html,'html');manifest.routes['/index.html']=manifest.routes['/'];manifest.routes['/home']=manifest.routes['/'];manifest.routes['/home/']=manifest.routes['/'];
 const sitemapEntry=manifest.routes['/sitemap.xml'];
 const sitemap=readFileSync(resolve(out,sitemapEntry.file),'utf8').replace('</urlset>','<url><loc>https://findzia.com/search</loc></url></urlset>');writeFileSync(resolve(out,sitemapEntry.file),sitemap);sitemapEntry.sha256=hash(sitemap);
-const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261016.8';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
-manifest.hub='20261016.8';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
+const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261017.1';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
+manifest.hub='20261017.1';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
 console.log('Findzia Home: Design, Products and Services; One inside Products.');

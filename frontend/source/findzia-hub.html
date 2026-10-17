@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#f3f2ed">
 <meta name="description" content="تصميم، منتجات وخدمات لبيتك. صمّم مساحتك، قارن أسعار احتياجات المنزل، وابحث عن المختصين.">
 <meta property="og:title" content="Findzia — Design, products and services for your home">
-<meta property="og:image" content="https://findzia.com__ASSET_space-story.webp__">
+<meta property="og:image" content="https://findzia.com__ASSET_home-calm.webp__">
 <title>Findzia</title>
 <link rel="canonical" href="https://findzia.com/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -15,6 +15,7 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="__ASSET_findzia-boot.js__"></script>
 <script>(()=>{try{const l=localStorage.getItem('findzia-lang')||localStorage.getItem('findzia-hub-language')||navigator.language.split('-')[0];document.documentElement.lang=l;document.documentElement.dir=['ar','ur'].includes(l)?'rtl':'ltr';if(!localStorage.getItem('findzia-lang'))localStorage.setItem('findzia-lang',l);localStorage.removeItem('findzia-hub-language');}catch{}document.documentElement.dataset.theme=document.documentElement.dataset.findziaTheme||'light';})();</script>
+<link rel="preload" as="image" href="__ASSET_home-calm.webp__" fetchpriority="high">
 <link rel="stylesheet" href="__ASSET_findzia-hub.css__">
 <script src="__ASSET_findzia-home-copy.js__"></script>
 <script defer src="__ASSET_findzia-hub.js__"></script>
@@ -31,6 +32,9 @@ __ANALYTICS__
 <symbol id="i-camera" viewBox="0 0 24 24"><path d="M8 5.5 9.5 3.5h5L16 5.5h3A2.5 2.5 0 0 1 21.5 8v10a2.5 2.5 0 0 1-2.5 2.5H5A2.5 2.5 0 0 1 2.5 18V8A2.5 2.5 0 0 1 5 5.5Z"/><circle cx="12" cy="12.5" r="4"/></symbol>
 <symbol id="i-back" viewBox="0 0 24 24"><path d="m14 5-7 7 7 7"/></symbol>
 <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
+<symbol id="i-home-design" viewBox="0 0 24 24"><path d="m3.5 10 8.5-7 8.5 7M5.5 8.5V20h5v-6h3v6h5v-6.5"/><path d="m19 2 .6 2.4L22 5l-2.4.6L19 8l-.6-2.4L16 5l2.4-.6Z"/></symbol>
+<symbol id="i-home-shop" viewBox="0 0 24 24"><path d="M5 7.5h14l1 13H4l1-13Z"/><path d="M8 8V6a4 4 0 0 1 8 0v2"/></symbol>
+<symbol id="i-home-pro" viewBox="0 0 24 24"><path d="M14.4 5.1a5.3 5.3 0 0 0-6.7 6.7l-4.5 4.5a2.5 2.5 0 0 0 3.5 3.5l4.5-4.5a5.3 5.3 0 0 0 6.7-6.7l-3.2 3.2-3-3 2.7-3.7Z"/></symbol>
 </svg>
 <div class="hub-shell">
 <header class="site-header" id="main-header">
@@ -48,22 +52,26 @@ __ANALYTICS__
 </div>
 </header>
 <main id="projects">
-<div class="collection-heading"><h1 data-t="choose">كل شيء لبيتك.</h1><span dir="ltr">01 — 03</span></div>
-<div class="project-grid">
-<a href="/space" class="project-card space-card" data-project="space">
-<span class="card-image"><img src="__ASSET_space-story.webp__" alt="" width="1536" height="1024" fetchpriority="high"></span>
-<span class="card-copy"><strong data-t="space">صمّم بيتك</strong><span class="card-detail" data-t="spaceDetail">من صورتك إلى تصميم، ثم تسوّق القطع.</span></span>
-<span class="card-open" aria-hidden="true"><svg class="icon"><use href="#i-arrow"/></svg></span>
+<section class="home-hero" aria-labelledby="home-title">
+<div class="home-image"><img src="__ASSET_home-calm.webp__" alt="" width="1254" height="1254" fetchpriority="high" decoding="async"></div>
+<div class="home-content">
+<h1 id="home-title" data-t="choose">كل شيء لبيتك.</h1>
+<nav class="home-actions" aria-labelledby="home-title">
+<a href="/space" class="home-action design-action" data-project="space" aria-describedby="design-purpose">
+<span class="home-action-icon"><svg class="icon" aria-hidden="true"><use href="#i-home-design"/></svg></span>
+<span data-t="designAction">صمّم</span><span class="sr-only" id="design-purpose" data-t="spaceDetail">من صورتك إلى تصميم، ثم تسوّق القطع.</span>
 </a>
-<a href="/search" class="project-card shop-card" data-project="shop">
-<span class="card-image"><img src="__ASSET_home-products.webp__" alt="" width="1254" height="1254"></span>
-<span class="card-copy"><strong data-t="shop">منتجات البيت</strong></span>
+<a href="/search" class="home-action" data-project="shop" aria-describedby="shop-purpose">
+<span class="home-action-icon"><svg class="icon" aria-hidden="true"><use href="#i-home-shop"/></svg></span>
+<span data-t="shopAction">تسوّق</span><span class="sr-only" id="shop-purpose" data-t="shop">منتجات البيت</span>
 </a>
-<a href="/trial/services" class="project-card services-card" data-project="services">
-<span class="card-image"><img src="__ASSET_home-carpentry.webp__" alt="" width="1254" height="1254"></span>
-<span class="card-copy"><strong data-t="services">خدمات البيت</strong></span>
+<a href="/trial/services" class="home-action" data-project="services" aria-describedby="services-purpose">
+<span class="home-action-icon"><svg class="icon" aria-hidden="true"><use href="#i-home-pro"/></svg></span>
+<span data-t="prosAction">مختصين</span><span class="sr-only" id="services-purpose" data-t="services">خدمات البيت</span>
 </a>
+</nav>
 </div>
+</section>
 </main>
 </div>
 <dialog id="project-layer" aria-labelledby="layer-title">

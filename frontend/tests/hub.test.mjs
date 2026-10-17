@@ -12,13 +12,13 @@ let server,origin;
 before(async()=>{server=createServer({FINDZIA_PAYMENT_PROVIDER:'paddle'});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));origin='http://127.0.0.1:'+server.address().port});
 after(()=>new Promise(resolve=>server.close(resolve)));
 const get=path=>fetch(origin+path,{redirect:'manual'});
-test('one selection section, three home entrances, all local assets available',async()=>{
+test('one calm image, three home entrances, all local assets available',async()=>{
  const response=await get('/'),html=await response.text();assert.equal(response.status,200);
- assert.equal([...html.matchAll(/class="project-card /g)].length,3);assert.equal([...html.matchAll(/class="project-grid"/g)].length,1);assert.doesNotMatch(html,/class="hero"|intent-picker|faq-section|__ASSET_/);
+ assert.equal([...html.matchAll(/data-project="(?:space|shop|services)"/g)].length,3);assert.equal([...html.matchAll(/<img\b/g)].length,1);assert.equal([...html.matchAll(/class="home-hero"/g)].length,1);assert.doesNotMatch(html,/collection-heading|project-grid|project-card|intent-picker|faq-section|__ASSET_/);
  for(const path of ['/search','/space','/trial/services'])assert.ok(html.includes('href="'+path+'"'));
- assert.match(html,/<div class="project-grid">\s*<a[^>]+data-project="space"/);assert.match(html,/data-t="spaceDetail"/);assert.match(html,/<dialog id="project-layer"/);assert.equal([...html.matchAll(/<header\b/g)].length,1);assert.doesNotMatch(html,/class="layer-toolbar"/);assert.ok(html.indexOf('</header>')<html.indexOf('<dialog id="project-layer"'));assert.match(html,/<form id="header-search"[^>]+hidden/);
+ assert.match(html,/<nav class="home-actions"[^>]*>\s*<a[^>]+data-project="space"/);assert.match(html,/data-t="spaceDetail"/);assert.match(html,/<dialog id="project-layer"/);assert.equal([...html.matchAll(/<header\b/g)].length,1);assert.doesNotMatch(html,/class="layer-toolbar"/);assert.ok(html.indexOf('</header>')<html.indexOf('<dialog id="project-layer"'));assert.match(html,/<form id="header-search"[^>]+hidden/);
  for(const asset of new Set([...html.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]))){const r=await get(asset);assert.equal(r.status,200,asset);assert.match(r.headers.get('cache-control'),/immutable/)}
- const css=read('../source/findzia-hub.css');assert.match(css,/height:var\(--hub-height\)/);assert.match(css,/grid-template-areas:"space shop" "space services"/);assert.match(css,/env\(safe-area-inset-bottom\)/);assert.match(css,/prefers-reduced-motion/);
+ const css=read('../source/findzia-hub.css');assert.match(css,/height:var\(--hub-height\)/);assert.match(css,/grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);assert.match(css,/env\(safe-area-inset-bottom\)/);assert.match(css,/prefers-reduced-motion/);
 });
 test('only project documents allow same-origin embedding; home and payment files retain protections',async()=>{
  const home=await get('/');assert.match(home.headers.get('content-security-policy'),/frame-src 'self'/);assert.equal(home.headers.get('x-frame-options'),'DENY');
@@ -158,6 +158,6 @@ test('design-to-service handoff carries the requested work for review without su
 });
 test('all home entrance and instruction labels are pretranslated, with no forbidden wording',()=>{
  const context={window:{}};vm.runInNewContext(read('../source/findzia-home-copy.js'),context);const copy=context.window.FindziaHomeCopy;
- for(const lang of copy.languages)for(const key of ['choose','space','shop','one','services','instruction','serviceAction','photoUnknown'])assert.ok(copy.get(lang,key),lang+' '+key);
+ for(const lang of copy.languages)for(const key of ['choose','space','shop','one','services','instruction','serviceAction','photoUnknown','designAction','shopAction','prosAction'])assert.ok(copy.get(lang,key),lang+' '+key);
  assert.equal(copy.get('ar','services'),'خدمات البيت');assert.equal(copy.get('ar','one'),'اختَر لي');
 });

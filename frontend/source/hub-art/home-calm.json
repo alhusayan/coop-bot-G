@@ -1,0 +1,14 @@
+{
+  "asset": "home-calm.webp",
+  "created": "2026-10-17",
+  "use": "Single Findzia homepage image above three functional section entrances",
+  "tool": "Built-in image_gen",
+  "source": "generated_images/exec-55ffe3e1-50b2-4521-b633-94cf5edd518b.png",
+  "dimensions": [
+    1254,
+    1254
+  ],
+  "format": "WebP",
+  "quality": 88,
+  "prompt": "Use case: photorealistic-natural. Asset type: a single calm luxury residential interior photograph for Findzia's home-design, home-shopping and home-professionals landing page. Generate an entirely new photograph, not a UI mockup. Square 1:1 composition, high resolution. A beautifully restrained contemporary living room with a single low sculptural ivory linen sofa, one low rounded walnut coffee table with an empty surface, and one slender bronze floor lamp with a softly glowing ivory shade. Three principal objects only. Soft warm plaster walls, a narrow beautifully crafted walnut joinery panel on the back wall, sheer curtain and diffused daylight from a window just outside the left edge. Light warm limestone floor, understated unpatterned oatmeal rug. Human, inviting, refined, softly lit, impeccably composed architectural editorial photography, tactile natural fabrics, creamy ivory and muted walnut with only a small olive cushion. No harsh sunlight stripes, low contrast, no ostentation. Center the sofa, table and lamp as a coherent group within the central 70% of the frame so it survives both portrait and wide website crops; show the room at eye level with straight architectural lines. The furniture group occupies the middle area; leave calm plaster wall above and 25% uncluttered floor foreground below for a coded black gradient and controls. The image must immediately read as a thoughtfully designed HOME. No inset pictures, no floating product cards, no before-after collage, no plants, no wall art, no shelves of objects, no people, no text, no logos, no icons, no decorative clutter, no visible web interface. One continuous real-looking room, aesthetically very quiet, elegant and welcoming."
+}
