@@ -29,7 +29,7 @@ function notice(key){const node=$('#header-notice');node.textContent=copy(key);n
 // Same-origin synchronous calls preserve the tap's user activation for iOS file pickers.
 function action(name,data={}){try{return frame?.contentWindow?.FindziaHubBridge?.action?.(name,data)||false}catch{return false}}
 function searchFocus(value){
- queryFocused=!!value;html.toggleAttribute('data-query-focus',queryFocused);
+ queryFocused=!!value;viewport();html.toggleAttribute('data-query-focus',queryFocused);
  html.toggleAttribute('data-text-entry',queryFocused||childTyping);
  $('#search-dismiss').hidden=false;
  // Inert content cannot steal a tap while the keyboard is open.
@@ -51,7 +51,7 @@ function render(){html.lang=lang;html.dir=['ar','ur'].includes(lang)?'rtl':'ltr'
 function setLanguage(value,notify=true){lang=validLang(value);save('findzia-lang',lang);render();if(notify)send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto'})}
 function syncTheme(){const theme=window.FindziaAppearance?.apply()?.theme||(read('findzia-appearance-v1')==='dark'?'dark':'light');html.dataset.theme=theme;render()}
 function syncAccount(){let signedIn=false;try{const s=JSON.parse(sessionStorage.getItem('findzia-account-v1-session'));signedIn=!!s?.access_token&&s.expires_at>Date.now()/1000}catch{}all('.account-dot').forEach(el=>el.hidden=!signedIn)}
-function viewport(){const v=window.visualViewport;if(v&&Math.abs(v.scale-1)>.05)return;html.style.setProperty('--hub-height',Math.round(Math.min(window.innerHeight,v?.height||window.innerHeight))+'px');measureHeader()}
+function viewport(){const v=window.visualViewport;if(v&&Math.abs(v.scale-1)>.05)return;html.style.setProperty('--hub-height',Math.round(Math.min(window.innerHeight,v?.height||window.innerHeight))+'px');html.style.setProperty('--hub-viewport-top',Math.round(v?.offsetTop||0)+'px');measureHeader()}
 function ready(){clearTimeout(loadTimer);isReady=true;if(sessions.has(active))sessions.get(active).ready=true;status.hidden=true;retry.hidden=true;send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto',country:read('findzia-market-country-v1')});headerState(action('state')||{});if(pendingQuery!==null){query.value=pendingQuery;action('prepare',{query:pendingQuery});pendingQuery=null}syncAccount()}
 function showError(){status.hidden=false;status.querySelector('[data-t]').textContent=t('error');retry.hidden=false}
 function mountFrame(hash=''){
@@ -89,6 +89,7 @@ window.addEventListener('message',event=>{
  if(data.type==='ready')ready();
  if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else query.focus();}
  if(data.type==='header-state')headerState(data);
+ if(data.type==='search-blocked')endSearchFocus();
  if(data.type==='text-entry'){childTyping=data.active===true;html.toggleAttribute('data-text-entry',queryFocused||childTyping);$('#experience-nav').inert=queryFocused||childTyping;}
  if(data.type==='market'&&/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;save('findzia-market-country-v1',currentCountry);save('findzia-services-country-v1',currentCountry);save('findzia-market-country-ts-v1',String(Date.now()));render()}
  if(data.type==='close')closeProject();
@@ -107,6 +108,13 @@ $('#open-preferences').addEventListener('click',preferences);
 $('#menu-preferences').addEventListener('click',()=>{$('#hub-menu').close();preferences()});
 $('#hub-theme').addEventListener('change',event=>{save('findzia-appearance-v1',event.target.value);syncTheme();send({type:'preferences',language:lang,theme:event.target.value})});
 $('#hub-country').addEventListener('change',event=>{const value=event.target.value;if(!marketOptions.includes(value))return;currentCountry=value;save('findzia-market-country-v1',value);save('findzia-services-country-v1',value);save('findzia-market-country-ts-v1',String(Date.now()));save('findzia_manual_market_v1',value);action('country',{country:value});render()});
+// Put the field at its final visible position before Safari raises the keyboard.
+// Animating its layout position during native focus makes iOS pan to stale bounds.
+query.addEventListener('pointerdown',event=>{
+ if(!productLanding||queryFocused||query.disabled)return;
+ event.preventDefault();searchFocus(true);search.getBoundingClientRect();query.focus({preventScroll:true});
+ if(!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)search.animate?.([{opacity:.75,scale:'.98'},{opacity:1,scale:'1'}],{duration:260,easing:'cubic-bezier(.2,.75,.25,1)'});
+});
 query.addEventListener('focus',()=>searchFocus(true));
 search.addEventListener('focusout',event=>{if(!search.contains?.(event.relatedTarget))searchFocus(false)});
 $('#search-dismiss').addEventListener('pointerdown',event=>{event.preventDefault();endSearchFocus()});
@@ -118,7 +126,7 @@ all('[data-camera-source]').forEach(button=>button.addEventListener('click',()=>
 if(window.ResizeObserver)new ResizeObserver(measureHeader).observe(header);
 window.addEventListener('storage',event=>{if(event.key==='findzia-lang')setLanguage(read('findzia-lang')||lang,false);if(event.key==='findzia-appearance-v1')syncTheme();if(event.key==='findzia-account-v1-session')syncAccount()});
 window.addEventListener('popstate',()=>{const key=new URL(location.href).searchParams.get('project');if(key&&Object.hasOwn(projects,key))openProject(key,{push:false});else closeProject({update:false})});
-window.addEventListener('resize',viewport,{passive:true});window.visualViewport?.addEventListener('resize',viewport,{passive:true});window.addEventListener('pageshow',()=>{viewport();syncAccount();setLanguage(read('findzia-lang')||lang,false);syncTheme()});
+window.addEventListener('resize',viewport,{passive:true});window.visualViewport?.addEventListener('resize',viewport,{passive:true});window.visualViewport?.addEventListener('scroll',viewport,{passive:true});window.addEventListener('pageshow',()=>{viewport();syncAccount();setLanguage(read('findzia-lang')||lang,false);syncTheme()});
 viewport();render();syncTheme();syncAccount();
 const initial=new URL(location.href),auth=/(?:^#|&)(?:findzia-login|findzia-auth-error)=/.test(initial.hash),key=initial.searchParams.get('project');
 if(auth){const hash=initial.hash;initial.hash='';const project=Object.hasOwn(projects,key)?key:'account';initial.searchParams.set('project',project);history.replaceState({findziaHub:true},'',initial.pathname+initial.search);openProject(project,{push:false,hash})}else if(Object.hasOwn(projects,key))openProject(key,{push:false});else if(initial.searchParams.has('q'))openProject('shop',{push:false});

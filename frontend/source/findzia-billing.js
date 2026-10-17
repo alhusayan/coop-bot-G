@@ -84,9 +84,10 @@
         if(rect.top<inset||rect.bottom>(window.visualViewport?.height||window.innerHeight||800))hint.scrollIntoView?.({block:'start',behavior:'auto'});
       });
     };
+    function reportSearchBlock(code){root.dispatchEvent(new CustomEvent('fz:search-blocked',{bubbles:true,detail:{code,message:message(code)}}));}
     function blockSearch(code){
       root.querySelectorAll('dialog[data-refine-dialog][open],dialog.fz-guide[open]').forEach(dialog=>dialog.close());
-      notice(code);return false;
+      notice(code);reportSearchBlock(code);return false;
     }
     function button(text, fn, cls='fza-primary'){const b=el('button',cls,text);b.type='button';b.addEventListener('click',fn);return b;}
     function message(code){return ({
@@ -127,15 +128,16 @@
       const anchor=home?root.querySelector('[data-dark-form]'):limited?root.querySelector('[data-results-body]'):root.querySelector('[data-search-card]');
       const before=home||limited;
       if(anchor&&(before?anchor.previousElementSibling:anchor.nextElementSibling)!==hint){if(before)anchor.before(hint);else anchor.after(hint);}
-      const key=[code,root.dataset.lang].join('|');hint.dir=rtl()?'rtl':'ltr';
+      const key=JSON.stringify([code,root.dataset.lang,config?.plans||status?.plans||[]]);hint.dir=rtl()?'rtl':'ltr';
       hint.className='fzb-search-notice'+(limited?' fzb-credit-card':'');
       hint.hidden=!code;
       if(key!==noticeKey){noticeKey=key;hint.replaceChildren();
         if(code==='credits_exhausted'){
           const title=el('h2','fzb-credit-title',tr('You’re out of search credits','انتهى الرصيد'));
           title.id=hint.id+'-title';
-          hint.append(title,el('p','fzb-credit-copy',tr('Add credits to keep searching.','أضف رصيدًا لمتابعة البحث.')),
-            button(tr('Add credits','إضافة رصيد'),()=>account.open('plans'),'fzb-credit-action'));
+          const packs=el('div','fzb-credit-pack-list');
+          hint.append(title,packs);
+          if(!renderCreditPacks(packs))packs.append(button(tr('Add credits','إضافة رصيد'),()=>account.open('plans'),'fzb-credit-action'));
         }else if(code){hint.append(document.createTextNode(message(code)));}
       }
       for(const input of inputs){const ids=new Set((input.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
@@ -156,7 +158,7 @@
         if(previous?.snapshot.view?.items?.length)bridge.restore(previous.snapshot);
         else if(previous?.homeState==='empty')bridge.restoreHomeView();
       }
-      notice(code);return true;
+      notice(code);reportSearchBlock(code);return true;
     }
     async function ensureGuest(){
       if(guestToken)return;
@@ -1016,6 +1018,20 @@
       if(account.member()&&(paddleConfig?.management_available||paddleConfig?.checkout_available))actions.append(button(tr('Purchase history','سجل المشتريات'),viewPurchases,'fza-text'));
       body.append(details,actions);
     }
+    // Use the live catalog and the existing checkout flow; displaying packs never creates an order.
+    function renderCreditPacks(body,{onChoose}={}){
+      const plans=(config?.plans||status?.plans||[]).filter(p=>p.interval==='once'&&Number.isFinite(p.amount_cents)&&p.amount_cents>0);
+      body.replaceChildren();if(!plans.length)return false;
+      const list=el('div','fzb-credit-packs');
+      for(const plan of plans){
+        const row=button('',()=>{onChoose?.();account.open('plans');choosePlan(plan.id);},'fzb-credit-pack');row.dataset.planBuy=plan.id;
+        const info=el('span','fzb-credit-pack-info'),name=el('strong','',plan.name),count=el('span','',tf('{count} credits',{count:plan.credits},'{count} رصيد'));
+        info.append(name,count);
+        const amount=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(plan.amount_cents/100),price=el('bdi','fzb-credit-pack-price',amount);price.dir='ltr';
+        row.setAttribute('aria-label',plan.name+' · '+count.textContent+' · '+amount+' USD');row.append(info,price);list.append(row);
+      }
+      body.append(list,el('p','fzb-credit-pack-note',tr('One-time payment','دفعة واحدة')+' · '+tr('No expiry','بدون انتهاء')));return true;
+    }
     function renderPlans(body){
       // Warm the SDK when the customer opens plans. Never create an order here.
       if(account.member())paymentConfig().then(()=>{if(paddleConfig?.checkout_available)loadPaddle().catch(()=>{});});
@@ -1067,7 +1083,7 @@
       if(view==='checkout')return JSON.stringify([paymentMessage,paymentState,paymentBusy,selectedPlan(),paymentTxn,mfConfig?.enabled]);
       return JSON.stringify([status,error,paddleConfig?.management_available,paddleConfig?.checkout_available]);
     }
-    root.fzBilling={renderStamp,viewPurchases,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Credits remaining: {count}',{count:status.remaining},'الرصيد المتبقي: {count}'):tr('3 free designs + 2 free product searches','3 تصاميم مجانية + بحثان مجانيان عن المنتجات')};
+    root.fzBilling={renderStamp,viewPurchases,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCreditPacks,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Credits remaining: {count}',{count:status.remaining},'الرصيد المتبقي: {count}'):tr('3 free designs + 2 free product searches','3 تصاميم مجانية + بحثان مجانيان عن المنتجات')};
     root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;feedbackEpoch++;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
     root.addEventListener('fz:account-view',e=>{
       if(e.detail.to!=='checkout')clearCompletedFeedback();
@@ -1141,6 +1157,13 @@
     .fz-home[data-theme=dark] .fzb-credit-copy{color:#bac6bd}
     .fz-home[data-theme=dark] .fzb-credit-action{background:#2e4337;color:#e2f0e6}
     .fz-home[data-theme=dark] .fzb-credit-action:hover{background:#3b5143}
+
+    .fzb-credit-packs{display:grid;gap:8px;margin:16px 0 0;width:100%;text-align:start}
+    .fzb-credit-packs .fzb-credit-pack{box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;min-height:68px;margin:0;padding:13px 15px;border:1px solid #244f3f28;border-radius:16px;background:var(--fz-surface,#f9faf7);color:var(--fz-ink,#24382d);font:inherit;text-align:start;cursor:pointer;box-shadow:none;transition:transform .2s,background .2s}
+    .fzb-credit-pack:active{transform:scale(.98)}.fzb-credit-pack-info{display:grid;gap:3px}.fzb-credit-pack-info strong{font-size:14px;font-weight:600}.fzb-credit-pack-info>span{font-size:12px;opacity:.7}
+    .fzb-credit-pack-price{flex:none;font-size:17px;font-weight:600;padding:8px 12px;border-radius:12px;background:#244f3f;color:#fff}
+    .fzb-credit-pack-note{font:inherit!important;font-size:12px!important;line-height:1.5!important;opacity:.7;margin:12px 0 0!important}
+    [data-findzia-theme=dark] .fzb-credit-pack,[data-theme=dark] .fzb-credit-pack{background:#172b22;color:#fffdf5;border-color:#ffffff24}
     .fzb-plans{display:grid;gap:13px}.fzb-plans:has(>.fzb-plan:only-child){grid-template-columns:1fr;max-width:440px;margin-inline:auto}.fzb-plan{border:1px solid var(--a-line);border-radius:20px;background:var(--a-surface);padding:20px}
     .fzb-plan h3{font-size:16px;margin:0 0 12px;font-weight:600}.fzb-price{display:flex;align-items:baseline;gap:7px;margin:0 0 14px;justify-content:flex-start}
     .fzb-price strong{font-size:35px;letter-spacing:-1px;font-weight:550}.fzb-price span{font-size:12px;color:var(--a-muted)}

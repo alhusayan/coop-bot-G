@@ -171,7 +171,7 @@ function renderResults(focus=true){
  });
  if(focus&&view.total){if(history.state?.findziaServices!=='results')history.pushState({findziaServices:'results'},'',location.href);$('#svc-results-title').focus({preventScroll:true});$('#svc-results').scrollIntoView({behavior:motion(),block:'start'});}
 }
-function showCreditLimit(){notice(t('noSearchCredit'));const button=node('button','',t('addCredits'));button.type='button';button.onclick=()=>root.fzAccount.open('plans');$('#svc-message').append(button);$('#svc-message').scrollIntoView({behavior:motion(),block:'center'});}
+function showCreditLimit(){notice(t('noSearchCredit'));const packs=node('div','svc-credit-packs');if(root.fzBilling?.renderCreditPacks?.(packs)){$('#svc-message').append(packs);$('#svc-message').scrollIntoView({behavior:motion(),block:'start'});return;}const button=node('button','',t('addCredits'));button.type='button';button.onclick=()=>root.fzAccount.open('plans');$('#svc-message').append(button);$('#svc-message').scrollIntoView({behavior:motion(),block:'center'});}
 const areaStorageKey='findzia-services-area-v3',areasStorageKey='findzia-services-areas-v1';
 function savedAreas(){try{const value=JSON.parse(read(areasStorageKey));return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}catch{return {};}}
 function remember(){

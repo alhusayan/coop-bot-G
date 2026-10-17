@@ -102,6 +102,10 @@ function mount(){
   document.addEventListener('findzia:header-state',publishState);
   document.addEventListener('findzia:market-change',event=>{const country=event.detail?.country;if(!/^[A-Z]{2}$/.test(country||''))return;publishState();if(!countryApplying)post({type:'market',country});});
   root.addEventListener('fz:search-state',publishState);
+  root.addEventListener('fz:search-blocked',event=>{
+   post({type:'search-blocked'});
+   if(event.detail?.code==='credits_exhausted'&&(project==='space'||root.dataset.homeState==='empty'))root.fzAccount?.open('plans');
+  });
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!document.querySelector('dialog[open]'))post({type:'close'})});
   if(window.MutationObserver){
    const observer=new MutationObserver(publishState);observer.observe(root,{attributes:true,attributeFilter:['data-home-state','data-lang']});

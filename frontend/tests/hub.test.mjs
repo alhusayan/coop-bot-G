@@ -252,3 +252,17 @@ test('one product composer docks in the photograph, expands with blur and follow
  assert.equal(f.node('#product-mode').hidden,true);f.node('#header-camera').fire('click');assert.equal(calls.at(-1).name,'camera');
  f.node('#close-layer').fire('click');assert.equal(f.html.attributes['data-product-landing'],undefined);
 });
+
+test('Safari field is positioned before focus and tracks keyboard viewport panning',()=>{
+ const f=hubFixture();f.groups['[data-project]'][0].fire('click');const frame=f.frames.at(-1),calls=[];
+ frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push({name,data});return name==='state'?{landing:true,cameraReady:true}:true}};
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
+ const query=f.node('#header-query');let prevented=false;
+ query.focus=options=>{assert.equal(f.html.attributes['data-query-focus'],'','focus layout must precede native keyboard activation');assert.equal(options.preventScroll,true);};
+ query.fire('pointerdown',{preventDefault(){prevented=true}});assert.equal(prevented,true);
+ f.window.visualViewport.height=290;f.window.visualViewport.offsetTop=180;f.listeners['viewport-scroll']();
+ assert.equal(f.html.style['--hub-height'],'290px');assert.equal(f.html.style['--hub-viewport-top'],'180px');
+ assert.equal(f.node('#project-content').inert,true);query.value='طاولة';query.fire('input');f.node('#header-search').fire('submit');
+ assert.equal(calls.at(-1).name,'search');assert.equal(calls.at(-1).data.query,'طاولة');assert.equal(f.node('#project-content').inert,false);
+ f.window.visualViewport.offsetTop=0;f.window.visualViewport.height=560;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-viewport-top'],'0px');
+});
