@@ -195,3 +195,35 @@
  html[data-findzia-embedded] :is(.svc-dialog-head>button,[data-dark-menu-close],.fza-header>.fza-round:last-child,.fz-guide-close,.fz-one-dialog-head>button,.fz-insights-close,[data-preferences-close],[data-refine-close],.fz-camera-head>button:first-child) svg{width:18px!important;height:18px!important;stroke-width:1.5!important}
  html[data-findzia-embedded] #svc-directory-title:focus{outline:0!important}
 }
+
+/* Service categories live on the original room, with a separate scroll surface. */
+@layer findzia-hub-embed {
+ html[data-experience=services] .experience-entry:after{content:'';position:absolute;inset:0;z-index:0;background:#0009;opacity:0;pointer-events:none;transition:opacity .55s cubic-bezier(.2,.75,.25,1)}
+ html[data-experience=services][data-experience-stage=directory] .experience-entry:after{opacity:1}
+ html[data-experience=services] .experience-copy{transition:opacity .35s,transform .5s cubic-bezier(.2,.75,.25,1)}
+ html[data-experience=services][data-experience-stage=directory] .experience-copy{opacity:0;transform:translateY(18px) scale(.97);pointer-events:none}
+ html[data-experience=services][data-experience-stage=directory] #svc-form{display:none!important}
+ html[data-experience=services] .experience-entry>.svc-directory{position:absolute!important;inset:0!important;z-index:1;display:flex!important;flex-direction:column!important;width:100%!important;height:100%!important;max-height:none!important;max-width:none!important;margin:0!important;padding:26px 24px 12px!important;border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important;color:#fffdf5!important;text-align:start!important;opacity:1;visibility:visible;transform:none;transition:opacity .45s,transform .55s cubic-bezier(.2,.75,.25,1),visibility .45s;--svc-ink:#fffdf5;--svc-muted:#fffdf5b3;--svc-line:#ffffff26;--svc-soft:#ffffff09;--svc-green:#dce7d6;--svc-surface:transparent}
+ html[data-experience=services] .experience-entry>.svc-directory[hidden]{display:flex!important;opacity:0;visibility:hidden;transform:translateY(14px);pointer-events:none}
+ html[data-experience=services] .svc-directory .svc-dialog-head{width:100%;max-width:720px;margin:0 auto 18px!important;align-items:flex-start!important;flex:none}
+ html[data-experience=services] .svc-directory h2{font-size:24px!important;font-weight:500!important;line-height:1.4!important;color:inherit!important;margin:0!important}
+ html[data-experience=services] .svc-directory .svc-dialog-head p{font-size:13px!important;line-height:1.7!important;color:#fffdf5b3!important;margin:7px 0 0!important}
+ html[data-experience=services] #svc-directory-close{color:#fffdf5!important;background:transparent!important;border:0!important;box-shadow:none!important;opacity:.7!important;font-size:22px!important;font-weight:300!important;width:44px!important;height:44px!important;padding:0!important;margin:-5px -10px 0 0!important;flex:none}
+ html[data-experience=services][dir=rtl] #svc-directory-close{margin:-5px 0 0 -10px!important}
+ html[data-experience=services] #svc-directory-groups{width:100%;max-width:720px;margin-inline:auto;flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#ffffff45 transparent;padding:0 0 22px;mask-image:linear-gradient(#000 calc(100% - 18px),transparent)}
+ html[data-experience=services] .svc-directory-group{border-color:#ffffff26!important;color:inherit!important}
+ html[data-experience=services][data-experience-stage=directory] .svc-directory-group{animation:service-category-in .55s cubic-bezier(.2,.75,.25,1) both;animation-delay:calc(var(--svc-order,0)*35ms)}
+ html[data-experience=services] .svc-directory-group summary{min-height:63px!important;padding:14px 1px!important;font-size:15px!important;font-weight:400!important;gap:12px!important;color:inherit!important}
+ html[data-experience=services] .svc-directory-group summary svg{width:21px!important;height:21px!important;opacity:.8}
+ html[data-experience=services] .svc-group-plus{font-size:21px!important;opacity:.65;transition:transform .32s cubic-bezier(.2,.75,.25,1)}
+ html[data-experience=services] .svc-directory-list{gap:6px!important;padding:2px 0 16px!important;animation:service-category-in .35s ease both}
+ html[data-experience=services] .svc-directory-list button{background:#ffffff08!important;border:1px solid #ffffff18!important;color:#fffdf5!important;font-size:13px!important;font-weight:400!important;min-height:48px!important;border-radius:10px!important;transition:background .2s,transform .2s}
+ html[data-experience=services] .svc-directory-list button:hover{background:#ffffff19!important}
+ html[data-experience=services] .svc-directory-list button:active{transform:scale(.97)}
+ html[data-experience=services] .svc-directory-empty{color:#fffdf5bb!important;font-size:14px!important;line-height:1.8!important}
+ html[data-experience=services] .svc-directory :is(button,summary):focus-visible{outline:1px solid #dce7d6!important;outline-offset:-2px!important}
+ html[data-experience=shop] .experience-composer-space{height:56px!important;min-height:56px!important}
+ @media(max-width:380px){html[data-experience=services] .experience-entry>.svc-directory{padding-inline:18px!important}html[data-experience=services] .svc-directory-group summary{font-size:14px!important}}
+ @media(prefers-reduced-motion:reduce){html[data-experience=services] :is(.experience-entry:after,.experience-copy,.svc-directory,.svc-directory-group,.svc-directory-list,.svc-group-plus){animation:none!important;transition:none!important}}
+}
+@keyframes service-category-in{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}

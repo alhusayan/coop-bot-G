@@ -46,18 +46,21 @@
   }else if(project==='services'){
    const main=$('#services-main');if(!main)return;main.prepend(entry);doc.dataset.experience='services';
    primary.onclick=()=>$('#svc-browse')?.click();
-   const form=$('#svc-form'),photo=$('#svc-photo-panel'),page=$('.svc-page');
+   const form=$('#svc-form'),photo=$('#svc-photo-panel'),page=$('.svc-page'),directory=$('#svc-directory');
+   entry.append(directory);
    state=()=>{
     const value=$('#svc-query').value.trim(),hasPhoto=!photo.hidden,results=page.dataset.hasResults==='true';
-    const stage=results?'results':value||hasPhoto?'request':'start';
+    const browsing=!directory.hidden;
+    const stage=browsing?'directory':results?'results':value||hasPhoto?'request':'start';
     if(doc.dataset.experienceStage!==stage)doc.dataset.experienceStage=stage;
-    entry.hidden=stage!=='start';
+    entry.hidden=!['start','directory'].includes(stage);
+    content.inert=browsing;content.setAttribute('aria-hidden',String(browsing));
    };
    document.addEventListener('findzia:header-state',state);$('#svc-query').addEventListener('input',state);
    observe=[page,photo,form,$('#svc-submit')];
   }else{
    const home=root.querySelector('[data-dark-home]');if(!home)return;home.append(entry);doc.dataset.experience='shop';
-   primary.onclick=()=>composer('query');
+   primary.remove();actions.classList.add('experience-composer-space');actions.setAttribute('aria-hidden','true');
   }
   function render(){
    const language=root.dataset.lang||doc.lang,copy=words[language]||words.en;

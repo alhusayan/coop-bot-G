@@ -17,10 +17,10 @@ function fixture(){
  }
  const $=s=>{if(!nodes.has(s))nodes.set(s,new Element());return nodes.get(s)};
  const context={$ ,URL,AbortController,language:'en',country:'KW',busy:false,ready:true,generation:0,pendingPhoto:null,retrieving:false,api:'https://api.findzia.com',
-  document:{activeElement:null,createElement:()=>new Element()},window:{innerHeight:500,visualViewport:{height:280}},requestAnimationFrame:fn=>fn(),setTimeout:()=>1,clearTimeout(){},
+  document:{activeElement:null,createElement:()=>new Element(),dispatchEvent(){},addEventListener(){},querySelector:()=>null},window:{innerHeight:500,visualViewport:{height:280}},requestAnimationFrame:fn=>fn(),setTimeout:()=>1,clearTimeout(){},
   savedServiceArea,normalizeServiceArea,serviceResults,serviceWhatsApp,notice(){},updateLocation(){},creditLabel(){},clearPhoto(){},t:k=>k,
   read:()=>'',write(){},remember(){},normalizeArea(){},motion:()=> 'instant',icon:()=>new Element(),sessionStorage:{getItem:()=>null,removeItem(){}},
-  setCountry:value=>context.country=value,root:{fzBilling:{refresh:async()=>{}}}};
+  setCountry:value=>context.country=value,Event,setDirectory(){},root:{dataset:{},fzBilling:{refresh:async()=>{}}}};
  vm.createContext(context);return {context,$,run:code=>vm.runInContext(code,context)};
 }
 test('area survives a new session and old session storage migrates once',()=>{
@@ -30,12 +30,16 @@ test('area survives a new session and old session storage migrates once',()=>{
  first.$('#svc-area').value='Hawally';first.run('remember()');const second=page();second.run('restore()');assert.equal(second.$('#svc-area').value,'Hawally');
  const changedCountry=page();changedCountry.context.country='GB';changedCountry.run('restore()');assert.equal(changedCountry.$('#svc-area').value,'');assert.equal(changedCountry.context.country,'GB');
 });
-test('directory magnifier and keyboard submit route directly to the service form once',()=>{
- const f=fixture(),queries=[];f.context.chooseService=q=>queries.push(q);f.context.renderDirectory=()=>{};
- f.run(section("const directory=$('#svc-directory');","root.querySelectorAll('.svc-page"));
- f.$('#svc-directory-query').value='  نجار  ';f.$('#svc-directory-form').onsubmit({preventDefault(){}});
- assert.equal(f.$('#svc-directory').closed,true);assert.deepEqual(queries,['نجار']);assert.equal(f.$('#svc-form').submits,1);
- f.context.busy=true;f.$('#svc-directory-form').onsubmit({preventDefault(){}});assert.equal(f.$('#svc-form').submits,1);
+test('inline directory opens without a modal and uses the existing service query',()=>{
+ const f=fixture();let renders=0;f.context.renderDirectory=()=>renders++;
+ f.run(section('function setDirectory(',"root.querySelectorAll('.svc-page"));
+ f.$('#svc-query').value='نجار';f.$('#svc-browse').onclick();
+ assert.equal(f.$('#svc-directory').hidden,false);assert.equal(f.$('#svc-directory').inert,false);
+ assert.equal(f.context.root.dataset.serviceDirectory,'open');assert.equal(renders,1);
+ f.$('#svc-directory-close').onclick();assert.equal(f.$('#svc-directory').hidden,true);assert.equal(f.$('#svc-directory').inert,true);
+ assert.equal(f.$('#svc-query').value,'نجار');
+ const html=readFileSync(new URL('../source/findzia-services.html',import.meta.url),'utf8');
+ assert.match(html,/<section id="svc-directory"/);assert.doesNotMatch(html,/svc-directory-(query|form|submit)/);
 });
 test('saved area searches without GPS; denied permission opens manual entry without charging',async()=>{
  const f=fixture(),payloads=[];let gps=0,manual=0;
