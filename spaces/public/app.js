@@ -346,7 +346,10 @@ document.addEventListener('contextmenu',event=>{if(event.target.closest?.('.desi
 function refreshSceneCopy(){
  const language=document.documentElement.lang;
  $$('[data-scene]').forEach(node=>{const text=sceneText(language,node.dataset.scene);if(node.textContent!==text)node.textContent=text;});
- $('.scene-options')?.setAttribute('aria-label',sceneText(language,'options'));
+ // The shared translator observes aria-label and reapplies html.lang.
+ // Writing the same label again would keep both observers running forever.
+ const options=$('.scene-options'),label=sceneText(language,'options');
+ if(options&&options.getAttribute('aria-label')!==label)options.setAttribute('aria-label',label);
 }
 refreshSceneCopy();
 new MutationObserver(refreshSceneCopy).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
