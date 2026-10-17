@@ -19,5 +19,9 @@ const rows={
  nl:['Ontwerp je ruimte.','Foto toevoegen','Bekijk voorbeeld','Ontwerpen maken','Opties','Je ruimte wordt ontworpen…','Open ontwerp','Tik op iets in je ontwerp','3 ontwerpen · 3 credits','Foto maken','Foto kiezen','Klaar'],
  tr:['Alanını tasarla.','Fotoğraf ekle','Örneği gör','Tasarımlar oluştur','Seçenekler','Alanınız tasarlanıyor…','Tasarımı aç','Tasarımdaki bir nesneye dokun','3 tasarım · 3 kredi','Fotoğraf çek','Fotoğraf seç','Bitti']
 };
+const navigation={
+ en:['Redesign','New design'],ar:['أعد التصميم','تصميم جديد'],fr:['Recréer','Nouveau projet'],de:['Neu gestalten','Neuer Entwurf'],es:['Rediseñar','Nuevo diseño'],it:['Ridisegna','Nuovo progetto'],pt:['Redesenhar','Novo design'],ru:['Переделать','Новый дизайн'],zh:['重新设计','新设计'],ja:['再デザイン','新しいデザイン'],ko:['다시 디자인','새 디자인'],hi:['फिर डिज़ाइन करें','नया डिज़ाइन'],ur:['دوبارہ ڈیزائن','نیا ڈیزائن'],id:['Desain ulang','Desain baru'],ms:['Reka semula','Rekaan baharu'],nl:['Opnieuw ontwerpen','Nieuw ontwerp'],tr:['Yeniden tasarla','Yeni tasarım']
+};
+keys.push('redesign','newDesign');for(const language of Object.keys(rows))rows[language].push(...navigation[language]);
 export const sceneLanguages=Object.keys(rows);
 export const sceneText=(language,key)=>(rows[language]||rows.en)[keys.indexOf(key)]||key;

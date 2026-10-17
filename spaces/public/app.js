@@ -8,13 +8,13 @@ import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} 
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene3';
-import {sceneText} from './space-scene-copy.js?v=20261017-scene1';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene4';
+import {sceneText} from './space-scene-copy.js?v=20261017-scene4';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 bindStoreLinks(document);
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
-const paths={options:'M4 7h16M4 17h16M9 4v6M15 14v6',checkCircle:'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M8 12l3 3 5-6',camera:'M4 7h4l2-3h4l2 3h4v13H4z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',plus:'M12 5v14M5 12h14',back:'M19 12H5m6-6-6 6 6 6',forward:'M5 12h14m-6-6 6 6-6 6',chevron:'m7 10 5 5 5-5',folder:'M3 6h7l2 3h9v12H3z',close:'m6 6 12 12M6 18 18 6',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4',compare:'M12 2v20M3 5h7v14H3zm11 0h7v14h-7',check:'m5 12 4 4L19 6',external:'M14 3h7v7M21 3l-11 11M9 5H3v16h16v-6',expand:'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5',more:'M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2'};
+const paths={refresh:'M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1',options:'M4 7h16M4 17h16M9 4v6M15 14v6',checkCircle:'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M8 12l3 3 5-6',camera:'M4 7h4l2-3h4l2 3h4v13H4z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',plus:'M12 5v14M5 12h14',back:'M19 12H5m6-6-6 6 6 6',forward:'M5 12h14m-6-6 6 6-6 6',chevron:'m7 10 5 5 5-5',folder:'M3 6h7l2 3h9v12H3z',close:'m6 6 12 12M6 18 18 6',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4',compare:'M12 2v20M3 5h7v14H3zm11 0h7v14h-7',check:'m5 12 4 4L19 6',external:'M14 3h7v7M21 3l-11 11M9 5H3v16h16v-6',expand:'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5',more:'M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2m7 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2'};
 const icon=(name,small=false)=>`<span class="icon${small?' small':''}" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${paths[name]||paths.spark}"/></svg></span>`;
 $$('[data-icon]').forEach(el=>el.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[el.dataset.icon]||paths.spark}"/></svg>`);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -65,7 +65,7 @@ async function api(path,opt={}){const r=await request(path,{...opt,headers:{'Con
 function resetRoom(){styleTour.stop();originalLayer.close();clearTimeout(pointTimer);pointStarted.clear();pointFocus=null;pointLaunches.clear();roomContext.begin();optionOrder.clear();clearTimeout(pollTimer);closeSheet();state.job=null;state.image=null;designArrival=[];designJob='';generationStarted=0;state.design=0;state.compare=false;state.itemId=null;updateImage($('#selected-image'),'');renderKey='';shopKey='';pollErrors=0;$('#items-list').innerHTML='';$('#hotspots').innerHTML='';}
 function applyJob(job,token){if(!roomContext.current(token)||!acceptsJob(state.job,job))return false;state.job=job;return true;}
 async function changeJob(path,body){const token=roomContext.capture(),id=state.job?.id;const authorization=['/retry','/replace'].includes(path)?await document.querySelector('.fz-home')?.fzBilling?.authorizeDesign(1):{};if(!authorization)return false;const job=await api('/api/jobs/'+id+path,{method:'POST',headers:authorization,body:JSON.stringify({...body,language:shell?.getLanguage()||'en'})});return state.job?.id===id&&applyJob(job,token);}
-function view(name){if(name!=='designs')styleTour.stop();state.view=name;$$('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));window.scrollTo({top:0,behavior:'instant'});if(name==='designs')renderDesigns();if(name==='shopping')renderShop();}
+function view(name){$('#return-designs').hidden=!state.job;if(name!=='designs')styleTour.stop();state.view=name;$$('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));window.scrollTo({top:0,behavior:'instant'});if(name==='designs')renderDesigns();if(name==='shopping')renderShop();}
 function country(){return state.config.markets[state.job?.options?.market||state.market]||fallbackMarkets.SA;}
 function money(n,currency=country().currency){if(n==null||!Number.isFinite(n))return 'Price at store';try{return new Intl.NumberFormat('en-US',{style:'currency',currency:currency||'USD',currencyDisplay:'code',maximumFractionDigits:['KWD','BHD','OMR'].includes(currency)?3:2}).format(n);}catch{return currency+' '+n;}}
 function syncMarket(){if(!state.config.markets[state.market])state.market=initialMarket;const m=state.config.markets[state.market];try{localStorage.setItem('spaces-market',state.market);}catch{}shell?.sync();}
@@ -84,7 +84,20 @@ $('#retry-access').addEventListener('click',init);
 window.addEventListener('online',()=>{if(state.auth!==true)init();if(active())poll();});
 window.addEventListener('focus',()=>{if(state.auth!==true)init();});
 async function normalizeImage(file){if(file.size>20*1024*1024)throw Error(messages.IMAGE_TOO_LARGE);if(!file.type.startsWith('image/'))throw Error(messages.INVALID_IMAGE);const src=URL.createObjectURL(file);try{return await new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>{if(Math.min(img.naturalWidth,img.naturalHeight)<160)return reject(Error('Please choose a clearer room photo.'));const scale=Math.min(1,2000/Math.max(img.naturalWidth,img.naturalHeight)),c=document.createElement('canvas');c.width=Math.round(img.naturalWidth*scale);c.height=Math.round(img.naturalHeight*scale);const ctx=c.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);resolve(c.toDataURL('image/jpeg',.93));};img.onerror=()=>reject(Error('We couldn’t open this photo. Try exporting it as JPG.'));img.src=src;});}finally{URL.revokeObjectURL(src);}}
-async function loadFile(file){if(!file)return;resetRoom();const token=roomContext.capture();try{if(state.auth!==true&&!await init())return;const image=await normalizeImage(file);if(!roomContext.current(token))return;state.image=image;$('#upload-preview').src=state.image;view('setup');}catch(e){toast(e.message);}finally{$('#file-input').value='';$('#camera-input').value='';}}
+// Redesign reuses the original and returns to the existing credit review step.
+// Opening this view does not generate, charge, or discard the saved designs.
+async function prepareRedesign(){
+ if(submitting||active()||!state.job)return;
+ const token=roomContext.capture(),job=state.job;
+ let image=state.image;
+ if(!image){const response=await fetch(job.original);if(!response.ok)throw Error('The image couldn’t be loaded. Please try again.');const blob=await response.blob();image=await normalizeImage(new File([blob],'room.jpg',{type:blob.type}));}
+ if(!roomContext.current(token)||state.job?.id!==job.id)return;
+ state.image=image;$('#upload-preview').src=image;
+ const request=$('#design-request');request.value=job.options?.request||'';
+ const scope=$('#space-options input[name="scope"][value="'+(job.options?.scope||'full')+'"]');if(scope)scope.checked=true;
+ view('setup');
+}
+async function loadFile(file){if(!file)return;resetRoom();$('#design-form').reset();const token=roomContext.capture();try{if(state.auth!==true&&!await init())return;const image=await normalizeImage(file);if(!roomContext.current(token))return;state.image=image;$('#upload-preview').src=state.image;view('setup');}catch(e){toast(e.message);}finally{$('#file-input').value='';$('#camera-input').value='';}}
 $('#file-input').addEventListener('change',e=>loadFile(e.target.files[0]));$('#camera-input').addEventListener('change',e=>loadFile(e.target.files[0]));
 for(const e of ['dragenter','dragover'])$('#drop-zone').addEventListener(e,x=>{x.preventDefault();$('#drop-zone').classList.add('dragging');});for(const e of ['drop','dragleave'])$('#drop-zone').addEventListener(e,x=>{x.preventDefault();$('#drop-zone').classList.remove('dragging');if(e==='drop')loadFile(x.dataTransfer.files[0]);});
 $('#design-form').addEventListener('submit',async e=>{e.preventDefault();if(submitting)return;if(!state.image)return toast('Add a photo of your space first.');submitting=true;const token=roomContext.begin();clearTimeout(pollTimer);$('#generate-button').disabled=true;try{const authorization=await document.querySelector('.fz-home')?.fzBilling?.authorizeDesign(3);if(!authorization)return;const job=await api('/api/jobs',{method:'POST',headers:{...authorization,'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({...Object.fromEntries(new FormData(e.target)),market:state.market,language:shell?.getLanguage()||'en',image:state.image})});if(!applyJob(job,token))return;renderKey='';view('designs');poll();}catch(e){toast(e.message);}finally{submitting=false;$('#generate-button').disabled=false;}});
@@ -92,6 +105,7 @@ function active(){return state.job?.designs.some(d=>['generating','analyzing','s
 function poll(){clearTimeout(pollTimer);const token=roomContext.capture(),id=state.job?.id;if(!id)return;pollTimer=setTimeout(async()=>{if(!roomContext.current(token)||state.job?.id!==id)return;try{const job=await api('/api/jobs/'+id);if(!applyJob(job,token)){if(roomContext.current(token)&&state.job?.id===id&&active())poll();return;}pollErrors=0;if(state.view==='designs')renderDesigns();if(state.view==='shopping')renderShop();if(active())poll();else document.querySelector('.fz-home')?.fzBilling?.refresh(true);}catch(e){if(!roomContext.current(token))return;pollErrors++;if(pollErrors===2)toast(translate('Reconnecting to your search…','جارٍ الاتصال…'));if(state.view==='shopping')renderShop();if(state.view==='designs')renderDesigns();if(active())poll();else toast(e.message);}},Math.min(10000,1500*(pollErrors+1)));}
 function renderDesigns(){
  const j=state.job;if(!j)return;
+ $$('[data-action=redesign]').forEach(button=>button.disabled=submitting||active());
  if(designJob!==j.id){designJob=j.id;designArrival=[];generationStarted=Date.now();}
  j.designs.forEach((d,i)=>{if(d.image&&!designArrival.includes(i))designArrival.push(i);});
  updateImage($('#original-thumb'),j.original);
@@ -193,6 +207,7 @@ function requestOtherWork(){
 }
 
 function renderShop(){
+ $$('[data-action=redesign]').forEach(button=>button.disabled=submitting||active());
  const d=selected();if(!d)return;
  $('#selected-title').textContent=d.title;
  updateImage($('#selected-image'),state.compare?state.job.original:d.image);
@@ -276,6 +291,8 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'studio-play':styleTour.toggle();break;
  case 'design-slide':{const grid=$('#design-grid'),card=grid.querySelector('[data-design-index="'+index+'"]');if(card)grid.scrollBy({left:card.getBoundingClientRect().left-grid.getBoundingClientRect().left,behavior:reduced?'instant':'smooth'});break;}
  case 'home':resetRoom();view('home');break;
+ case 'redesign':el.disabled=true;try{await prepareRedesign();}finally{el.disabled=false;}break;
+ case 'new-design':$('#file-input').click();break;
  case 'add-photo':$('#file-input').click();break;
  case 'options':$('#space-options').showModal();break;
  case 'options-done':$('#space-options').close();break;

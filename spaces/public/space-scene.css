@@ -140,3 +140,17 @@
 @keyframes scene-breathe{0%,100%{opacity:.3}50%{opacity:1}}
 
 @keyframes scene-action-arrive{from{opacity:0;transform:translateY(6px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+
+@layer findzia-space-scene {
+ html[data-space-scene] .scene-tools{position:absolute!important;top:14px!important;inset-inline-start:12px!important;z-index:7!important;display:flex!important;align-items:center!important;gap:2px!important;max-width:calc(100% - 78px)!important}
+ html[data-space-scene] #shopping>.scene-tools{inset-inline-start:auto!important;inset-inline-end:12px!important}
+ html[data-space-scene] .scene-tools button{display:inline-flex!important;align-items:center!important;justify-content:center!important;gap:6px!important;min-height:44px!important;min-width:44px!important;padding:8px 10px!important;border:0!important;border-radius:14px!important;background:#102019d9!important;color:#e3e9dd!important;font:400 12px/1.4 'DM Sans','Noto Sans Arabic',Arial,sans-serif!important;cursor:pointer!important;backdrop-filter:blur(8px)!important;transition:background .2s,transform .25s!important}
+ html[data-space-scene] .scene-tools button .icon{width:16px!important;height:16px!important;flex:none!important}
+ html[data-space-scene] .scene-tools button:active{transform:scale(.96)!important}
+ html[data-space-scene] .scene-tools button:disabled{opacity:.4!important;cursor:wait!important}
+ html[data-space-scene] .scene-tools button:focus-visible{outline:2px solid #dce7d6!important;outline-offset:2px!important}
+ html[data-space-scene] .scene-progress{top:64px!important}
+ html[data-space-scene] .sheet-close{background:transparent!important;border:0!important;box-shadow:none!important;border-radius:8px!important;min-width:44px!important;min-height:44px!important;padding:13px!important}
+ html[data-space-scene] .sheet-close .icon{width:18px!important;height:18px!important}
+ @media(prefers-reduced-motion:reduce){html[data-space-scene] .scene-tools button{transition:none!important}}
+}
