@@ -42,7 +42,6 @@ html[dir=rtl] .home-content h1{letter-spacing:0;font-size:clamp(30px,3.4vw,44px)
 @keyframes home-arrive{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 @keyframes home-settle{from{transform:scale(1.025)}to{transform:scale(1)}}
 /* The shared header composer still belongs only to the open section. */
-.product-mode{display:flex;justify-content:center;gap:6px;max-width:820px;margin:-4px auto 8px;direction:inherit}.product-mode button{border:1px solid transparent;border-radius:20px;background:none;padding:8px 18px;min-height:44px;font:inherit;font-size:13px;color:var(--muted)}.product-mode button[aria-pressed=true]{color:var(--ink);background:color-mix(in srgb,var(--ink) 7%,var(--bg));border-color:var(--line)}
 @media(max-width:720px){
  .hub-shell{min-height:530px;padding-top:calc(var(--header-height) + 4px);padding-inline:max(14px,env(safe-area-inset-left)) max(14px,env(safe-area-inset-right));padding-bottom:max(14px,env(safe-area-inset-bottom))}
  .home-hero{border-radius:26px;min-height:430px}
@@ -53,7 +52,6 @@ html[dir=rtl] .home-content h1{letter-spacing:0;font-size:clamp(30px,3.4vw,44px)
  html[dir=rtl] .home-content h1{font-size:clamp(28px,7.6vw,37px);letter-spacing:0;line-height:1.5}
  .home-actions{gap:5px;max-width:380px}.home-action{font-size:14px;gap:10px;min-height:94px;padding:6px 2px 8px;border-radius:19px}
  .home-action-icon{width:53px;height:53px;border-radius:18px}.home-action-icon .icon{width:25px;height:25px}
- .product-mode{margin-top:-5px;margin-bottom:5px}.product-mode button{padding-block:5px}
 }
 @media(min-width:721px) and (max-aspect-ratio:1/1){.home-image{bottom:75px}.home-image img{object-position:50% 50%}.home-hero:after{background:linear-gradient(180deg,transparent 25%,#02070500 40%,#02070550 64%,#09100dfc 88%,#09100d 100%)}}
 @media(max-height:570px){.hub-shell{min-height:450px}.home-hero{min-height:350px}.home-content{padding-top:50px;padding-bottom:16px}.home-content h1{font-size:28px;margin-bottom:12px}.home-action{min-height:87px;gap:8px}.home-action-icon{width:48px;height:48px;border-radius:16px}}
@@ -76,9 +74,9 @@ html[data-project-open] .site-header{border-bottom-color:transparent}
 
 /* Quiet focus: the existing composer expands and the room recedes. */
 .header-search{transition:max-width .38s cubic-bezier(.2,.75,.25,1),padding .38s cubic-bezier(.2,.75,.25,1),border-color .3s,box-shadow .3s}
-html[data-query-focus] .header-search{max-width:960px;padding-block:10px;border-color:var(--accent);box-shadow:0 8px 28px #0000000b}
+html[data-query-focus] .header-search{max-width:960px;border-color:var(--accent);box-shadow:0 8px 28px #0000000b}
 .header-search input{transition:height .38s cubic-bezier(.2,.75,.25,1)}
-html[data-query-focus] .header-search input{height:48px}
+html[data-query-focus] .header-search input{height:42px}
 .header-search .camera-button,.header-search .search-divider{transition:opacity .25s,transform .3s,width .3s,margin .3s,padding .3s}
 html[data-query-focus] .header-search .camera-button{width:0;padding:0;border-width:0;opacity:0;transform:scale(.7);pointer-events:none;visibility:hidden}
 html[data-query-focus] .header-search .search-divider{width:0;margin:0;opacity:0}
@@ -86,7 +84,6 @@ html[data-query-focus] .header-search .search-divider{width:0;margin:0;opacity:0
 html[data-query-focus] .search-dismiss{opacity:1;visibility:visible;pointer-events:auto;backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px)}
 .experience-nav{max-height:110px;overflow:hidden;transition:max-height .32s cubic-bezier(.2,.75,.25,1),padding .32s,opacity .24s,transform .32s}
 html[data-text-entry] .experience-nav{max-height:0;padding-block:0;opacity:0;transform:translateY(10px);pointer-events:none;visibility:hidden}
-html[data-query-focus] .product-mode{display:none}
 .experience-nav button{transform:scale(.94);opacity:.65;transition:transform .4s cubic-bezier(.2,.75,.25,1),opacity .3s,background .3s,color .3s}
 .experience-nav button[aria-current=true]{transform:scale(1);opacity:1;box-shadow:0 3px 14px #00000012}
 .experience-nav button:active{transform:scale(.94)}
@@ -101,17 +98,19 @@ html[data-query-focus] .product-mode{display:none}
 .hub-sheet [data-dismiss] .icon{width:18px;height:18px;stroke-width:1.5}
 .hub-sheet [data-dismiss]:focus-visible{outline:1px solid var(--muted);outline-offset:-7px}
 
-/* The same search form rests in the product photograph and rises for typing. */
-html[data-product-landing] .header-search{position:fixed;z-index:41;top:calc(var(--hub-height) - 110px);left:50%;width:min(602px,calc(100% - 96px));max-width:602px;margin:0;transform:translateX(-50%);background:#f3f2edf0;color:#1d2c24;border-color:#ffffff70;box-shadow:0 8px 30px #00000018;--ink:#1d2c24;--muted:#7a847a;--line:#d6dad1;--accent:#66836a;animation:composer-arrive .6s cubic-bezier(.2,.75,.25,1) both;transition:top .5s cubic-bezier(.2,.75,.25,1),width .45s cubic-bezier(.2,.75,.25,1),max-width .45s,padding .4s,background .3s,box-shadow .3s}
-html[data-product-landing][data-query-focus] .header-search{top:calc(var(--hub-viewport-top,0px) + var(--header-height) + 16px);width:min(960px,calc(100% - 48px));max-width:960px;background:#f3f2ed;box-shadow:0 12px 45px #0000001a}
-html[data-product-landing] .search-dismiss{inset:var(--header-height) 0 0}
-@media(max-width:720px){html[data-product-landing] .header-search{top:calc(var(--hub-height) - 98px);width:calc(100% - 76px)}html[data-product-landing][data-query-focus] .header-search{top:calc(var(--hub-viewport-top,0px) + var(--header-height) + 12px);width:calc(100% - 28px)}}
-@media(max-width:380px){html[data-product-landing] .header-search{width:calc(100% - 52px)}html[data-product-landing] .header-search input{font-size:16px}}
-@keyframes composer-arrive{from{opacity:0;translate:0 9px}to{opacity:1;translate:0 0}}
-@media(prefers-reduced-motion:reduce){html[data-product-landing] .header-search{animation:none;transition:none}}
+/* The same product composer stays at the bottom, including while typing.
+   Anchor its bottom edge to the visual viewport so the keyboard never covers it. */
+html[data-product-search] .header-search{position:fixed;z-index:41;top:calc(var(--hub-viewport-top,0px) + var(--hub-height) - max(38px,env(safe-area-inset-bottom)));left:50%;width:min(602px,calc(100% - 96px));max-width:602px;margin:0;transform:translate(-50%,-100%);background:#f3f2edf0;color:#1d2c24;border-color:#ffffff70;box-shadow:0 8px 30px #00000018;--ink:#1d2c24;--muted:#7a847a;--line:#d6dad1;--accent:#66836a;transition:width .26s cubic-bezier(.2,.75,.25,1),box-shadow .26s,background .26s}
+html[data-product-search][data-query-focus] .header-search{width:min(620px,calc(100% - 64px));max-width:620px;background:#f3f2ed;box-shadow:0 8px 30px #00000024}
+/* Results finish above the dock; account and payment dialogs use the full area. */
+html[data-product-search]:not([data-product-landing]):not([data-project-overlay]) #project-layer{height:calc(var(--hub-height) - var(--header-height) - 112px)}
+html[data-query-focus] .header-row{filter:blur(5px);opacity:.45;pointer-events:none}
+.header-row{transition:filter .26s,opacity .26s}
+@media(max-width:720px){html[data-product-search] .header-search{width:calc(100% - 76px)}html[data-product-search][data-query-focus] .header-search{width:calc(100% - 64px)}}
+@media(max-width:380px){html[data-product-search] .header-search{width:calc(100% - 52px)}html[data-product-search][data-query-focus] .header-search{width:calc(100% - 40px)}html[data-product-search] .header-search input{font-size:16px}}
+@media(prefers-reduced-motion:reduce){html[data-product-search] .header-search,.header-row{transition:none}}
 
 /* Safari can pan the visual viewport independently from the layout viewport. */
 html[data-query-focus] .site-header{top:var(--hub-viewport-top,0px)}
-html[data-product-landing][data-query-focus] .header-search{animation:none;transition:width .3s,max-width .3s,padding .3s,box-shadow .3s}
-html[data-query-focus] .search-dismiss{inset:calc(var(--hub-viewport-top,0px) + var(--header-height)) 0 auto;height:calc(var(--hub-height) - var(--header-height))}
+html[data-query-focus] .search-dismiss{inset:var(--hub-viewport-top,0px) 0 auto;height:var(--hub-height)}
 #project-layer:focus{outline:none}

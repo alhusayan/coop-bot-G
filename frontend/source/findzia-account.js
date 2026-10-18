@@ -83,7 +83,7 @@ function updateProviderSection(login){
  login.querySelector('[data-account-retry]').hidden=!configError||connecting||busy;
  for(const b of login.querySelectorAll('[data-account-provider]')){const enabled=config?.providers?.[b.dataset.accountProvider]===true;b.disabled=busy||!enabled;b.setAttribute('aria-busy',String(busy));b.title=config&&!configError&&!connecting&&!enabled?t('providerUnavailable'):'';}
 }
-function signInPage(){heading(root.fzBilling?.selectedPlan()?t('chooseSignin'):t('signin'),root.fzBilling?.selectedPlan()?t('planSigninNote'):t('welcome'));root.fzBilling?.planSummary(body);if(!member)body.append(providerButtons());else body.append(node('p','fza-caption',t('member')+' '+member.email));body.append(button(t('keepBrowsing'),()=>dialog.close(),'fza-text'));}
+function signInPage(){heading(root.fzBilling?.selectedPlan()?t('chooseSignin'):t('signin'),root.fzBilling?.selectedPlan()?'':t('welcome'));root.fzBilling?.planSummary(body);if(!member)body.append(providerButtons());else body.append(node('p','fza-caption',t('member')+' '+member.email));body.append(button(t('keepBrowsing'),()=>dialog.close(),'fza-text'));}
 function home(){
  const intro=node('div','fza-identity'),avatar=node('div','fza-avatar');avatar.append(icon('user'));
  const text=node('div');const name=node('h3','',member?.name||t(member?'account':'guest'));

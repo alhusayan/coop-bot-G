@@ -34,7 +34,7 @@ const $=selector=>document.querySelector(selector);
 const querySelector=()=>project==='services'?'#svc-query':project==='space'?'#design-request':'textarea[id^="fz-query-"]';
 function state(){
  const context=root?.fzRefineBridge?.context?.()||{},input=$(querySelector()),select=root?.querySelector('[data-profile-market-select]');
- return {landing:['shop','one'].includes(project)&&root?.dataset.homeState==='empty',scene:project==='space'&&Object.hasOwn(document.documentElement.dataset,'spaceScene'),query:input?.value||'',country:select?.value||context.country||'',countries:select?[...select.options].map(o=>o.value).filter(c=>/^[A-Z]{2}$/.test(c)):[],busy:project==='space'?!!space?.state().busy:project==='services'?!!$('#svc-submit')?.disabled:!!context.busy,cameraReady:project==='space'?!!space?.state().ready:!!root?.fzRefineBridge};
+ return {overlay:document.querySelector('dialog[open]')?.open===true,landing:['shop','one'].includes(project)&&root?.dataset.homeState==='empty',scene:project==='space'&&Object.hasOwn(document.documentElement.dataset,'spaceScene'),query:input?.value||'',country:select?.value||context.country||'',countries:select?[...select.options].map(o=>o.value).filter(c=>/^[A-Z]{2}$/.test(c)):[],busy:project==='space'?!!space?.state().busy:project==='services'?!!$('#svc-submit')?.disabled:!!context.busy,cameraReady:project==='space'?!!space?.state().ready:!!root?.fzRefineBridge};
 }
 function publishState(){if(!embedded||!root)return;const data=state(),serialized=JSON.stringify(data);if(serialized===lastState)return;lastState=serialized;post({type:'header-state',...data})}
 function applyCountry(country){const select=root?.querySelector('[data-profile-market-select]');if(countryApplying||!select||!/^[A-Z]{2}$/.test(country||'')||select.value===country||![...select.options].some(o=>o.value===country))return;countryApplying=true;try{select.value=country;select.dispatchEvent(new Event('change',{bubbles:true}));applyLanguage(read('findzia-lang'))}finally{countryApplying=false}publishState()}
@@ -109,6 +109,8 @@ function mount(){
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!document.querySelector('dialog[open]'))post({type:'close'})});
   if(window.MutationObserver){
    const observer=new MutationObserver(publishState);observer.observe(root,{attributes:true,attributeFilter:['data-home-state','data-lang']});
+   // Dialogs live inside the frame; the parent composer must yield to them.
+   observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['open']});
    for(const target of document.querySelectorAll('#svc-submit,[data-action="camera"],#generate-button'))observer.observe(target,{attributes:true,attributeFilter:['disabled','aria-busy']});
    const market=root.querySelector('[data-profile-market-select]');if(market)new MutationObserver(()=>{applyCountry(read('findzia-market-country-v1'));publishState()}).observe(market,{childList:true});
   }

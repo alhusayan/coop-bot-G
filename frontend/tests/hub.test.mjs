@@ -33,7 +33,6 @@ function hubFixture(href='https://findzia.com/',saved={}){
  const nodes=new Map(),node=key=>{if(!nodes.has(key))nodes.set(key,new Element());return nodes.get(key)};
  const groups={};for(const key of ['language','theme-toggle','account'])groups['[data-'+key+']']=[new Element(),new Element()];groups['[data-project]']=['shop','one','space','services'].map(project=>new Element({project}));groups['[data-t]']=['choose','shop','one','space','services','loading','retry'].map(t=>new Element({t}));groups['[data-language-name]']=[new Element(),new Element()];groups['.account-dot']=[new Element(),new Element()];groups['[data-camera-source]']=['camera','photos'].map(cameraSource=>new Element({cameraSource}));
  groups['[data-experience]']=['space','shop','services'].map(experience=>new Element({experience}));
- groups['[data-product-mode]']=['shop','one'].map(productMode=>new Element({productMode}));
  const html=new Element();html.lang='ar';html.dataset.theme='light';const location=new URL(href),messages=[],frames=[],listeners={},stored=new Map(Object.entries(saved)),sessions=new Map(),history=[];
  const document={documentElement:html,activeElement:groups['[data-project]'][0],querySelector:node,querySelectorAll:key=>groups[key]||[],createElement:tag=>{const el=new Element();el.tagName=tag;if(tag==='iframe'){el.contentWindow={postMessage:(data,origin)=>messages.push({data,origin})};frames.push(el)}return el}};
  const window={innerHeight:620,visualViewport:{height:560,scale:1,addEventListener:(name,fn)=>listeners['viewport-'+name]=fn},FindziaAppearance:{apply:()=>({theme:stored.get('findzia-appearance-v1')||'light'})},addEventListener:(name,fn)=>listeners[name]=fn};
@@ -140,14 +139,24 @@ test('direct section links enter unified shell, while payment callbacks stay wit
  const location=new URL('https://findzia.com/search?paymentId=return');location.replace=()=>{throw Error('payment callback rewritten')};const window={addEventListener(){}};vm.runInNewContext(read('../source/findzia-hub-bridge.js'),{window,parent:window,location,URL,URLSearchParams,document:{readyState:'loading',addEventListener(){}},localStorage:{getItem:()=>null}});
 });
 
-test('product mode preserves typed intent without auto-searching, and is absent from home and services',()=>{
- const f=hubFixture();assert.equal(f.node('#product-mode').hidden,true);
- f.groups['[data-project]'][0].fire('click');assert.equal(f.node('#product-mode').hidden,true);
- f.listeners.message({origin:'https://findzia.com',source:f.frames.at(-1).contentWindow,data:{findziaHub:true,type:'header-state',landing:false}});assert.equal(f.node('#product-mode').hidden,false);f.node('#header-query').value='brass tap';
- f.groups['[data-product-mode]'][1].fire('click');const frame=f.frames.at(-1),calls=[];frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push({name,data});return name==='state'?{}:true}};
- f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
- assert.equal(new URL(frame.src).searchParams.get('hubProject'),'one');assert.equal(new URL(frame.src).searchParams.has('q'),false);assert.equal(f.node('#header-query').value,'brass tap');assert.ok(calls.some(x=>x.name==='prepare'&&x.data.query==='brass tap'));assert.ok(!calls.some(x=>x.name==='search'));
- f.groups['[data-project]'][3].fire('click');assert.equal(f.node('#product-mode').hidden,true);assert.equal(f.node('#header-query').value,'');
+test('product mode tabs are removed from the unified shell',()=>{
+ assert.doesNotMatch(read('../source/findzia-hub.html'),/id="product-mode"|data-product-mode/);
+ assert.doesNotMatch(read('../source/findzia-hub.js'),/\$\('#product-mode'\)/);
+});
+test('embedded dialogs hide the composer, clear focus, and restore the same query on close',()=>{
+ const f=hubFixture();f.groups['[data-project]'][0].fire('click');const frame=f.frames.at(-1);
+ const publish=data=>f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'header-state',...data}});
+ f.node('#header-query').value='كرسي';f.node('#header-query').fire('focus');
+ publish({overlay:true});assert.equal(f.node('#header-search').hidden,true);assert.equal(f.node('#project-content').inert,false);assert.equal(f.html.attributes['data-query-focus'],undefined);
+ publish({landing:false});assert.equal(f.node('#header-search').hidden,true);
+ publish({overlay:false});assert.equal(f.node('#header-search').hidden,false);assert.equal(f.node('#header-query').value,'كرسي');
+ publish({overlay:true});f.groups['[data-project]'][3].fire('click');assert.equal(f.node('#header-search').hidden,false);
+ publish({overlay:true});assert.equal(f.node('#header-search').hidden,false,'hidden frames cannot hide the current composer');
+});
+test('bridge reports account and payment dialog visibility with native search state',()=>{
+ const f=projectFixture('shop');const dialog=f.node('dialog[open]');
+ assert.equal(f.action('state').overlay,false);dialog.open=true;assert.equal(f.action('state').overlay,true);
+ dialog.open=false;assert.equal(f.action('state').overlay,false);
 });
 test('design-to-service handoff carries the requested work for review without submitting a search',()=>{
  const f=projectFixture('space');f.connect({state:()=>({ready:true,busy:false}),serviceQuery:()=> 'Wood wall panel installation'});
@@ -242,14 +251,14 @@ test('one product composer docks in the photograph, expands with blur and follow
  const f=hubFixture();f.groups['[data-project]'][0].fire('click');const frame=f.frames.at(-1),calls=[];
  frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push({name,data});return name==='state'?{landing:true,cameraReady:true}:true}};
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
- assert.equal(f.html.attributes['data-product-landing'],'');assert.equal(f.node('#product-mode').hidden,true);
+ assert.equal(f.html.attributes['data-product-landing'],'');assert.equal(f.html.attributes['data-product-search'],'');
  f.node('#header-query').fire('focus');assert.equal(f.html.attributes['data-query-focus'],'');assert.equal(f.node('#project-content').inert,true);
  f.node('#header-query').value='sofa';f.node('#header-query').fire('input');assert.equal(calls.at(-1).data.query,'sofa');
  f.node('#header-search').fire('submit');assert.equal(calls.at(-1).name,'search');assert.equal(f.node('#project-content').inert,false);
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'header-state',landing:false}});
- assert.equal(f.html.attributes['data-product-landing'],undefined);assert.equal(f.node('#product-mode').hidden,false);
+ assert.equal(f.html.attributes['data-product-landing'],undefined);assert.equal(f.html.attributes['data-product-search'],'');
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'header-state',landing:true}});
- assert.equal(f.node('#product-mode').hidden,true);f.node('#header-camera').fire('click');assert.equal(calls.at(-1).name,'camera');
+ assert.equal(f.html.attributes['data-product-search'],'');f.node('#header-camera').fire('click');assert.equal(calls.at(-1).name,'camera');
  f.node('#close-layer').fire('click');assert.equal(f.html.attributes['data-product-landing'],undefined);
 });
 

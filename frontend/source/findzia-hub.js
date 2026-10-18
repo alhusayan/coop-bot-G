@@ -13,7 +13,7 @@ const read=key=>{try{return localStorage.getItem(key)}catch{return null}},save=(
 const validLang=value=>Object.hasOwn(languages,value)?value:'en';
 const sessions=new Map();
 let isReady=false,spaceScene=false,productLanding=false,noticeTimer=null,pendingQuery=null;
-let queryFocused=false,childTyping=false;
+let queryFocused=false,childTyping=false,overlayOpen=false;
 let lang=validLang(read('findzia-lang')||html.lang),active=null,frame=null,returnFocus=null,loadTimer=null;
 const header=$('#main-header'),search=$('#header-search'),query=$('#header-query');
 const layer=$('#project-layer'),content=$('#project-content'),status=$('#layer-status'),retry=$('#retry-project');
@@ -43,10 +43,25 @@ function revealFrame(){
 }
 function measureHeader(){const height=Math.ceil(header.getBoundingClientRect().height);if(height)html.style.setProperty('--header-height',height+'px')}
 function renderMarkets(){const select=$('#hub-country');select.replaceChildren();let names;try{names=new Intl.DisplayNames([lang],{type:'region'})}catch{}for(const code of marketOptions){const option=document.createElement('option');option.value=code;option.textContent=flag(code)+' '+(names?.of(code)||code);select.append(option)}select.value=currentCountry}
-function headerState(data){if(!data)return;if(['shop','one'].includes(active)&&typeof data.landing==='boolean'&&productLanding!==data.landing){productLanding=data.landing;render();}if(active==='space'&&typeof data.scene==='boolean'&&spaceScene!==data.scene){spaceScene=data.scene;render();}if(typeof data.query==='string'&&document.activeElement!==query)query.value=data.query;if(/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;$('#market-flag').textContent=flag(currentCountry)}if(Array.isArray(data.countries)){const codes=data.countries.filter(c=>typeof c==='string'&&/^[A-Z]{2}$/.test(c));if(codes.length)marketOptions=codes;}$('#header-camera').disabled=!isReady||data.busy===true||data.cameraReady===false;$('#submit-search').disabled=!isReady||data.busy===true;query.disabled=!isReady;}
+function headerState(data){
+ if(!data)return;
+ let changed=false;
+ if(typeof data.overlay==='boolean'&&overlayOpen!==data.overlay){
+  overlayOpen=data.overlay;changed=true;
+  if(overlayOpen)endSearchFocus();
+ }
+ if(['shop','one'].includes(active)&&typeof data.landing==='boolean'&&productLanding!==data.landing){productLanding=data.landing;changed=true;}
+ if(active==='space'&&typeof data.scene==='boolean'&&spaceScene!==data.scene){spaceScene=data.scene;changed=true;}
+ if(changed)render();
+ if(typeof data.query==='string'&&document.activeElement!==query)query.value=data.query;
+ if(/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;$('#market-flag').textContent=flag(currentCountry)}
+ if(Array.isArray(data.countries)){const codes=data.countries.filter(c=>typeof c==='string'&&/^[A-Z]{2}$/.test(c));if(codes.length)marketOptions=codes;}
+ $('#header-camera').disabled=!isReady||data.busy===true||data.cameraReady===false;
+ $('#submit-search').disabled=!isReady||data.busy===true;query.disabled=!isReady;
+}
 function preferences(){renderMarkets();$('#hub-theme').value=read('findzia-appearance-v1')||'auto';$('#hub-preferences').showModal()}
 function render(){html.lang=lang;html.dir=['ar','ur'].includes(lang)?'rtl':'ltr';all('[data-t]').forEach(el=>el.textContent=t(el.dataset.t));all('[data-language]').forEach(el=>{el.value=lang;el.setAttribute('aria-label',t('language'))});all('[data-language-name]').forEach(el=>el.textContent=languages[lang]);all('[data-account]').forEach(el=>el.setAttribute('aria-label',t('account')));$('#close-layer').setAttribute('aria-label',t('close'));all('[data-theme-toggle]').forEach(el=>{el.setAttribute('aria-label',t('appearance'));el.setAttribute('aria-pressed',String(html.dataset.theme==='dark'))});if(active)$('#layer-title').textContent=active==='account'?t('account'):projects[active].title;
- $('#experience-nav').hidden=true;html.toggleAttribute('data-space-open',active==='space');all('[data-experience]').forEach(el=>el.setAttribute('aria-current',String(el.dataset.experience===(active==='one'?'shop':active))));search.hidden=!active||active==='account'||active==='space'&&spaceScene;$('#close-layer').hidden=!active;$('#close-layer').setAttribute('aria-label',copy('home'));$('#section-options').hidden=!active;$('#projects').inert=!!active;$('#projects').hidden=!!active;html.toggleAttribute('data-project-open',!!active);html.dataset.activeProject=active||'home';all('[data-ui]').forEach(el=>el.textContent=copy(el.dataset.ui));all('[data-dismiss]').forEach(el=>el.setAttribute('aria-label',t('close')));$('#open-menu').setAttribute('aria-label',copy('menu'));$('#open-preferences').setAttribute('aria-label',copy('preferences'));$('#market-flag').textContent=flag(currentCountry);query.placeholder=window.FindziaHomeCopy?.get(lang,active==='space'?'spaceQuery':active==='services'?'servicesQuery':'shopQuery')||copy(active||'shop');html.toggleAttribute('data-product-landing',['shop','one'].includes(active)&&productLanding);$('#product-mode').hidden=!['shop','one'].includes(active)||productLanding;all('[data-product-mode]').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.productMode===active)));$('#search-label').textContent=query.placeholder;$('#header-camera').setAttribute('aria-label',copy('photo'));$('#submit-search').setAttribute('aria-label',copy('search'));measureHeader();}
+ $('#experience-nav').hidden=true;html.toggleAttribute('data-space-open',active==='space');all('[data-experience]').forEach(el=>el.setAttribute('aria-current',String(el.dataset.experience===(active==='one'?'shop':active))));search.hidden=!active||active==='account'||overlayOpen||active==='space'&&spaceScene;html.toggleAttribute('data-project-overlay',overlayOpen);html.toggleAttribute('data-product-search',['shop','one'].includes(active));$('#close-layer').hidden=!active;$('#close-layer').setAttribute('aria-label',copy('home'));$('#section-options').hidden=!active;$('#projects').inert=!!active;$('#projects').hidden=!!active;html.toggleAttribute('data-project-open',!!active);html.dataset.activeProject=active||'home';all('[data-ui]').forEach(el=>el.textContent=copy(el.dataset.ui));all('[data-dismiss]').forEach(el=>el.setAttribute('aria-label',t('close')));$('#open-menu').setAttribute('aria-label',copy('menu'));$('#open-preferences').setAttribute('aria-label',copy('preferences'));$('#market-flag').textContent=flag(currentCountry);query.placeholder=window.FindziaHomeCopy?.get(lang,active==='space'?'spaceQuery':active==='services'?'servicesQuery':'shopQuery')||copy(active||'shop');html.toggleAttribute('data-product-landing',['shop','one'].includes(active)&&productLanding);$('#search-label').textContent=query.placeholder;$('#header-camera').setAttribute('aria-label',copy('photo'));$('#submit-search').setAttribute('aria-label',copy('search'));measureHeader();}
 
 function setLanguage(value,notify=true){lang=validLang(value);save('findzia-lang',lang);render();if(notify)send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto'})}
 function syncTheme(){const theme=window.FindziaAppearance?.apply()?.theme||(read('findzia-appearance-v1')==='dark'?'dark':'light');html.dataset.theme=theme;render()}
@@ -64,21 +79,20 @@ function openProject(key,{push=true,hash='',prefill=null,carryQuery=false}={}){
  if(!Object.hasOwn(projects,key))return;
  if(active===key&&layer.open)return;
  endSearchFocus();
- frame&&(frame.hidden=true);frame=null;clearTimeout(loadTimer);isReady=false;query.value='';pendingQuery=prefill;if(!active)returnFocus=document.activeElement;active=key;spaceScene=key==='space';productLanding=['shop','one'].includes(key);render();headerState({});if(!layer.open)layer.show();
+ frame&&(frame.hidden=true);frame=null;clearTimeout(loadTimer);isReady=false;query.value='';pendingQuery=prefill;if(!active)returnFocus=document.activeElement;active=key;overlayOpen=false;spaceScene=key==='space';productLanding=['shop','one'].includes(key);render();headerState({});if(!layer.open)layer.show();
  if(push){const url=new URL(location.href);if(!carryQuery)url.searchParams.delete('q');url.searchParams.set('project',key);url.hash='';history.pushState({findziaHub:true},'',url.pathname+url.search)}
  const saved=sessions.get(key);if(saved&&!hash){frame=saved.frame;frame.hidden=false;status.hidden=saved.ready;retry.hidden=true;if(saved.ready){ready();if(key==='account')send({type:'account'})}else loadTimer=setTimeout(showError,30000)}else mountFrame(hash);
  revealFrame();
 }
 function closeProject({update=true}={}){
  endSearchFocus();
- clearTimeout(loadTimer);if(frame)frame.hidden=true;frame=null;active=null;isReady=false;pendingQuery=null;marketOptions=defaultCountries;$('#header-notice').hidden=true;if(layer.open)layer.close();
+ clearTimeout(loadTimer);if(frame)frame.hidden=true;frame=null;active=null;overlayOpen=false;isReady=false;pendingQuery=null;marketOptions=defaultCountries;$('#header-notice').hidden=true;if(layer.open)layer.close();
  if(update){const url=new URL(location.href);url.searchParams.delete('project');url.searchParams.delete('q');url.searchParams.delete('country');url.hash='';history.replaceState(null,'',url.pathname+url.search)}
  syncAccount();setLanguage(read('findzia-lang')||lang,false);syncTheme();returnFocus?.focus?.({preventScroll:true});
 }
 all('[data-language]').forEach(select=>{for(const [value,label]of Object.entries(languages)){const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option)}select.addEventListener('change',()=>setLanguage(select.value))});
 all('[data-project]').forEach(card=>card.addEventListener('click',event=>{if(event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey)return;event.preventDefault();const destination=(card.href&&new URL(card.href,location.origin).searchParams.get('project'))||card.dataset.project;openProject(destination)}));
 all('[data-experience]').forEach(button=>button.addEventListener('click',()=>openProject(button.dataset.experience)));
-all('[data-product-mode]').forEach(button=>button.addEventListener('click',()=>{if(active===button.dataset.productMode)return;const value=query.value;openProject(button.dataset.productMode,{prefill:value})}));
 all('[data-account]').forEach(button=>button.addEventListener('click',()=>{if(active)send({type:'account'});else openProject('account')}));
 all('[data-theme-toggle]').forEach(button=>button.addEventListener('click',()=>{save('findzia-appearance-v1',html.dataset.theme==='dark'?'light':'dark');syncTheme();send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')})}));
 $('#close-layer').addEventListener('click',()=>closeProject());layer.addEventListener('cancel',event=>{event.preventDefault();closeProject()});retry.addEventListener('click',()=>mountFrame());
@@ -108,10 +122,10 @@ $('#open-preferences').addEventListener('click',preferences);
 $('#menu-preferences').addEventListener('click',()=>{$('#hub-menu').close();preferences()});
 $('#hub-theme').addEventListener('change',event=>{save('findzia-appearance-v1',event.target.value);syncTheme();send({type:'preferences',language:lang,theme:event.target.value})});
 $('#hub-country').addEventListener('change',event=>{const value=event.target.value;if(!marketOptions.includes(value))return;currentCountry=value;save('findzia-market-country-v1',value);save('findzia-services-country-v1',value);save('findzia-market-country-ts-v1',String(Date.now()));save('findzia_manual_market_v1',value);action('country',{country:value});render()});
-// Put the field at its final visible position before Safari raises the keyboard.
-// Animating its layout position during native focus makes iOS pan to stale bounds.
+// Keep the same bottom composer when Safari raises the keyboard.
+// Only its focus styling animates; viewport changes keep it above the keys.
 query.addEventListener('pointerdown',event=>{
- if(!productLanding||queryFocused||query.disabled)return;
+ if(!['shop','one'].includes(active)||queryFocused||query.disabled)return;
  event.preventDefault();searchFocus(true);search.getBoundingClientRect();query.focus({preventScroll:true});
  if(!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)search.animate?.([{opacity:.75,scale:'.98'},{opacity:1,scale:'1'}],{duration:260,easing:'cubic-bezier(.2,.75,.25,1)'});
 });
