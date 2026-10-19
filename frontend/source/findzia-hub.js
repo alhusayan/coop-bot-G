@@ -14,6 +14,7 @@ const validLang=value=>Object.hasOwn(languages,value)?value:'en';
 const sessions=new Map();
 let isReady=false,spaceScene=false,productLanding=false,noticeTimer=null,pendingQuery=null;
 let queryFocused=false,childTyping=false,overlayOpen=false;
+let searchMotion=null,searchOpening=false,searchViewport=null,viewportRelease=null;
 let lang=validLang(read('findzia-lang')||html.lang),active=null,frame=null,returnFocus=null,loadTimer=null;
 const header=$('#main-header'),search=$('#header-search'),query=$('#header-query');
 const layer=$('#project-layer'),content=$('#project-content'),status=$('#layer-status'),retry=$('#retry-project');
@@ -29,14 +30,63 @@ function notice(key){const node=$('#header-notice');node.textContent=copy(key);n
 // Same-origin synchronous calls preserve the tap's user activation for iOS file pickers.
 function action(name,data={}){try{return frame?.contentWindow?.FindziaHubBridge?.action?.(name,data)||false}catch{return false}}
 function searchFocus(value){
- queryFocused=!!value;viewport();html.toggleAttribute('data-query-focus',queryFocused);
+ value=!!value;if(value===queryFocused){html.toggleAttribute('data-text-entry',queryFocused||childTyping);$('#experience-nav').inert=queryFocused||childTyping;return}
+ const product=['shop','one'].includes(active),from=!value&&product?search.getBoundingClientRect():null;
+ cancelSearchMotion();
+ if(value&&product){
+  clearTimeout(viewportRelease);viewportRelease=null;
+  const v=window.visualViewport;
+  searchViewport??={height:Math.min(window.innerHeight,v?.height||window.innerHeight),top:v?.offsetTop||0};
+ }
+ queryFocused=value;html.toggleAttribute('data-query-focus',queryFocused);viewport();
  html.toggleAttribute('data-text-entry',queryFocused||childTyping);
  $('#search-dismiss').hidden=false;
  // Inert content cannot steal a tap while the keyboard is open.
  content.inert=queryFocused;
  $('#experience-nav').inert=queryFocused||childTyping;
+ if(!value){
+  searchOpening=false;query.inputMode='search';
+  html.toggleAttribute('data-search-opening',false);
+  if(from&&!search.hidden)animateSearch(from,releaseSearchViewport);
+  else releaseSearchViewport();
+ }
 }
 function endSearchFocus(){query.blur();childTyping=false;searchFocus(false)}
+function cancelSearchMotion(){if(searchMotion){searchMotion.onfinish=null;searchMotion.cancel();searchMotion=null}}
+function animateSearch(from,finished){
+ const to=search.getBoundingClientRect();
+ if(!search.animate||!from.width||!to.width||window.matchMedia?.('(prefers-reduced-motion: reduce)').matches){finished();return}
+ const anchor=queryFocused?'translate(-50%,-50%)':'translate(-50%,-100%)';
+ const x=from.left+from.width/2-to.left-to.width/2,y=from.top+from.height/2-to.top-to.height/2;
+ const motion=search.animate([
+  {transform:`${anchor} translate(${x}px,${y}px) scale(${from.width/to.width},${from.height/to.height})`},
+  {transform:anchor}
+ ],{duration:360,easing:'cubic-bezier(.22,.8,.25,1)'});
+ searchMotion=motion;
+ motion.onfinish=()=>{if(searchMotion!==motion)return;searchMotion=null;finished()};
+}
+function releaseSearchViewport(){
+ if(queryFocused)return;
+ clearTimeout(viewportRelease);
+ // Let the native keyboard finish closing before the scene uses its height again.
+ const height=Math.min(window.innerHeight,window.visualViewport?.height||window.innerHeight);
+ if(searchViewport&&height<searchViewport.height-80){viewportRelease=setTimeout(()=>{searchViewport=null;viewportRelease=null;viewport()},500);return}
+ searchViewport=null;viewportRelease=null;viewport();
+}
+function openProductSearch(){
+ if(query.disabled||search.hidden||queryFocused)return;
+ const from=search.getBoundingClientRect();
+ // Keep focus in the trusted tap. WebKit can then show its keyboard when
+ // inputmode changes, without an asynchronous focus call losing activation.
+ query.inputMode='none';searchFocus(true);searchOpening=true;
+ html.toggleAttribute('data-search-opening',true);
+ animateSearch(from,()=>{
+  if(!queryFocused)return;
+  searchOpening=false;html.toggleAttribute('data-search-opening',false);
+  query.inputMode='search';
+ });
+ query.focus({preventScroll:true});
+}
 function revealFrame(){
  if(!frame||window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return;
  frame.animate?.([{opacity:.45,transform:'scale(.988)'},{opacity:1,transform:'scale(1)'}],{duration:420,easing:'cubic-bezier(.2,.75,.25,1)'});
@@ -66,7 +116,20 @@ function render(){html.lang=lang;html.dir=['ar','ur'].includes(lang)?'rtl':'ltr'
 function setLanguage(value,notify=true){lang=validLang(value);save('findzia-lang',lang);render();if(notify)send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto'})}
 function syncTheme(){const theme=window.FindziaAppearance?.apply()?.theme||(read('findzia-appearance-v1')==='dark'?'dark':'light');html.dataset.theme=theme;render()}
 function syncAccount(){let signedIn=false;try{const s=JSON.parse(sessionStorage.getItem('findzia-account-v1-session'));signedIn=!!s?.access_token&&s.expires_at>Date.now()/1000}catch{}all('.account-dot').forEach(el=>el.hidden=!signedIn)}
-function viewport(){const v=window.visualViewport;if(v&&Math.abs(v.scale-1)>.05)return;html.style.setProperty('--hub-height',Math.round(Math.min(window.innerHeight,v?.height||window.innerHeight))+'px');html.style.setProperty('--hub-viewport-top',Math.round(v?.offsetTop||0)+'px');measureHeader()}
+function viewport(){
+ const v=window.visualViewport;if(v&&Math.abs(v.scale-1)>.05)return;
+ const height=Math.min(window.innerHeight,v?.height||window.innerHeight),top=v?.offsetTop||0;
+ html.style.setProperty('--hub-height',Math.round(searchViewport?.height||height)+'px');
+ html.style.setProperty('--hub-viewport-height',Math.round(height)+'px');
+ html.style.setProperty('--hub-viewport-top',Math.round(top)+'px');
+ if(queryFocused&&searchViewport){
+  // Center once before keyboard presentation; only move if the keys would cover it.
+  const center=searchViewport.top+searchViewport.height/2;
+  html.style.setProperty('--search-center-y',Math.round(Math.max(top+48,Math.min(center,top+height-58)))+'px');
+ }
+ if(!queryFocused&&!searchMotion&&searchViewport&&height>=searchViewport.height-80)releaseSearchViewport();
+ measureHeader();
+}
 function ready(){clearTimeout(loadTimer);isReady=true;if(sessions.has(active))sessions.get(active).ready=true;status.hidden=true;retry.hidden=true;send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto',country:read('findzia-market-country-v1')});headerState(action('state')||{});if(pendingQuery!==null){query.value=pendingQuery;action('prepare',{query:pendingQuery});pendingQuery=null}syncAccount()}
 function showError(){status.hidden=false;status.querySelector('[data-t]').textContent=t('error');retry.hidden=false}
 function mountFrame(hash=''){
@@ -101,7 +164,7 @@ window.addEventListener('message',event=>{
  const known=[...sessions.values()].find(session=>session.frame.contentWindow===event.source);if(!known)return;
  const data=event.data;if(data.type==='ready')known.ready=true;if(event.source!==frame?.contentWindow)return;
  if(data.type==='ready')ready();
- if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else query.focus();}
+ if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else if(['shop','one'].includes(active))openProductSearch();else query.focus();}
  if(data.type==='header-state')headerState(data);
  if(data.type==='search-blocked')endSearchFocus();
  if(data.type==='text-entry'){childTyping=data.active===true;html.toggleAttribute('data-text-entry',queryFocused||childTyping);$('#experience-nav').inert=queryFocused||childTyping;}
@@ -122,12 +185,12 @@ $('#open-preferences').addEventListener('click',preferences);
 $('#menu-preferences').addEventListener('click',()=>{$('#hub-menu').close();preferences()});
 $('#hub-theme').addEventListener('change',event=>{save('findzia-appearance-v1',event.target.value);syncTheme();send({type:'preferences',language:lang,theme:event.target.value})});
 $('#hub-country').addEventListener('change',event=>{const value=event.target.value;if(!marketOptions.includes(value))return;currentCountry=value;save('findzia-market-country-v1',value);save('findzia-services-country-v1',value);save('findzia-market-country-ts-v1',String(Date.now()));save('findzia_manual_market_v1',value);action('country',{country:value});render()});
-// Keep the same bottom composer when Safari raises the keyboard.
-// Only its focus styling animates; viewport changes keep it above the keys.
+// Move and enlarge the existing field, then allow the software keyboard.
 query.addEventListener('pointerdown',event=>{
- if(!['shop','one'].includes(active)||queryFocused||query.disabled)return;
- event.preventDefault();searchFocus(true);search.getBoundingClientRect();query.focus({preventScroll:true});
- if(!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)search.animate?.([{opacity:.75,scale:'.98'},{opacity:1,scale:'1'}],{duration:260,easing:'cubic-bezier(.2,.75,.25,1)'});
+ if(!['shop','one'].includes(active)||query.disabled)return;
+ if(searchOpening){event.preventDefault();return}
+ if(queryFocused)return;
+ event.preventDefault();openProductSearch();
 });
 query.addEventListener('focus',()=>searchFocus(true));
 search.addEventListener('focusout',event=>{if(!search.contains?.(event.relatedTarget))searchFocus(false)});

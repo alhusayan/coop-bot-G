@@ -262,16 +262,40 @@ test('one product composer docks in the photograph, expands with blur and follow
  f.node('#close-layer').fire('click');assert.equal(f.html.attributes['data-product-landing'],undefined);
 });
 
-test('Safari field is positioned before focus and tracks keyboard viewport panning',()=>{
+test('search finishes moving before enabling the keyboard, while its scene stays still',()=>{
  const f=hubFixture();f.groups['[data-project]'][0].fire('click');const frame=f.frames.at(-1),calls=[];
  frame.contentWindow.FindziaHubBridge={action:(name,data)=>{calls.push({name,data});return name==='state'?{landing:true,cameraReady:true}:true}};
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
- const query=f.node('#header-query');let prevented=false;
- query.focus=options=>{assert.equal(f.html.attributes['data-query-focus'],'','focus layout must precede native keyboard activation');assert.equal(options.preventScroll,true);};
+ const query=f.node('#header-query'),search=f.node('#header-search');let prevented=false,animation,focusCount=0;
+ search.getBoundingClientRect=()=>f.html.attributes['data-query-focus']!==undefined?{left:16,top:242,width:358,height:76}:{left:38,top:466,width:314,height:56};
+ search.animate=(frames,options)=>{animation={frames,options,cancel(){this.cancelled=true}};return animation};
+ query.focus=options=>{focusCount++;assert.equal(f.html.attributes['data-query-focus'],'');assert.equal(query.inputMode,'none','the trusted tap must focus without opening the keyboard');assert.equal(options.preventScroll,true);};
  query.fire('pointerdown',{preventDefault(){prevented=true}});assert.equal(prevented,true);
+ assert.equal(focusCount,1);assert.equal(query.inputMode,'none');assert.equal(animation.options.duration,360);
+ assert.equal(f.html.style['--search-center-y'],'280px');assert.equal(f.html.attributes['data-search-opening'],'');
+ query.fire('pointerdown');assert.equal(focusCount,1,'repeated taps do not restart the movement');
+ animation.onfinish();assert.equal(query.inputMode,'search');assert.equal(f.html.attributes['data-search-opening'],undefined);
  f.window.visualViewport.height=290;f.window.visualViewport.offsetTop=180;f.listeners['viewport-scroll']();
- assert.equal(f.html.style['--hub-height'],'290px');assert.equal(f.html.style['--hub-viewport-top'],'180px');
+ assert.equal(f.html.style['--hub-height'],'560px','keyboard must not resize the image or iframe');assert.equal(f.html.style['--hub-viewport-height'],'290px');assert.equal(f.html.style['--hub-viewport-top'],'180px');
  assert.equal(f.node('#project-content').inert,true);query.value='طاولة';query.fire('input');f.node('#header-search').fire('submit');
  assert.equal(calls.at(-1).name,'search');assert.equal(calls.at(-1).data.query,'طاولة');assert.equal(f.node('#project-content').inert,false);
  f.window.visualViewport.offsetTop=0;f.window.visualViewport.height=560;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-viewport-top'],'0px');
+ animation.onfinish();f.window.visualViewport.height=540;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-height'],'540px','normal viewport updates resume after dismissal');
+});
+
+test('dismissing or navigating during the opening motion cannot reopen the keyboard',()=>{
+ for(const dismiss of ['outside','account','navigate']){
+  const f=hubFixture('https://findzia.com/?project=shop'),frame=f.frames.at(-1);
+  frame.contentWindow.FindziaHubBridge={action:()=>({landing:true,cameraReady:true})};
+  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});
+  const q=f.node('#header-query'),search=f.node('#header-search');let animation;
+  search.getBoundingClientRect=()=>({left:20,top:240,width:350,height:76});
+  search.animate=()=>animation={cancel(){this.cancelled=true}};
+  q.fire('pointerdown');const opening=animation,lateFinish=opening.onfinish;
+  if(dismiss==='outside')f.node('#search-dismiss').fire('pointerdown');
+  else if(dismiss==='account')f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'header-state',overlay:true}});
+  else f.groups['[data-experience]'][2].fire('click');
+  assert.equal(opening.cancelled,true);assert.equal(q.inputMode,'search');assert.equal(q.focused,false);
+  lateFinish();assert.equal(q.focused,false);assert.equal(f.html.attributes['data-query-focus'],undefined);
+ }
 });
