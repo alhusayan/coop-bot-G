@@ -33,8 +33,8 @@ test('opening an old design repairs its inventory once without redrawing the ima
   const d=result.designs[0];assert.equal(d.status,'ready');assert.equal(d.needs_rescan,false);assert.equal(d.items.length,4);const wall=d.items.find(x=>x.name_en==='Custom wall panelling');assert.equal(wall.search_kind,'service');assert.equal(wall.service_query_ar,'نجار لتفصيل ديكور حائط');assert.equal(d.inventory_backup,undefined);
   const saved=d.items.find(x=>x.name_en==='Desk chair');assert.equal(saved.id,'2');assert.deepEqual(saved.original_view,chair.original_view);assert.deepEqual(saved.design_picks,chair.design_picks);
   const corrected=d.items.find(x=>x.name_en==='Sofa');assert.notEqual(corrected.id,'1');assert.equal(corrected.original_view,undefined);
-  assert.ok(d.items.every(x=>x.crop));assert.equal(calls.length,2);
-  await select();assert.equal(calls.length,2,'repair is not repeated');
+  assert.ok(d.items.every(x=>x.crop));assert.equal(calls.length,1);
+  await select();assert.equal(calls.length,1,'opening uses one pass and repair is not repeated');
   assert.equal(createHash('sha256').update(readFileSync(join(directory,id,'design-0.jpg'))).digest('hex'),createHash('sha256').update(pixels).digest('hex'));
   const stored=JSON.parse(readFileSync(join(directory,'state.json'),'utf8'));assert.deepEqual(stored.jobs[id].designs[0].inventory_backup.items[0].original_view,sofa.original_view);
   assert.ok(Object.keys(stored.quota).every(key=>key.endsWith(':select')),'only free inventory selection allowance is touched');

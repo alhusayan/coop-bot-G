@@ -39,7 +39,14 @@ test('clean photo selection is free and opens the original layer without a Space
   document.querySelector('#design-request').value='Keep the door';
   document.querySelector('[data-action=options-done]').click();assert.equal(preferences.open,false);
   assert.equal(document.querySelector('#design-request').value,'Keep the door');assert.equal(authorizations,0);assert.equal(searches,0);
-  vm.runInContext("state.market='US'",context);await vm.runInContext('demo()',context);await vm.runInContext('choose(0)',context);
+  vm.runInContext("state.market='US'",context);await vm.runInContext('demo()',context);
+  assert.equal(vm.runInContext('state.view',context),'shopping','first real design opens without another click');
+  await vm.runInContext('choose(0)',context);
+  assert.equal(document.querySelectorAll('#design-variants [aria-current=true]').length,1);
+  const thumbnail=document.querySelector('#design-variants button');
+  vm.runInContext('renderShop()',context);assert.equal(document.querySelector('#design-variants button'),thumbnail,'polls preserve the active thumbnail');
+  Object.defineProperties(document.querySelector('#selected-image'),{naturalWidth:{value:900,configurable:true},naturalHeight:{value:1200,configurable:true}});
+  vm.runInContext('fitRoomPhoto()',context);assert.equal(Number(document.querySelector('#design-canvas').style.getPropertyValue('--photo-ratio')),0.75);
   assert.equal(document.querySelector('#furnishing-option'),null);
   assert.equal(document.querySelectorAll('.piece-coach').length,1,'first visit explains photo interaction');assert.equal(document.querySelectorAll('.hotspot').length,0);assert.equal(document.querySelectorAll('.piece-outline').length,0);
   vm.runInContext("selectPiece('1')",context);assert.equal(searches,0);assert.equal(authorizations,0);assert.equal(opens.length,0);
@@ -90,7 +97,7 @@ test('clean photo selection is free and opens the original layer without a Space
   assert.equal(handoffs.at(-1).query,'Custom curved ceiling');assert.equal(searches,0);assert.equal(authorizations,0);
   job.designs[0].items=[];job.designs[0].inventory_complete=true;
   await vm.runInContext('choose(0)',context);
-  assert.match(document.querySelector('.stage-hint').textContent,/Tap anything in your design/);
+  assert.match(document.querySelector('.stage-hint').textContent,/Tap a piece to find it in stores/);
   assert.match(document.querySelector('#empty-items').textContent,/Your design is ready/);
   assert.equal(document.querySelector('#empty-items .search-spinner'),null);
   assert.equal(document.querySelector('.browse-pieces').dataset.action,'other-work');

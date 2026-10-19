@@ -33,13 +33,14 @@ test('completion removes activity; errors retain correct retry indexes; reconnec
  const slow=designPresentation(job(),{...options,slow:true});assert.match(slow.stage,/No need to start again/);
  const lost=designPresentation(job(),{...options,slow:true,reconnecting:true});assert.match(lost.status,/Reconnecting/);assert.doesNotMatch(lost.stage,/No need to start again/);
 });
-test('setup removes the whole preference form and compact navigation keeps accessible controls',()=>{
+test('workspace keeps optional preferences and labelled design navigation',()=>{
  const html=readFileSync(new URL('../public/index.html',import.meta.url),'utf8'),app=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
  const {document}=parseHTML(html);
  assert.equal(document.querySelector('.preferences'),null);
  for(const name of ['budget','keep','notes','width','length'])assert.equal(document.querySelector('#design-form [name="'+name+'"]'),null);
  assert.equal(document.querySelector('[data-action="room-menu"]'),null);
- assert.equal(document.querySelector('#shopping [data-action="designs"]').getAttribute('aria-label'),'All designs');
+ assert.equal(document.querySelector('#design-variants').getAttribute('aria-label'),'Choose a design');
+ assert.equal(document.querySelector('#shopping [data-action="designs"]'),null);
  assert.equal(document.querySelector('#designs [data-action="original"]').getAttribute('aria-label'),'Your photo');
  assert.doesNotMatch(app,/\$\('#currency-label'\)/);
 });
@@ -86,9 +87,10 @@ test('design photos open the selected design directly instead of a duplicate pre
  assert.doesNotMatch(readFileSync(new URL('../public/app.js',import.meta.url),'utf8'),/case 'preview':/);
 });
 
-test('preferences remain form-associated but absent from the photo scene',()=>{
+test('one optional request stays beside the photo and scope remains form-associated',()=>{
  const {document}=parseHTML(readFileSync(new URL('../public/index.html',import.meta.url),'utf8'));
- assert.equal(document.querySelector('#setup input:not([type=hidden]),#setup textarea'),null);
+ assert.equal(document.querySelectorAll('#setup textarea').length,1);
+ assert.equal(document.querySelector('#design-request').closest('form').id,'design-form');
  assert.equal(document.querySelectorAll('#space-options input[name=scope]').length,3);
  for(const field of document.querySelectorAll('#space-options input,#space-options textarea'))assert.equal(field.getAttribute('form'),'design-form');
  assert.equal(document.querySelector('#space-options [name=scope][checked]').value,'full');

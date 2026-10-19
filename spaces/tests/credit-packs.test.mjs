@@ -17,9 +17,9 @@ test('balance notice lists live one-time packs and exact prices without starting
  context.config.plans=[];assert.equal(context.renderCreditPacks(body),false);assert.equal(body.childElementCount,0);
 });
 
-test('the design instruction precedes the image and original-photo preview has no white footer',()=>{
+test('the design instruction sits with the pieces below the full image and original-photo preview has no white footer',()=>{
  const html=readFileSync(new URL('../public/index.html',import.meta.url),'utf8');
- assert.ok(html.indexOf('class="stage-hint"')<html.indexOf('class="scene-pick-media"'));assert.equal((html.match(/class="stage-hint"/g)||[]).length,1);
+ assert.ok(html.indexOf('class="stage-hint"')>html.indexOf('id="design-variants"'));assert.equal((html.match(/class="stage-hint"/g)||[]).length,1);
  const app=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');const start=app.indexOf("case 'original':"),action=app.slice(start,app.indexOf('break;',start));
  assert.match(action,/original-preview/);assert.doesNotMatch(action,/preview-actions/);
 });

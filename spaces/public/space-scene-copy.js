@@ -23,5 +23,26 @@ const navigation={
  en:['Redesign','New design'],ar:['أعد التصميم','تصميم جديد'],fr:['Recréer','Nouveau projet'],de:['Neu gestalten','Neuer Entwurf'],es:['Rediseñar','Nuevo diseño'],it:['Ridisegna','Nuovo progetto'],pt:['Redesenhar','Novo design'],ru:['Переделать','Новый дизайн'],zh:['重新设计','新设计'],ja:['再デザイン','新しいデザイン'],ko:['다시 디자인','새 디자인'],hi:['फिर डिज़ाइन करें','नया डिज़ाइन'],ur:['دوبارہ ڈیزائن','نیا ڈیزائن'],id:['Desain ulang','Desain baru'],ms:['Reka semula','Rekaan baharu'],nl:['Opnieuw ontwerpen','Nieuw ontwerp'],tr:['Yeniden tasarla','Yeni tasarım']
 };
 keys.push('redesign','newDesign');for(const language of Object.keys(rows))rows[language].push(...navigation[language]);
+const workspace={
+ en:['Your space','Change photo','Back to design','Make it yours.','One photo. Three ideas for your space.','Anything in mind? (optional)','Before','After','All pieces'],
+ ar:['مساحتك','غيّر الصورة','ارجع للتصميم','على ذوقك.','صورة واحدة، وثلاث أفكار لمساحتك.','في بالك شيء؟ (اختياري)','قبل','بعد','كل القطع'],
+ fr:['Votre espace','Changer la photo','Retour au design','À votre image.','Une photo. Trois idées pour votre espace.','Une envie ? (facultatif)','Avant','Après','Tous les objets'],
+ de:['Ihr Raum','Foto ändern','Zurück zum Design','Ganz nach Ihrem Geschmack.','Ein Foto. Drei Ideen für Ihren Raum.','Besondere Wünsche? (optional)','Vorher','Nachher','Alle Objekte'],
+ es:['Tu espacio','Cambiar foto','Volver al diseño','A tu gusto.','Una foto. Tres ideas para tu espacio.','¿Alguna idea? (opcional)','Antes','Después','Todas las piezas'],
+ it:['Il tuo spazio','Cambia foto','Torna al progetto','A modo tuo.','Una foto. Tre idee per il tuo spazio.','Qualche desiderio? (facoltativo)','Prima','Dopo','Tutti gli oggetti'],
+ pt:['Seu espaço','Alterar foto','Voltar ao design','Do seu jeito.','Uma foto. Três ideias para seu espaço.','Alguma ideia? (opcional)','Antes','Depois','Todas as peças'],
+ ru:['Ваше пространство','Изменить фото','Вернуться к дизайну','В вашем стиле.','Одно фото. Три идеи для вашего пространства.','Есть пожелания? (необязательно)','До','После','Все предметы'],
+ zh:['你的空间','更换照片','返回设计','打造你的风格。','一张照片，三种空间灵感。','有什么想法？（选填）','改造前','改造后','所有物品'],
+ ja:['あなたの空間','写真を変更','デザインに戻る','あなたらしく。','1枚の写真から、3つのアイデア。','ご希望は？（任意）','変更前','変更後','すべての家具'],
+ ko:['내 공간','사진 변경','디자인으로 돌아가기','내 취향대로.','사진 한 장, 내 공간을 위한 세 가지 아이디어.','원하는 것이 있나요? (선택)','이전','이후','모든 가구'],
+ hi:['आपकी जगह','तस्वीर बदलें','डिज़ाइन पर वापस जाएँ','अपनी पसंद से।','एक तस्वीर। आपकी जगह के लिए तीन विचार।','कोई इच्छा? (वैकल्पिक)','पहले','बाद में','सभी वस्तुएँ'],
+ ur:['آپ کی جگہ','تصویر بدلیں','ڈیزائن پر واپس جائیں','اپنی پسند کے مطابق۔','ایک تصویر۔ آپ کی جگہ کے لیے تین تجاویز۔','کوئی خواہش؟ (اختیاری)','پہلے','بعد','تمام اشیا'],
+ id:['Ruang Anda','Ganti foto','Kembali ke desain','Sesuai selera Anda.','Satu foto. Tiga ide untuk ruang Anda.','Ada keinginan? (opsional)','Sebelum','Sesudah','Semua barang'],
+ ms:['Ruang anda','Tukar foto','Kembali ke rekaan','Mengikut cita rasa anda.','Satu foto. Tiga idea untuk ruang anda.','Ada keinginan? (pilihan)','Sebelum','Selepas','Semua barangan'],
+ nl:['Jouw ruimte','Foto wijzigen','Terug naar ontwerp','Helemaal jouw stijl.','Eén foto. Drie ideeën voor jouw ruimte.','Speciale wensen? (optioneel)','Voor','Na','Alle items'],
+ tr:['Alanınız','Fotoğrafı değiştir','Tasarıma dön','Sizin tarzınız.','Bir fotoğraf. Alanınız için üç fikir.','Bir isteğiniz var mı? (isteğe bağlı)','Önce','Sonra','Tüm parçalar']
+};
+keys.push('yourPhoto','changePhoto','backToDesign','makeItYours','setupHint','wishes','before','after','allPieces');
+for(const language of Object.keys(rows))rows[language].push(...workspace[language]);
 export const sceneLanguages=Object.keys(rows);
 export const sceneText=(language,key)=>(rows[language]||rows.en)[keys.indexOf(key)]||key;

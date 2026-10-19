@@ -1,6 +1,6 @@
 import {studioCopy} from './design-studio-copy.js?v=20261016-credit1';
 // Show real results immediately. Pending concepts never masquerade as previews.
-import {sceneText} from './space-scene-copy.js?v=20261017-scene4';
+import {sceneText} from './space-scene-copy.js?v=20261019-studio1';
 export function designPresentation(job,{escape:esc,icon,translate,language='en',order=[],reconnecting=false,slow=false,messages={}}){
  const t=source=>studioCopy[language]?.[source]||translate(source),copy=key=>sceneText(language,key);
  const designs=job.designs||[],ready=designs.filter(d=>d.image).length;

@@ -16,6 +16,7 @@ import {adaptPiece} from './adaptation.mjs';
 import {groupIdenticalPieces,occurrences} from './identity.mjs';
 import {canShopPiece} from './public/piece-intent.js';
 import {detectRoom,designPrompt,verifyRoomFunction} from './room-function.mjs';
+import {prepareInventory} from './inventory-pipeline.mjs';
 import {identifyPieces,inventoryRepairTarget,INVENTORY_VERSION,retainInventoryResults} from './inventory.mjs';
 import {originalPage,savedOriginalView} from './original-page.mjs';
 import {updateDesignPicks} from './public/design-picks.js';
@@ -73,7 +74,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({furnishing,inventory_backup,billing,...d},i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3||d.inventory_version!==INVENTORY_VERSION,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(({furnishing_offers,...x})=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({furnishing,inventory_backup,opened_image,billing,...d},i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3||d.inventory_version!==INVENTORY_VERSION,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(({furnishing_offers,...x})=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 const productDetails=createDetailsService({directory:resolve(DATA,'product-details'),onStart:owner=>{
  // Separate bounded enrichment allowance. Does not touch the Findzia wallet,
@@ -142,34 +143,37 @@ async function searchOne(j,d,item,{key,interactive,billing}){
  }catch(e){if(!item.offers?.length&&!item.alternatives?.length)Object.assign(item,saved);item.status='error';item.error=e.message;console.error('SPACES_SEARCH_ERROR',e.message);}persist();
 }
 async function identifyAndShop(j,index){
- const d=j.designs[index],previous=d.items||[];if(previous.length&&!d.inventory_backup)d.inventory_backup={version:d.inventory_version||1,items:previous};d.status='analyzing';d.error=null;d.items=[];d.inventory_complete=false;d.inventory_revision=Date.now();d.matching_version=3;d.search_revision=SEARCH_REVISION;d.search_language=searchLanguage(j.options.language);d.grouping_version=0;persist();
+ const d=j.designs[index],previous=d.items||[],image=d.image,started=Date.now();
+ if(previous.length&&!d.inventory_backup)d.inventory_backup={version:d.inventory_version||1,items:previous};
+ d.status='analyzing';d.error=null;d.items=[];d.inventory_complete=false;d.inventory_revision=Date.now();d.matching_version=3;d.search_revision=SEARCH_REVISION;d.search_language=searchLanguage(j.options.language);d.grouping_version=0;persist();
+ const revision=d.inventory_revision,bytes=readFileSync(resolve(DATA,j.id,image));
  try{
- d.items=await identifyPieces(fileImage(j,d.image),{keep:j.options.keep,onAttempt:details=>console.log('SPACES_INVENTORY_PARSE',j.id,index,JSON.stringify(details))});
- console.log('SPACES_INVENTORY_READY',j.id,index,JSON.stringify({items:d.items.length,image:d.image}));
- await reconcilePieces(j,index);
- d.items=retainInventoryResults(previous,d.items);
- const bytes=readFileSync(resolve(DATA,j.id,d.image));
- await pool(d.items,4,async item=>{
-  try{
-   const views=await pool(occurrences(item),3,async view=>{const crop=await cropPiece(bytes,view.box),name='crop-'+index+'-'+view.id+'-r'+d.inventory_revision+'.jpg';writeFileSync(resolve(DATA,j.id,name),crop,{mode:0o600});return {...view,crop:name};});
-   item.crop=views[0].crop;if(item.occurrences?.length)item.occurrences=views;
-  }catch{item.status='error';item.error='INVALID_CROP';}
+ await prepareInventory({
+  identify:()=>identifyPieces(fileImage(j,image),{keep:j.options.keep,onAttempt:details=>console.log('SPACES_INVENTORY_PARSE',j.id,index,JSON.stringify(details))}),
+  isCurrent:()=>d.image===image&&d.inventory_revision===revision,
+  canRefine:()=>d.opened_image!==image,
+  prepare:async(items,review)=>{
+   const retained=retainInventoryResults(previous,items);
+   await pool(retained,4,async item=>{
+    try{
+     const views=await pool(occurrences(item),3,async view=>{
+      const crop=await cropPiece(bytes,view.box),name='crop-'+index+'-'+view.id+'-r'+revision+(review?'-review':'')+'.jpg';
+      writeFileSync(resolve(DATA,j.id,name),crop,{mode:0o600});return {...view,crop:name};
+     });
+     item.crop=views[0].crop;if(item.occurrences?.length)item.occurrences=views;
+    }catch{item.status='error';item.error='INVALID_CROP';}
+   });
+   return retained;
+  },
+  publish:(items,review)=>{
+   d.items=items;d.inventory_complete=true;d.inventory_version=INVENTORY_VERSION;d.status='ready';if(review)d.grouping_version=2;
+   // Only inventory and crops: store retrieval still requires the customer's action.
+   persist();console.log(review?'SPACES_GROUPING_DONE':'SPACES_INVENTORY_USABLE',j.id,index,JSON.stringify({items:items.length,elapsed_ms:Date.now()-started}));
+  },
+  refine:items=>groupIdenticalPieces(items,fileImage(j,image),{keep:j.options.keep}),
+  onReviewError:e=>console.log('SPACES_GROUPING_UNAVAILABLE',j.id,index,e.message)
  });
- d.inventory_complete=true;d.inventory_version=INVENTORY_VERSION;
- // Inventory only. Paid retrieval starts exclusively from a customer's point tap.
- d.status='ready';
- }catch(e){if(!d.items?.length)d.items=previous;d.status=d.items?.length?'complete':'ready';d.error=e.message;console.error('SPACES_IDENTIFY_ERROR',j.id,index,e.message);}persist();
-}
-async function reconcilePieces(j,index){
- const d=j.designs[index];if(d.grouping_version===2||!d.items?.length)return;
- const before=d.items.length;
- try{
-   const grouped=await groupIdenticalPieces(d.items,fileImage(j,d.image),{keep:j.options.keep});
-   d.items=grouped;d.grouping_version=2;
-   for(const item of grouped.filter(x=>x.identity_verified))console.log('SPACES_IDENTICAL_GROUP',j.id,index,JSON.stringify({ids:item.grouped_ids,quantity:item.quantity,views:occurrences(item).length,matches:item.offers.length,options:item.alternatives.length,top:item.alternatives[0]?.title,score:item.alternatives[0]?.visual_score}));
-   console.log('SPACES_GROUPING_DONE',j.id,index,JSON.stringify({before,after:d.items.length}));
- }catch(e){console.log('SPACES_GROUPING_UNAVAILABLE',j.id,index,e.message);}
- persist();
+ }catch(e){if(!d.items?.length)d.items=previous;d.status=d.items?.length?'complete':'ready';d.error=e.message;console.error('SPACES_IDENTIFY_ERROR',j.id,index,e.message);persist();}
 }
 async function replacePiece(j,index,item,offer){
  const d=j.designs[index];d.status='adapting';d.adaptation_error=null;persist();
@@ -203,7 +207,7 @@ function makeJob(owner,opt,buffer,idempotency='',charges=[]){
 export function createServer(){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{
  const u=new URL(req.url,'http://localhost');let path=u.pathname;
- const lensMedia=path.match(/^\/lens-media\/([a-f0-9]{24})\/(crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
+ const lensMedia=path.match(/^\/lens-media\/([a-f0-9]{24})\/(crop-[0-2]-\d{1,2}(?:-r\d{13}(?:-review)?)?\.jpg)$/);
  if(lensMedia){
    const expires=Number(u.searchParams.get('expires')),sig=u.searchParams.get('sig')||'';
    if(!['GET','HEAD'].includes(req.method)||!Number.isFinite(expires)||expires<Date.now()||expires>Date.now()+21*60000||!constantEqual(sign(path+':'+expires),sig))throw error('NOT_FOUND',404);
@@ -300,6 +304,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      if(action==='select'){
        j.selected_design=i;
        if(!d.image)throw error('DESIGN_NOT_READY',409);
+       d.opened_image=d.image;persist();
        if(!['analyzing','adapting'].includes(d.status)&&!d.items.some(item=>item.status==='searching')&&((!d.items.length&&!d.inventory_complete)||d.matching_version!==3||d.inventory_version!==INVENTORY_VERSION)&&!tasks.has('shop:'+id+':'+i)){
          consume(owner,'select',12);d.status='analyzing';persist();launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));
        }
@@ -338,7 +343,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      }
    }
  }
- const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|reference-[a-f0-9]{24}\.jpg|room-depth\.png|metric-depth\.png|design-[0-2](?:-r\d{13})?\.(?:jpg|png)|crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
+ const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|reference-[a-f0-9]{24}\.jpg|room-depth\.png|metric-depth\.png|design-[0-2](?:-r\d{13})?\.(?:jpg|png)|crop-[0-2]-\d{1,2}(?:-r\d{13}(?:-review)?)?\.jpg)$/);
  if(media){ownerJob(media[1],owner);const f=resolve(DATA,media[1],media[2]);if(!existsSync(f))throw error('NOT_FOUND',404);const bytes=readFileSync(f);res.writeHead(200,{...headers,'Content-Type':bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp','Cache-Control':'private, max-age=3600'});return res.end(bytes);}
  if(!['GET','HEAD'].includes(req.method))throw error('NOT_FOUND',404);
  if(/^\/policies\/(privacy-policy|terms-of-service|refund-policy)$/.test(path)){res.writeHead(302,{...headers,Location:'https://findzia.com'+path});return res.end();}

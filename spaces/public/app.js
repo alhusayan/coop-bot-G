@@ -1,15 +1,15 @@
 import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
-import {createOriginalLayer} from './original-results.js?v=20261017-scene5';
+import {createOriginalLayer} from './original-results.js?v=20261019-studio1';
 import {bindStoreLinks} from './store-links.js';
-import {mountFindzia} from './findzia-shell.js?v=20261017-scene5';
+import {mountFindzia} from './findzia-shell.js?v=20261019-studio1';
 import {pieceViews,pickPhotoCandidates} from './hotspots.js';
 import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} from './piece-intent.js';
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261017-scene5';
-import {sceneText} from './space-scene-copy.js?v=20261017-scene5';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261019-studio1';
+import {sceneText} from './space-scene-copy.js?v=20261019-studio1';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
 bindStoreLinks(document);
@@ -105,6 +105,9 @@ function active(){return state.job?.designs.some(d=>['generating','analyzing','s
 function poll(){clearTimeout(pollTimer);const token=roomContext.capture(),id=state.job?.id;if(!id)return;pollTimer=setTimeout(async()=>{if(!roomContext.current(token)||state.job?.id!==id)return;try{const job=await api('/api/jobs/'+id);if(!applyJob(job,token)){if(roomContext.current(token)&&state.job?.id===id&&active())poll();return;}pollErrors=0;if(state.view==='designs')renderDesigns();if(state.view==='shopping')renderShop();if(active())poll();else document.querySelector('.fz-home')?.fzBilling?.refresh(true);}catch(e){if(!roomContext.current(token))return;pollErrors++;if(pollErrors===2)toast(translate('Reconnecting to your search…','جارٍ الاتصال…'));if(state.view==='shopping')renderShop();if(state.view==='designs')renderDesigns();if(active())poll();else toast(e.message);}},Math.min(10000,1500*(pollErrors+1)));}
 function renderDesigns(){
  const j=state.job;if(!j)return;
+ // The first actual render opens immediately; later arrivals never change the selection.
+ const ready=j.designs.findIndex(d=>d.image);
+ if(ready!==-1){void choose(j.designs[state.design]?.image?state.design:ready);return;}
  $$('[data-action=redesign]').forEach(button=>button.disabled=submitting||active());
  if(designJob!==j.id){designJob=j.id;designArrival=[];generationStarted=Date.now();}
  j.designs.forEach((d,i)=>{if(d.image&&!designArrival.includes(i))designArrival.push(i);});
@@ -131,7 +134,7 @@ $('#design-grid').addEventListener('scroll',syncDesignNavigation,{passive:true})
 $('#design-studio').addEventListener('focusin',event=>{if(!event.target.closest('[data-action="studio-play"]'))styleTour.pause();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)styleTour.stop();else if(state.view==='designs')renderDesigns();});
 
-async function choose(index){if(!state.job?.designs[index]?.image)return;pointFocus=null;const token=roomContext.begin(),id=state.job.id;clearTimeout(pollTimer);closeSheet();state.design=index;state.compare=false;shopKey='';const d=state.job.designs[index];if((!d.items?.length&&!d.inventory_complete)||d.needs_rescan){d.status='analyzing';d.items=[];}view('shopping');try{const job=await api('/api/jobs/'+id+'/select',{method:'POST',body:JSON.stringify({design:index,language:shell?.getLanguage()||'en'})});if(!applyJob(job,token))return;shopKey='';renderShop();poll();}catch(e){if(roomContext.current(token))toast(e.message);}}
+async function choose(index){if(!state.job?.designs[index]?.image)return;pointFocus=null;const token=roomContext.begin(),id=state.job.id;clearTimeout(pollTimer);closeSheet();state.design=index;state.compare=false;shopKey='';const d=state.job.designs[index];if((!d.items?.length&&!d.inventory_complete)||d.needs_rescan){d.status='analyzing';d.items=[];}view('shopping');try{const job=await api('/api/jobs/'+id+'/select',{method:'POST',body:JSON.stringify({design:index,language:shell?.getLanguage()||'en'})});if(!applyJob(job,token))return;shopKey='';renderShop();poll();}catch(e){if(roomContext.current(token)){toast(e.message);if(active())poll();}}}
 const selected=()=>state.job?.designs[state.design];
 const keyFor=item=>[state.job.id,state.design,item.id].join(':');
 const searchKey=item=>keyFor(item)+':'+countryCode();
@@ -206,15 +209,27 @@ function requestOtherWork(){
  $('#other-work-query').focus();
 }
 
+// The canvas and the tap surface always have exactly the photo's aspect ratio.
+function fitRoomPhoto(){
+ const image=$('#selected-image');
+ if(image.naturalWidth&&image.naturalHeight)$('#design-canvas').style.setProperty('--photo-ratio',image.naturalWidth/image.naturalHeight);
+}
+$('#selected-image').addEventListener('load',fitRoomPhoto);
+function renderVariants(){
+ patchHTML($('#design-variants'),state.job.designs.map((d,i)=>{
+  const title=translate(d.title),ready=!!d.image;
+  return `<button class="design-variant${ready?'':' is-pending'}" data-ui-key="variant:${state.job.id}:${i}" data-action="${ready?'choose':d.status==='error'?'retry':'pending'}" data-index="${i}" aria-current="${i===state.design}" ${!ready&&d.status!=='error'?'disabled':''} aria-label="${esc(title+(d.status==='error'?' — '+translate('Try again · 1 credit'):''))}">${ready?`<img src="${esc(d.image)}" alt="" decoding="async">`:`<span class="variant-placeholder">${d.status==='error'?icon('refresh',true):'<span class="scene-breath" aria-hidden="true"><i></i><i></i><i></i></span>'}</span>`}<span class="variant-title">${esc(d.status==='error'?translate('Try again · 1 credit'):title)}</span>${i===state.design?`<span class="variant-check" aria-hidden="true">${icon('check',true)}</span>`:''}</button>`;
+ }).join(''));
+}
 function renderShop(){
  $$('[data-action=redesign]').forEach(button=>button.disabled=submitting||active());
  const d=selected();if(!d)return;
- $('#selected-title').textContent=d.title;
- updateImage($('#selected-image'),state.compare?state.job.original:d.image);
- $('#compare-label').textContent=state.compare?'After':'Before';$('[data-action="compare"]').setAttribute('aria-pressed',String(state.compare));$('#hotspots').classList.toggle('hidden',state.compare);
+ $('#selected-title').textContent=translate(d.title);renderVariants();
+ updateImage($('#selected-image'),state.compare?state.job.original:d.image);fitRoomPhoto();
+ $('#compare-label').textContent=sceneText(document.documentElement.lang,state.compare?'after':'before');$('[data-action="compare"]').setAttribute('aria-pressed',String(state.compare));$('#hotspots').classList.toggle('hidden',state.compare);
  const items=d.items||[],preparing=d.status==='analyzing',adapting=d.status==='adapting',conceptOnly=d.inventory_complete&&!items.length&&!preparing&&!adapting&&!d.error;
  const pending=items.find(pieceBusy);if(pending&&!items.some(x=>pointFocus?.key===keyFor(x)))pointFocus={key:keyFor(pending),id:pending.id,waiting:true};
- patchHTML($('.stage-hint'),`<span>${esc(sceneText(document.documentElement.lang,'tap'))}</span><button class="browse-pieces scene-float" data-action="${conceptOnly?'other-work':'pieces'}" aria-label="${esc(translate('All elements','جميع العناصر'))}" ${preparing||adapting?'disabled':''}>${icon('more',true)}</button>`);
+ patchHTML($('.stage-hint'),preparing||adapting?'':`<span>${esc(sceneText(document.documentElement.lang,'tap'))}</span><button class="browse-pieces scene-link" data-action="${conceptOnly?'other-work':'pieces'}">${esc(sceneText(document.documentElement.lang,'allPieces'))}</button>`);
  $('#shopping').classList.toggle('has-piece',!!pointFocus);
  $('#shop-count').textContent='';$('#search-progress').classList.add('hidden');$('#summary-button').classList.add('hidden');$('#items-list').replaceChildren();
  $('#empty-items').classList.toggle('hidden',items.length>0&&!preparing&&!adapting);
@@ -304,7 +319,7 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'local-stores':{const item=selected()?.items.find(x=>x.id===state.itemId);if(item)await localCatalog.load(item);break;}
  case 'designs':pointFocus=null;closeSheet();view('designs');break;
  case 'choose':await choose(index);break;
- case 'retry':el.disabled=true;generationStarted=Date.now();if(await changeJob('/retry',{design:index})){renderKey='';renderDesigns();poll();}break;
+ case 'retry':el.disabled=true;generationStarted=Date.now();if(await changeJob('/retry',{design:index})){renderKey='';if(state.view==='shopping')renderShop();else renderDesigns();poll();}break;
  case 'original':showSheet(`<figure class="original-preview"><figcaption>${esc(translate('Your original room','صورتك الأصلية'))}</figcaption><img src="${esc(state.job.original)}" alt="${esc(translate('Your original room','صورتك الأصلية'))}"></figure>`,'preview');break;
  case 'compare':state.compare=!state.compare;renderShop();break;
  case 'photo-pick':pickFromPhoto(e,el);break;
@@ -359,7 +374,7 @@ document.addEventListener('spaces:locale',()=>{if(state.view==='designs')renderD
 // Preserve scrolling and pinch zoom, without iOS image peek/share callouts.
 document.addEventListener('contextmenu',event=>{if(event.target.closest?.('.design-image,.design-canvas,.setup-photo,.original-peek,.preview-photo'))event.preventDefault();});
 
-// The main scene has only the current action. Wishes and scope live in Options.
+// Keep compact controls pretranslated; scope stays in the optional sheet.
 function refreshSceneCopy(){
  const language=document.documentElement.lang;
  $$('[data-scene]').forEach(node=>{const text=sceneText(language,node.dataset.scene);if(node.textContent!==text)node.textContent=text;});
