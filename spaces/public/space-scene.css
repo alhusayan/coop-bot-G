@@ -25,6 +25,20 @@
  html[data-space-scene] #home h1{font-size:clamp(28px,5vw,42px)!important;font-weight:500!important;line-height:1.4!important;margin:0 0 8px!important;color:inherit!important}
  html[data-space-scene] #home .scene-link{color:#fffdf5!important}
  html[data-space-scene] #home .notice{font-size:13px!important;color:inherit!important;margin:0!important}
+ /* The hub already supplies the home surface's size, corners and margins.
+    Its Design entrance fills that same surface; only the controls change. */
+ html[data-space-scene][data-findzia-embedded] [data-spaces-content]:has(>#home:not(.hidden)){max-width:none!important;padding:0!important}
+ html[data-space-scene][data-findzia-embedded] #home{height:var(--spaces-viewport-height,100svh)!important;min-height:0!important;border-radius:0!important;animation:none!important}
+ html[data-space-scene][data-findzia-embedded] #home .scene-cover{object-position:50% 59%!important}
+ html[data-space-scene][data-findzia-embedded] #home .scene-shade{background:linear-gradient(180deg,transparent 25%,#02070506 42%,#02070538 59%,#020705bc 78%,#020705f5 100%)!important}
+ @media(max-width:720px){
+  html[data-space-scene][data-findzia-embedded] #home .scene-cover{height:calc(100% - 76px)!important;object-position:50% 55%!important}
+  html[data-space-scene][data-findzia-embedded] #home .scene-shade{background:linear-gradient(180deg,transparent 25%,#02070500 38%,#02070520 53%,#020705b8 70%,#09100dfc 88%,#09100d 100%)!important}
+ }
+ @media(min-width:721px) and (max-aspect-ratio:1/1){
+  html[data-space-scene][data-findzia-embedded] #home .scene-cover{height:calc(100% - 75px)!important;object-position:50% 50%!important}
+  html[data-space-scene][data-findzia-embedded] #home .scene-shade{background:linear-gradient(180deg,transparent 25%,#02070500 40%,#02070550 64%,#09100dfc 88%,#09100d 100%)!important}
+ }
  html[data-space-scene] .scene-heading{display:flex!important;align-items:center!important;flex-wrap:wrap!important;gap:8px 16px!important;margin:0 0 12px!important}
  html[data-space-scene] .scene-heading h1{font-size:22px!important;line-height:1.4!important;font-weight:500!important;margin:0!important;margin-inline-end:auto!important;color:inherit!important}
  html[data-space-scene] .setup-workspace{display:grid!important;gap:20px!important}
