@@ -155,7 +155,7 @@ function searchSeconds(item){const start=pointStarted.get(searchKey(item))||item
 function elapsedLabel(item){return searchSeconds(item)+(shell?.getLanguage()==='ar'?' ث':'s');}
 let photoGuideSeen=false;try{photoGuideSeen=localStorage.getItem('findzia-piece-guide-seen')==='1';}catch{}
 function photoMarkup(items){
- if(['analyzing','adapting'].includes(selected().status))return '';
+ if(['analyzing','adapting'].includes(selected().status)||$('#selected-image').getAttribute('src')!==selected().image)return '';
  const item=items.find(x=>pointFocus?.key===keyFor(x)),busy=pieceBusy(item);
  const view=item&&(pieceViews([item]).find(v=>v.marker===pointFocus?.marker)||pieceViews([item])[0]);
  let outline='';
@@ -214,7 +214,7 @@ function fitRoomPhoto(){
  const image=$('#selected-image');
  if(image.naturalWidth&&image.naturalHeight)$('#design-canvas').style.setProperty('--photo-ratio',image.naturalWidth/image.naturalHeight);
 }
-$('#selected-image').addEventListener('load',fitRoomPhoto);
+$('#selected-image').addEventListener('load',()=>{fitRoomPhoto();if(state.view==='shopping')renderShop();});
 function renderVariants(){
  patchHTML($('#design-variants'),state.job.designs.map((d,i)=>{
   const title=translate(d.title),ready=!!d.image;

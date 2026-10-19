@@ -47,6 +47,10 @@ test('clean photo selection is free and opens the original layer without a Space
   vm.runInContext('renderShop()',context);assert.equal(document.querySelector('#design-variants button'),thumbnail,'polls preserve the active thumbnail');
   Object.defineProperties(document.querySelector('#selected-image'),{naturalWidth:{value:900,configurable:true},naturalHeight:{value:1200,configurable:true}});
   vm.runInContext('fitRoomPhoto()',context);assert.equal(Number(document.querySelector('#design-canvas').style.getPropertyValue('--photo-ratio')),0.75);
+  const loadedPhoto=document.querySelector('#selected-image');
+  loadedPhoto.setAttribute('src','/previous-design.webp');
+  assert.equal(vm.runInContext('photoMarkup(selected().items)',context),'','old photo cannot receive new design hit targets during loading');
+  loadedPhoto.setAttribute('src',job.designs[0].image);vm.runInContext('renderShop()',context);
   assert.equal(document.querySelector('#furnishing-option'),null);
   assert.equal(document.querySelectorAll('.piece-coach').length,1,'first visit explains photo interaction');assert.equal(document.querySelectorAll('.hotspot').length,0);assert.equal(document.querySelectorAll('.piece-outline').length,0);
   vm.runInContext("selectPiece('1')",context);assert.equal(searches,0);assert.equal(authorizations,0);assert.equal(opens.length,0);
