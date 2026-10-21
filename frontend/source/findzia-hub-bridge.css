@@ -1,3 +1,19 @@
+/* The hub owns the only room bitmap and its geometry. */
+@layer findzia-hub-static {
+ html[data-findzia-embedded]{--spaces-viewport-height:100vh!important;--spaces-viewport-top:0px!important}
+ html[data-findzia-embedded],html[data-findzia-embedded] body{background:transparent!important}
+ html[data-findzia-embedded] .fz-home[data-home-state=empty],
+ html[data-findzia-embedded] .fz-dark-home,
+ html[data-findzia-embedded] .experience-entry,
+ html[data-findzia-embedded] #home,
+ html[data-findzia-embedded] [data-spaces-content]:has(>#home:not(.hidden)){background:transparent!important}
+ html[data-findzia-embedded] :is(.experience-entry:before,#home .scene-cover,#home .scene-shade){display:none!important}
+ html[data-findzia-embedded] #home{animation:none!important}
+ html[data-findzia-embedded] .fz-home[data-home-state=results]{background:var(--paper,#f3f2ed)!important;min-height:100svh!important;padding-bottom:100px!important}
+ html[data-findzia-embedded] .experience-copy .fzb-search-notice{position:relative!important;background:var(--paper,#f3f2ed)!important;color:var(--ink,#1d2c24)!important;border-radius:16px!important;padding:16px!important;text-shadow:none!important}
+ html[data-findzia-embedded] .svc-page:has(.experience-entry:not([hidden])){background:transparent!important}
+ html[data-findzia-embedded] .svc-page:has(.experience-entry[hidden]){padding-bottom:100px!important}
+}
 /* The surrounding portal owns the top-level close control and safe area. */
 html[data-findzia-embedded] {scroll-padding-top:8px}
 html[data-hub-account-only] .fz-home>:not(.fz-account){visibility:hidden!important}

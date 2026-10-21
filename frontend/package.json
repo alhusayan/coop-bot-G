@@ -11,6 +11,6 @@
     "start": "node server.mjs",
     "test": "node --test tests/server.test.mjs tests/motion.test.cjs tests/launch.test.cjs tests/image-deadline.test.cjs",
     "test:locales": "node scripts/build.mjs && node --test tests/locales.test.mjs tests/locale-delivery.test.mjs",
-    "test:hub": "npm run build && node --test tests/hub.test.mjs"
+    "test:hub": "npm run build && node --test tests/hub.test.mjs tests/photo-launch.test.cjs"
   }
 }

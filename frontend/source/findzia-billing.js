@@ -33,7 +33,11 @@
       allowed=await abortable((async()=>(await waitFor(root)).beforeSearch(payload,{signal:ctl.signal,previous:launch?.previous}))(),ctl.signal);
       return !!allowed&&!ctl.signal.aborted&&!launch?.cancelled;
     }catch(_){
-      if(!launch?.cancelled)root.fzRefineBridge?.accountNotice(root.dataset.lang==='ar'?'تعذّر التحقق من الرصيد. حاول مجددًا.':'Could not check your credits. Please try again.');
+      if(!launch?.cancelled){
+        const message=root.dataset.lang==='ar'?'تعذّر التحقق من الرصيد. حاول مجددًا.':'Could not check your credits. Please try again.';
+        root.fzRefineBridge?.accountNotice(message);
+        root.dispatchEvent(new CustomEvent('fz:search-blocked',{bubbles:true,detail:{code:'credits_unavailable',message}}));
+      }
       return false;
     }finally{
       clearTimeout(timer);
@@ -125,7 +129,7 @@
       const requested=noticeCode||(status?.remaining===0?'credits_exhausted':'');
       const code=busy&&requested==='credits_exhausted'?'':requested;
       const home=root.dataset.homeState==='empty',limited=code==='credits_exhausted';
-      const anchor=home?root.querySelector('[data-dark-form]'):limited?root.querySelector('[data-results-body]'):root.querySelector('[data-search-card]');
+      const anchor=home?(root.querySelector('[data-hub-search-notice]')||root.querySelector('[data-dark-form]')):limited?root.querySelector('[data-results-body]'):root.querySelector('[data-search-card]');
       const before=home||limited;
       if(anchor&&(before?anchor.previousElementSibling:anchor.nextElementSibling)!==hint){if(before)anchor.before(hint);else anchor.after(hint);}
       const key=JSON.stringify([code,root.dataset.lang,config?.plans||status?.plans||[]]);hint.dir=rtl()?'rtl':'ltr';

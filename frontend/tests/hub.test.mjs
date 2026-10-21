@@ -41,8 +41,8 @@ function hubFixture(href='https://findzia.com/',saved={}){
  return{nodes,node,groups,html,window,location,messages,frames,listeners,stored,history};
 }
 test('open, close, reopen and browser back preserve a single layer; forged messages ignored',()=>{
- const f=hubFixture();assert.equal(f.html.style['--hub-height'],'560px');f.window.visualViewport.height=488;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-height'],'488px');
- for(const [index,card]of f.groups['[data-project]'].entries()){card.fire('click');const frame=f.frames.at(-1);assert.equal(f.node('#project-layer').open,true);assert.equal(f.node('#experience-nav').hidden,true);assert.equal(f.node('#projects').hidden,true);assert.equal(new URL(frame.src).origin,'https://findzia.com');assert.equal(new URL(frame.src).searchParams.get('hubProject'),card.dataset.project);
+ const f=hubFixture();assert.equal(f.html.style['--hub-height'],'560px');f.window.visualViewport.height=488;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-height'],'560px');
+ for(const [index,card]of f.groups['[data-project]'].entries()){card.fire('click');const frame=f.frames.at(-1);assert.equal(f.node('#project-layer').open,true);assert.equal(f.node('#experience-nav').hidden,true);assert.equal(f.node('#projects').hidden,false);assert.equal(new URL(frame.src).origin,'https://findzia.com');assert.equal(new URL(frame.src).searchParams.get('hubProject'),card.dataset.project);
  f.listeners.message({origin:'https://evil.example',source:frame.contentWindow,data:{findziaHub:true,type:'close'}});assert.equal(f.node('#project-layer').open,true);
  f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'ready'}});assert.equal(f.node('#layer-status').hidden,true);
  f.groups['[data-account]'][1].fire('click');assert.equal(f.messages.at(-1).data.type,'account');
@@ -108,14 +108,14 @@ test('persistent header remains operable outside the project layer; one composer
  f.groups['[data-project]'][2].fire('click');const space=f.frames.at(-1);space.contentWindow.FindziaHubBridge={action:(name)=>name==='state'?{cameraReady:true}:calls.push({name})};f.listeners.message({origin:'https://findzia.com',source:space.contentWindow,data:{findziaHub:true,type:'ready'}});f.node('#header-camera').fire('click');assert.equal(f.node('#camera-source').open,false);assert.equal(calls.at(-1).name,'photos');assert.equal(f.node('#camera-source').open,false);
 });
 function projectFixture(project){
- const records=[],posts=[],events={},stored=new Map(),nodes=new Map();
+ const records=[],posts=[],events={},rootEvents={},stored=new Map(),nodes=new Map();
  const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{value:'',hidden:false,disabled:false,required:false,options:[],dataset:{},click(){records.push(selector)},dispatchEvent(){records.push('input:'+selector)},requestSubmit(){records.push('submit:'+selector)}});return nodes.get(selector)};
- const root={dataset:{lang:'en'},fzAccount:{open(){}},fzRefineBridge:{context:()=>({busy:false,country:'KW'})},querySelector:selector=>['[data-profile-language-select]','[data-solar-mode]'].includes(selector)?null:selector==='[data-profile-market-select]'?node(selector):null,addEventListener(){}};
+ const root={dataset:{lang:'en'},fzAccount:{open:view=>records.push('account:'+view)},fzRefineBridge:{context:()=>({busy:false,country:'KW'})},querySelector:selector=>['[data-profile-language-select]','[data-solar-mode]'].includes(selector)?null:selector==='[data-profile-market-select]'?node(selector):null,addEventListener:(name,fn)=>rootEvents[name]=fn};
  node('[data-profile-market-select]').options=[{value:'KW'},{value:'SA'}];node('[data-profile-market-select]').value='KW';
  const document={documentElement:{dataset:{}},readyState:'complete',querySelector:s=>s==='.fz-home'?root:node(s),addEventListener:(name,fn)=>{(events[name]??=[]).push(fn)}};
  const parent={FindziaHub:true,location:{origin:'https://findzia.com',href:'https://findzia.com/?project='+project},postMessage:data=>posts.push(data)},window={addEventListener(){}};
  vm.runInNewContext(read('../source/findzia-hub-bridge.js'),{window,parent,document,location:new URL('https://findzia.com/search?hub=1&hubProject='+project),URL,URLSearchParams,Event,queueMicrotask,localStorage:{getItem:key=>stored.get(key),setItem:(key,value)=>stored.set(key,value)}});
- return{action:window.FindziaHubBridge.action,connect:window.FindziaHubBridge.connectSpace,node,records,posts,root,events,stored};
+ return{action:window.FindziaHubBridge.action,connect:window.FindziaHubBridge.connectSpace,node,records,posts,root,events,rootEvents,stored};
 }
 test('one header camera dispatches synchronously to each existing photo flow; search uses native forms',()=>{
  for(const project of ['shop','one','services','space']){
@@ -280,7 +280,7 @@ test('search finishes moving before enabling the keyboard, while its scene stays
  assert.equal(f.node('#project-content').inert,true);query.value='طاولة';query.fire('input');f.node('#header-search').fire('submit');
  assert.equal(calls.at(-1).name,'search');assert.equal(calls.at(-1).data.query,'طاولة');assert.equal(f.node('#project-content').inert,false);
  f.window.visualViewport.offsetTop=0;f.window.visualViewport.height=560;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-viewport-top'],'0px');
- animation.onfinish();f.window.visualViewport.height=540;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-height'],'540px','normal viewport updates resume after dismissal');
+ animation.onfinish();f.window.visualViewport.height=540;f.listeners['viewport-resize']();assert.equal(f.html.style['--hub-height'],'560px','the background remains fixed after keyboard dismissal');
 });
 
 test('dismissing or navigating during the opening motion cannot reopen the keyboard',()=>{
@@ -298,4 +298,32 @@ test('dismissing or navigating during the opening motion cannot reopen the keybo
   assert.equal(opening.cancelled,true);assert.equal(q.inputMode,'search');assert.equal(q.focused,false);
   lateFinish();assert.equal(q.focused,false);assert.equal(f.html.attributes['data-query-focus'],undefined);
  }
+});
+
+
+test('blocked camera launch exposes the reason and credit recovery after switching to results',()=>{
+ const child=projectFixture('shop');child.root.dataset.homeState='results';child.root.dataset.searchLaunching='true';
+ child.rootEvents['fz:search-blocked']({detail:{code:'credits_exhausted',message:'Choose a search pack.'}});
+ assert.equal(child.records.at(-1),'account:plans');
+ const blocked=child.posts.find(x=>x.type==='search-blocked');assert.equal(blocked.message,'Choose a search pack.');
+ const f=hubFixture('https://findzia.com/?project=shop'),frame=f.frames.at(-1);
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,...blocked}});
+ assert.equal(f.node('#header-notice').hidden,false);assert.equal(f.node('#header-notice').textContent,blocked.message);
+ f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,type:'header-state',landing:true,busy:false}});
+ assert.equal(f.node('#header-notice').hidden,false,'returning home cannot swallow the failure');
+});
+test('every section keeps the same backdrop during dialogs, child typing and toolbar changes',()=>{
+ const f=hubFixture();f.window.innerWidth=390;f.listeners.resize();
+ for(const project of ['shop','space','services']){
+  f.groups['[data-experience]'].find(x=>x.dataset.experience===project).fire('click');
+  const frame=f.frames.at(-1),message=data=>f.listeners.message({origin:'https://findzia.com',source:frame.contentWindow,data:{findziaHub:true,...data}});
+  message({type:'text-entry',active:true});f.window.visualViewport.height=280;f.listeners['viewport-resize']();
+  message({type:'header-state',overlay:true,landing:false});f.window.innerHeight=400;f.listeners.resize();
+  message({type:'header-state',overlay:false});message({type:'text-entry',active:false});
+  f.window.visualViewport.height=600;f.listeners['viewport-resize']();
+  assert.equal(f.html.style['--hub-height'],'560px',project);assert.equal(f.node('#projects').hidden,false);
+  assert.equal(f.node('#projects').inert,true);
+ }
+ f.window.innerWidth=800;f.window.innerHeight=460;f.window.visualViewport.height=460;f.listeners.resize();
+ assert.equal(f.html.style['--hub-height'],'460px','rotation or a real width change gets a new layout');
 });

@@ -103,8 +103,11 @@ function mount(){
   document.addEventListener('findzia:market-change',event=>{const country=event.detail?.country;if(!/^[A-Z]{2}$/.test(country||''))return;publishState();if(!countryApplying)post({type:'market',country});});
   root.addEventListener('fz:search-state',publishState);
   root.addEventListener('fz:search-blocked',event=>{
-   post({type:'search-blocked'});
-   if(event.detail?.code==='credits_exhausted'&&(project==='space'||root.dataset.homeState==='empty'))root.fzAccount?.open('plans');
+   post({type:'search-blocked',code:event.detail?.code,message:event.detail?.message});
+   // The launch already switches to results while credit checks run. Remember
+   // that this is still a landing attempt so its recovery cannot be hidden.
+   const fromHome=root.dataset.homeState==='empty'||root.dataset.searchLaunching==='true';
+   if(event.detail?.code==='credits_exhausted'&&(project==='space'||fromHome))root.fzAccount?.open('plans');
   });
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!document.querySelector('dialog[open]'))post({type:'close'})});
   if(window.MutationObserver){

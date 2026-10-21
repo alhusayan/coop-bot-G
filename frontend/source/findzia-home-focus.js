@@ -60,6 +60,7 @@
    observe=[page,photo,form,$('#svc-submit')];
   }else{
    const home=root.querySelector('[data-dark-home]');if(!home)return;home.append(entry);doc.dataset.experience='shop';
+   const notice=document.createElement('div');notice.dataset.hubSearchNotice='';content.insertBefore(notice,actions);
    primary.remove();actions.classList.add('experience-composer-space');actions.setAttribute('aria-hidden','true');
   }
   function render(){

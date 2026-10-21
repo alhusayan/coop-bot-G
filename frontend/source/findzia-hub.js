@@ -14,7 +14,7 @@ const validLang=value=>Object.hasOwn(languages,value)?value:'en';
 const sessions=new Map();
 let isReady=false,spaceScene=false,productLanding=false,noticeTimer=null,pendingQuery=null;
 let queryFocused=false,childTyping=false,overlayOpen=false;
-let searchMotion=null,searchOpening=false,searchViewport=null,viewportRelease=null;
+let searchMotion=null,searchOpening=false,searchViewport=null,viewportRelease=null,sceneViewport=null;
 let lang=validLang(read('findzia-lang')||html.lang),active=null,frame=null,returnFocus=null,loadTimer=null;
 const header=$('#main-header'),search=$('#header-search'),query=$('#header-query');
 const layer=$('#project-layer'),content=$('#project-content'),status=$('#layer-status'),retry=$('#retry-project');
@@ -26,12 +26,12 @@ const copy=key=>(ui[lang]||ui.en)[key]||ui.en[key]||key;
 const defaultCountries=['KW','SA','AE','QA','BH','OM','GB','US','CA','AU','DE','FR','IT','ES','NL','TR','EG','JO','IN','JP','CN','KR','BR','SG','MY','ID'];
 let currentCountry=read('findzia-market-country-v1')||'KW',marketOptions=defaultCountries;
 const flag=code=>/^[A-Z]{2}$/.test(code)?String.fromCodePoint(...[...code].map(c=>c.charCodeAt(0)+127397)):'🌐';
-function notice(key){const node=$('#header-notice');node.textContent=copy(key);node.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>node.hidden=true,4200)}
+function notice(key,message){const node=$('#header-notice');node.textContent=message||copy(key);node.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>node.hidden=true,message?9000:4200)}
 // Same-origin synchronous calls preserve the tap's user activation for iOS file pickers.
-function action(name,data={}){try{return frame?.contentWindow?.FindziaHubBridge?.action?.(name,data)||false}catch{return false}}
+function action(name,data={}){if(['search','camera','photos'].includes(name))$('#header-notice').hidden=true;try{return frame?.contentWindow?.FindziaHubBridge?.action?.(name,data)||false}catch{return false}}
 function searchFocus(value){
  value=!!value;if(value===queryFocused){html.toggleAttribute('data-text-entry',queryFocused||childTyping);$('#experience-nav').inert=queryFocused||childTyping;return}
- const product=['shop','one'].includes(active),from=!value&&product?search.getBoundingClientRect():null;
+ const product=!!active&&active!=='account',from=!value&&product?search.getBoundingClientRect():null;
  cancelSearchMotion();
  if(value&&product){
   clearTimeout(viewportRelease);viewportRelease=null;
@@ -89,7 +89,7 @@ function openProductSearch(){
 }
 function revealFrame(){
  if(!frame||window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return;
- frame.animate?.([{opacity:.45,transform:'scale(.988)'},{opacity:1,transform:'scale(1)'}],{duration:420,easing:'cubic-bezier(.2,.75,.25,1)'});
+ frame.animate?.([{opacity:0},{opacity:1}],{duration:420,easing:'cubic-bezier(.2,.75,.25,1)'});
 }
 function measureHeader(){const height=Math.ceil(header.getBoundingClientRect().height);if(height)html.style.setProperty('--header-height',height+'px')}
 function renderMarkets(){const select=$('#hub-country');select.replaceChildren();let names;try{names=new Intl.DisplayNames([lang],{type:'region'})}catch{}for(const code of marketOptions){const option=document.createElement('option');option.value=code;option.textContent=flag(code)+' '+(names?.of(code)||code);select.append(option)}select.value=currentCountry}
@@ -111,7 +111,7 @@ function headerState(data){
 }
 function preferences(){renderMarkets();$('#hub-theme').value=read('findzia-appearance-v1')||'auto';$('#hub-preferences').showModal()}
 function render(){html.lang=lang;html.dir=['ar','ur'].includes(lang)?'rtl':'ltr';all('[data-t]').forEach(el=>el.textContent=t(el.dataset.t));all('[data-language]').forEach(el=>{el.value=lang;el.setAttribute('aria-label',t('language'))});all('[data-language-name]').forEach(el=>el.textContent=languages[lang]);all('[data-account]').forEach(el=>el.setAttribute('aria-label',t('account')));$('#close-layer').setAttribute('aria-label',t('close'));all('[data-theme-toggle]').forEach(el=>{el.setAttribute('aria-label',t('appearance'));el.setAttribute('aria-pressed',String(html.dataset.theme==='dark'))});if(active)$('#layer-title').textContent=active==='account'?t('account'):projects[active].title;
- $('#experience-nav').hidden=true;html.toggleAttribute('data-space-open',active==='space');all('[data-experience]').forEach(el=>el.setAttribute('aria-current',String(el.dataset.experience===(active==='one'?'shop':active))));search.hidden=!active||active==='account'||overlayOpen||active==='space'&&spaceScene;html.toggleAttribute('data-project-overlay',overlayOpen);html.toggleAttribute('data-product-search',['shop','one'].includes(active));$('#close-layer').hidden=!active;$('#close-layer').setAttribute('aria-label',copy('home'));$('#section-options').hidden=!active;$('#projects').inert=!!active;$('#projects').hidden=!!active;html.toggleAttribute('data-project-open',!!active);html.dataset.activeProject=active||'home';all('[data-ui]').forEach(el=>el.textContent=copy(el.dataset.ui));all('[data-dismiss]').forEach(el=>el.setAttribute('aria-label',t('close')));$('#open-menu').setAttribute('aria-label',copy('menu'));$('#open-preferences').setAttribute('aria-label',copy('preferences'));$('#market-flag').textContent=flag(currentCountry);query.placeholder=window.FindziaHomeCopy?.get(lang,active==='space'?'spaceQuery':active==='services'?'servicesQuery':'shopQuery')||copy(active||'shop');html.toggleAttribute('data-product-landing',['shop','one'].includes(active)&&productLanding);$('#search-label').textContent=query.placeholder;$('#header-camera').setAttribute('aria-label',copy('photo'));$('#submit-search').setAttribute('aria-label',copy('search'));measureHeader();}
+ $('#experience-nav').hidden=true;html.toggleAttribute('data-space-open',active==='space');all('[data-experience]').forEach(el=>el.setAttribute('aria-current',String(el.dataset.experience===(active==='one'?'shop':active))));search.hidden=!active||active==='account'||overlayOpen||active==='space'&&spaceScene;html.toggleAttribute('data-project-overlay',overlayOpen);html.toggleAttribute('data-product-search',['shop','one'].includes(active));$('#close-layer').hidden=!active;$('#close-layer').setAttribute('aria-label',copy('home'));$('#section-options').hidden=!active;$('#projects').inert=!!active;$('#projects').hidden=false;html.toggleAttribute('data-project-open',!!active);html.dataset.activeProject=active||'home';all('[data-ui]').forEach(el=>el.textContent=copy(el.dataset.ui));all('[data-dismiss]').forEach(el=>el.setAttribute('aria-label',t('close')));$('#open-menu').setAttribute('aria-label',copy('menu'));$('#open-preferences').setAttribute('aria-label',copy('preferences'));$('#market-flag').textContent=flag(currentCountry);query.placeholder=window.FindziaHomeCopy?.get(lang,active==='space'?'spaceQuery':active==='services'?'servicesQuery':'shopQuery')||copy(active||'shop');html.toggleAttribute('data-product-landing',['shop','one'].includes(active)&&productLanding);$('#search-label').textContent=query.placeholder;$('#header-camera').setAttribute('aria-label',copy('photo'));$('#submit-search').setAttribute('aria-label',copy('search'));measureHeader();}
 
 function setLanguage(value,notify=true){lang=validLang(value);save('findzia-lang',lang);render();if(notify)send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto'})}
 function syncTheme(){const theme=window.FindziaAppearance?.apply()?.theme||(read('findzia-appearance-v1')==='dark'?'dark':'light');html.dataset.theme=theme;render()}
@@ -119,7 +119,11 @@ function syncAccount(){let signedIn=false;try{const s=JSON.parse(sessionStorage.
 function viewport(){
  const v=window.visualViewport;if(v&&Math.abs(v.scale-1)>.05)return;
  const height=Math.min(window.innerHeight,v?.height||window.innerHeight),top=v?.offsetTop||0;
- html.style.setProperty('--hub-height',Math.round(searchViewport?.height||height)+'px');
+ // The room is a persistent surface. Keyboard, toolbar and dialog changes
+ // only affect foreground controls; a new width is a real layout change.
+ const width=window.innerWidth||html.clientWidth||0;
+ if(!sceneViewport||Math.abs(width-sceneViewport.width)>1)sceneViewport={width,height};
+ html.style.setProperty('--hub-height',Math.round(sceneViewport.height)+'px');
  html.style.setProperty('--hub-viewport-height',Math.round(height)+'px');
  html.style.setProperty('--hub-viewport-top',Math.round(top)+'px');
  if(queryFocused&&searchViewport){
@@ -164,9 +168,9 @@ window.addEventListener('message',event=>{
  const known=[...sessions.values()].find(session=>session.frame.contentWindow===event.source);if(!known)return;
  const data=event.data;if(data.type==='ready')known.ready=true;if(event.source!==frame?.contentWindow)return;
  if(data.type==='ready')ready();
- if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else if(['shop','one'].includes(active))openProductSearch();else query.focus();}
+ if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else openProductSearch();}
  if(data.type==='header-state')headerState(data);
- if(data.type==='search-blocked')endSearchFocus();
+ if(data.type==='search-blocked'){endSearchFocus();notice('unavailable',typeof data.message==='string'?data.message.slice(0,500):'')}
  if(data.type==='text-entry'){childTyping=data.active===true;html.toggleAttribute('data-text-entry',queryFocused||childTyping);$('#experience-nav').inert=queryFocused||childTyping;}
  if(data.type==='market'&&/^[A-Z]{2}$/.test(data.country||'')){currentCountry=data.country;save('findzia-market-country-v1',currentCountry);save('findzia-services-country-v1',currentCountry);save('findzia-market-country-ts-v1',String(Date.now()));render()}
  if(data.type==='close')closeProject();
@@ -187,7 +191,7 @@ $('#hub-theme').addEventListener('change',event=>{save('findzia-appearance-v1',e
 $('#hub-country').addEventListener('change',event=>{const value=event.target.value;if(!marketOptions.includes(value))return;currentCountry=value;save('findzia-market-country-v1',value);save('findzia-services-country-v1',value);save('findzia-market-country-ts-v1',String(Date.now()));save('findzia_manual_market_v1',value);action('country',{country:value});render()});
 // Move and enlarge the existing field, then allow the software keyboard.
 query.addEventListener('pointerdown',event=>{
- if(!['shop','one'].includes(active)||query.disabled)return;
+ if(!active||active==='account'||query.disabled)return;
  if(searchOpening){event.preventDefault();return}
  if(queryFocused)return;
  event.preventDefault();openProductSearch();

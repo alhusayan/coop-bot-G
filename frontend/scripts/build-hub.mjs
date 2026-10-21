@@ -25,14 +25,14 @@ manifest.hubBridge={fonts,script:assets['findzia-hub-bridge.js'],style:assets['f
 // Keep original account and billing modules in each project.
 const originalEntry=manifest.routes['/'];
 let original=readFileSync(resolve(out,originalEntry.file),'utf8').replace('<link rel="canonical" href="https://findzia.com/">','<link rel="canonical" href="https://findzia.com/search">');
-original=original.replace('</head>',bridgeTags+'</head>');
+original=original.replace('<head>','<head>'+bridgeTags);
 emit('/search','search/index.html',original,'html');manifest.routes['/search/']=manifest.routes['/search'];
 for(const url of ['/pages/findzia','/jp','/jp/'])manifest.routes[url]=manifest.routes['/search'];
 manifest.routes['/trial/original']={...manifest.routes['/search'],preview:true};manifest.routes['/trial/original/']=manifest.routes['/trial/original'];
 // Existing One and Services keep their paths and get a route back to the unified home.
 for(const url of ['/trial/one-55321448a0352f1ff18b','/trial/services']){
  const entry=manifest.routes[url];if(!entry)throw Error('Missing project route: '+url);
- const html=readFileSync(resolve(out,entry.file),'utf8').replace('</head>',bridgeTags+'</head>');
+ const html=readFileSync(resolve(out,entry.file),'utf8').replace('<head>','<head>'+bridgeTags);
  writeFileSync(resolve(out,entry.file),html);for(const route of Object.values(manifest.routes))if(route.file===entry.file)route.sha256=hash(html);
 }
 const analytics=[...original.matchAll(/<script src="[^"]*findzia-(?:ads|analytics)\.[^"]+" defer><\/script>/g)].map(match=>match[0]).join('');
@@ -42,6 +42,6 @@ if(/__ASSET_|__ANALYTICS__/.test(html))throw Error('Unresolved hub asset');
 emit('/','index.html',html,'html');manifest.routes['/index.html']=manifest.routes['/'];manifest.routes['/home']=manifest.routes['/'];manifest.routes['/home/']=manifest.routes['/'];
 const sitemapEntry=manifest.routes['/sitemap.xml'];
 const sitemap=readFileSync(resolve(out,sitemapEntry.file),'utf8').replace('</urlset>','<url><loc>https://findzia.com/search</loc></url></urlset>');writeFileSync(resolve(out,sitemapEntry.file),sitemap);sitemapEntry.sha256=hash(sitemap);
-const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261019.1';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
-manifest.hub='20261019.1';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
-console.log('Findzia Home: Design, Products and Services; staged central search focus.');
+const healthEntry=manifest.routes['/healthz'];const health=JSON.parse(readFileSync(resolve(out,healthEntry.file),'utf8'));health.hub='20261021.1';health.projects={original:'/search',one:'/trial/one-55321448a0352f1ff18b',space:'/space',services:'/trial/services'};const healthBody=JSON.stringify(health);writeFileSync(resolve(out,healthEntry.file),healthBody);healthEntry.sha256=hash(healthBody);
+manifest.hub='20261021.1';writeFileSync(resolve(out,'release.json'),JSON.stringify(manifest,null,2)+'\n');
+console.log('Findzia Home: Design, Products and Services; fixed shared room and visible search recovery.');
