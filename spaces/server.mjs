@@ -16,7 +16,8 @@ import {adaptPiece} from './adaptation.mjs';
 import {groupIdenticalPieces,occurrences} from './identity.mjs';
 import {canShopPiece} from './public/piece-intent.js';
 import {detectRoom,designPrompt,verifyRoomFunction} from './room-function.mjs';
-import {prepareInventory} from './inventory-pipeline.mjs';
+import {prepareInventory,inspectCandidate} from './inventory-pipeline.mjs';
+import {analysisImage} from './engine.mjs';
 import {identifyPieces,inventoryRepairTarget,INVENTORY_VERSION,retainInventoryResults} from './inventory.mjs';
 import {originalPage,savedOriginalView} from './original-page.mjs';
 import {updateDesignPicks} from './public/design-picks.js';
@@ -94,15 +95,20 @@ function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve()
 function searchLanguage(value){return ['en','ar','fr','de','es','it','pt','tr','ru','zh','ja','ko','hi','ur','id','ms'].includes(value)?value:'en';}
 function options(raw){return {market:MARKETS[raw.market]?raw.market:'SA',language:searchLanguage(raw.language),room:String(raw.room||'auto').slice(0,60),scope:['full','decor','scratch'].includes(raw.scope)?raw.scope:'full',request:String(raw.request||'').slice(0,600),keep:String(raw.keep||'').slice(0,400),notes:String(raw.notes||'').slice(0,400),budget:Math.min(1e7,Math.max(0,Number(raw.budget)||0)),width:Math.min(1000,Math.max(0,Number(raw.width)||0)),length:Math.min(1000,Math.max(0,Number(raw.length)||0))};}
 async function generateDesign(j,index){
- const d=j.designs[index];d.status='generating';d.error=null;persist();
+ const d=j.designs[index],started=Date.now();d.status='generating';d.error=null;persist();
  try{
  const o=j.options,m=MARKETS[o.market]||MARKETS.SA;
  if(!j.room_context){j.room_context=await detectRoom(fileImage(j,'original.jpg'),j.options);j.room=j.room_context.room_en;persist();}
  const prompt=designPrompt(j.room_context,o,STYLES[index].prompt,m.currency);
- let img,checked=false,correction='';
+ let img,inventory,checked=false,correction='';
+ const before=await analysisImage(fileImage(j,'original.jpg'));
  for(let attempt=0;attempt<2;attempt++){
+   const generationStarted=Date.now();
    img=await gemini([{text:prompt+correction},fileImage(j,'original.jpg')],{image:true});
-   const check=await verifyRoomFunction(fileImage(j,'original.jpg'),{inlineData:img},j.room_context);
+   const generated=Date.now(),photo=await analysisImage({inlineData:img});
+   const inspection=await inspectCandidate({verify:()=>verifyRoomFunction(before,photo,j.room_context),identify:()=>identifyPieces(photo,{keep:j.options.keep})});
+   const check=inspection.check;inventory=inspection.inventory;
+   console.log('SPACES_DESIGN_TIMING',j.id,index,JSON.stringify({generation_ms:generated-generationStarted,verification_ms:Date.now()-generated,total_ms:Date.now()-started,attempt:attempt+1}));
    console.log('SPACES_FUNCTION_CHECK',j.id,index,JSON.stringify({type:j.room_context?.type,ok:check.ok,attempt:attempt+1}));
    if(check.ok){checked=true;break;}
    correction=' Previous attempt did not meet the design brief. Correct this issue while respecting the photographed site: '+check.reason;
@@ -110,12 +116,12 @@ async function generateDesign(j,index){
  if(!checked)throw Error('ROOM_FUNCTION_MISMATCH');
  const buffer=Buffer.from(img.data,'base64');if(buffer.length<1000||buffer.length>15e6)throw Error('NO_IMAGE');
  // Native output MIME is retained; no upload metadata is copied into the result.
- d.image='design-'+index+(img.mimeType==='image/jpeg'?'.jpg':'.png');writeFileSync(resolve(DATA,j.id,d.image),buffer,{mode:0o600});d.status='ready';console.log('SPACES_DESIGN_READY',index);launch('shop:'+j.id+':'+index,()=>identifyAndShop(j,index));
+ d.image='design-'+index+(img.mimeType==='image/jpeg'?'.jpg':'.png');writeFileSync(resolve(DATA,j.id,d.image),buffer,{mode:0o600});d.status='ready';console.log('SPACES_DESIGN_READY',index);launch('shop:'+j.id+':'+index,()=>identifyAndShop(j,index,inventory));
  }catch(e){d.status='error';d.error=e.message;console.error('SPACES_DESIGN_ERROR',index,e.message);}persist();await settleDesign(d,!!d.image);
 }
 async function generateJob(j){
  try{
- j.room_context=await detectRoom(fileImage(j,'original.jpg'),j.options);j.room=j.room_context.room_en;
+ j.room_context=await detectRoom(await analysisImage(fileImage(j,'original.jpg')),j.options);j.room=j.room_context.room_en;
  console.log('SPACES_ROOM_TYPE',j.id,JSON.stringify({type:j.room_context.type,label:j.room,confidence:j.room_context.confidence}));persist();
  await Promise.all(j.designs.map((_,i)=>generateDesign(j,i)));
  }catch(e){for(const d of j.designs){d.status='error';d.error=e.message;}persist();await Promise.all(j.designs.map(d=>settleDesign(d,false)));}
@@ -142,14 +148,14 @@ async function searchOne(j,d,item,{key,interactive,billing}){
  console.log('SPACES_ITEM_SEARCH',j.id,j.designs.indexOf(d),item.id,JSON.stringify({name:item.name_en,language:searchLanguage(j.options.language),diagnostics:item.search_diagnostics,matches:item.offers.length,alternatives:item.alternatives?.length||0,local:[...item.offers,...(item.alternatives||[])].filter(x=>x.market_scope==='local').length,stores:[...item.offers,...(item.alternatives||[])].slice(0,4).map(x=>x.source),elapsed_ms:Date.now()-item.started_at}));
  }catch(e){if(!item.offers?.length&&!item.alternatives?.length)Object.assign(item,saved);item.status='error';item.error=e.message;console.error('SPACES_SEARCH_ERROR',e.message);}persist();
 }
-async function identifyAndShop(j,index){
+async function identifyAndShop(j,index,precomputed=null){
  const d=j.designs[index],previous=d.items||[],image=d.image,started=Date.now();
  if(previous.length&&!d.inventory_backup)d.inventory_backup={version:d.inventory_version||1,items:previous};
  d.status='analyzing';d.error=null;d.items=[];d.inventory_complete=false;d.inventory_revision=Date.now();d.matching_version=3;d.search_revision=SEARCH_REVISION;d.search_language=searchLanguage(j.options.language);d.grouping_version=0;persist();
  const revision=d.inventory_revision,bytes=readFileSync(resolve(DATA,j.id,image));
  try{
  await prepareInventory({
-  identify:()=>identifyPieces(fileImage(j,image),{keep:j.options.keep,onAttempt:details=>console.log('SPACES_INVENTORY_PARSE',j.id,index,JSON.stringify(details))}),
+  identify:async()=>{if(precomputed){const result=await precomputed;if(result.error)throw result.error;return result.items;}return identifyPieces(await analysisImage(fileImage(j,image)),{keep:j.options.keep,onAttempt:details=>console.log('SPACES_INVENTORY_PARSE',j.id,index,JSON.stringify(details))});},
   isCurrent:()=>d.image===image&&d.inventory_revision===revision,
   canRefine:()=>d.opened_image!==image,
   prepare:async(items,review)=>{

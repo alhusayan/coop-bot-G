@@ -54,7 +54,7 @@ test('clean photo selection is free and opens the original layer without a Space
   assert.equal(document.querySelector('#furnishing-option'),null);
   assert.equal(document.querySelectorAll('.piece-coach').length,1,'first visit explains photo interaction');assert.equal(document.querySelectorAll('.hotspot').length,0);assert.equal(document.querySelectorAll('.piece-outline').length,0);
   vm.runInContext("selectPiece('1')",context);assert.equal(searches,0);assert.equal(authorizations,0);assert.equal(opens.length,0);
-  assert.equal(document.querySelectorAll('.piece-outline').length,1);assert.equal(document.querySelectorAll('.piece-coach').length,0,'hint leaves the selected piece clear');
+  assert.equal(document.querySelectorAll('.piece-outline').length,1);assert.match(document.querySelector('.piece-selected-label').textContent,/Armchair/,'selected piece is named directly on the photo');assert.equal(document.querySelectorAll('.piece-coach').length,0,'hint leaves the selected piece clear');
   vm.runInContext('pointFocus=null;renderShop()',context);assert.equal(document.querySelector('.piece-coach'),null,'guide remains dismissed after clearing selection');
   await vm.runInContext("openItem('1')",context);
   assert.equal(opens.length,1);assert.equal(opens[0].market,'US');assert.equal(opens[0].crop,'/hero.webp');assert.equal(opens[0].view,null);

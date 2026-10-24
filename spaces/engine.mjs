@@ -139,3 +139,11 @@ export async function serper(q,market,{shopping=false,images=false,lang='en',env
  if(!r.ok)throw Error('SEARCH_PROVIDER_'+r.status);return r.json();
 }
 
+
+// Vision analysis does not need a multi-megabyte lossless render. Keep the
+// aspect ratio/coordinates and retain the untouched image for display and crops.
+export async function analysisImage(photo){
+ const {default:sharp}=await import('sharp');
+ const data=await sharp(Buffer.from(photo.inlineData.data,'base64')).rotate().resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).jpeg({quality:88}).toBuffer();
+ return {inlineData:{mimeType:'image/jpeg',data:data.toString('base64')}};
+}

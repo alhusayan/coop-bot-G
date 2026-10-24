@@ -37,3 +37,16 @@ test('a failed optional review preserves a ready inventory and reports its failu
  await prepareInventory({identify:async()=>items,prepare:async x=>x,publish:x=>published.push(x),refine:async()=>{throw Error('PROVIDER_BUSY');},onReviewError:e=>errors.push(e.message)});
  assert.deepEqual(published,[items]);assert.deepEqual(errors,['PROVIDER_BUSY']);
 });
+
+test('candidate detection starts during verification and does not delay displaying an approved render',async()=>{
+ const {inspectCandidate}=await import('../inventory-pipeline.mjs');let verifyDone,identifyDone,started=false;
+ const pending=inspectCandidate({verify:()=>new Promise(r=>verifyDone=r),identify:()=>{started=true;return new Promise(r=>identifyDone=r)}});
+ await Promise.resolve();assert.equal(started,true);
+ verifyDone({ok:true});const result=await pending;assert.equal(result.check.ok,true);
+ identifyDone([{id:'1'}]);assert.deepEqual((await result.inventory).items,[{id:'1'}]);
+});
+test('discarded render captures detection failure without publishing inventory',async()=>{
+ const {inspectCandidate}=await import('../inventory-pipeline.mjs');const error=Error('unavailable');
+ const result=await inspectCandidate({verify:async()=>({ok:false}),identify:async()=>{throw error}});
+ assert.equal(result.check.ok,false);assert.equal((await result.inventory).error,error);
+});

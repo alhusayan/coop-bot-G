@@ -162,7 +162,7 @@ function photoMarkup(items){
  const candidate=!item&&!photoGuideSeen?pieceViews(items).filter(v=>!v.background).sort((a,b)=>(b.box[2]-b.box[0])*(b.box[3]-b.box[1])-(a.box[2]-a.box[0])*(a.box[3]-a.box[1]))[0]:null;
  const guide=candidate?`<button class="piece-coach" data-ui-key="piece-coach" data-action="select-piece" data-id="${esc(candidate.id)}" data-marker="${esc(candidate.marker)}" style="top:${Math.max(15,Math.min(85,(candidate.box[0]+candidate.box[2])/20))}%;left:${Math.max(24,Math.min(76,(candidate.box[1]+candidate.box[3])/20))}%" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}"><span class="coach-dot" aria-hidden="true">${icon('plus',true)}</span></button>`:'';
  if(view){const [top,left,bottom,right]=view.box;outline=`<span class="piece-outline${busy?' is-searching':''}" style="top:${top/10}%;left:${left/10}%;width:${(right-left)/10}%;height:${(bottom-top)/10}%" aria-hidden="true"><i></i><i></i><i></i><i></i>${busy?'<span class="piece-scan"></span>':''}</span>`;}
- return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}" aria-busy="${busy}"></button>${outline}${guide}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
+ return `<button class="photo-pick-target" data-ui-key="photo-picker" data-action="photo-pick" aria-label="${esc(translate('Choose an element in this photo','اختر عنصراً من الصورة'))}" aria-busy="${busy}"></button>${outline}${item?`<div class="piece-selected-label" role="status">${icon('check',true)}<span>${esc(pieceName(item,shell?.getLanguage()))}</span></div>`:''}${guide}${busy?`<div class="photo-search-status" role="status"><span class="search-spinner" aria-hidden="true"></span><span>${esc(searchCopy(item))}</span><span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span></div>`:''}`;
 }
 function feedbackMarkup(item){
  if(!item)return '';
@@ -180,8 +180,7 @@ function selectPiece(id,marker){
  photoGuideSeen=true;try{localStorage.setItem('findzia-piece-guide-seen','1');}catch{}
  if(sheetMode==='pieces')closeSheet();
  pointFocus={key:keyFor(item),id,marker:String(marker||pieceViews([item])[0]?.marker||id),waiting:false};renderShop();
- const card=$('#piece-feedback');
- const bounds=card?.getBoundingClientRect();if(bounds&&bounds.bottom>(window.innerHeight||900)-16)card.scrollIntoView?.({block:'nearest',behavior:reduced?'auto':'smooth'});
+ // Selection feedback stays on the photo; the action card remains directly below it.
 }
 function pickFromPhoto(event,button){
  if(event.detail===0)return browsePieces();
