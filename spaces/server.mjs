@@ -95,16 +95,18 @@ function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve()
 function searchLanguage(value){return ['en','ar','fr','de','es','it','pt','tr','ru','zh','ja','ko','hi','ur','id','ms'].includes(value)?value:'en';}
 function options(raw){return {market:MARKETS[raw.market]?raw.market:'SA',language:searchLanguage(raw.language),room:String(raw.room||'auto').slice(0,60),scope:['full','decor','scratch'].includes(raw.scope)?raw.scope:'full',request:String(raw.request||'').slice(0,600),keep:String(raw.keep||'').slice(0,400),notes:String(raw.notes||'').slice(0,400),budget:Math.min(1e7,Math.max(0,Number(raw.budget)||0)),width:Math.min(1000,Math.max(0,Number(raw.width)||0)),length:Math.min(1000,Math.max(0,Number(raw.length)||0))};}
 async function generateDesign(j,index){
- const d=j.designs[index],started=Date.now();d.status='generating';d.error=null;persist();
+ const d=j.designs[index],started=Date.now();d.status='generating';d.generation_phase=j.room_context?'creating':'understanding';d.error=null;persist();
  try{
  const o=j.options,m=MARKETS[o.market]||MARKETS.SA;
- if(!j.room_context){j.room_context=await detectRoom(fileImage(j,'original.jpg'),j.options);j.room=j.room_context.room_en;persist();}
+ if(!j.room_context){j.room_context=await detectRoom(await analysisImage(fileImage(j,'original.jpg')),j.options);j.room=j.room_context.room_en;persist();}
  const prompt=designPrompt(j.room_context,o,STYLES[index].prompt,m.currency);
  let img,inventory,checked=false,correction='';
  const before=await analysisImage(fileImage(j,'original.jpg'));
  for(let attempt=0;attempt<2;attempt++){
+   d.generation_phase='creating';persist();
    const generationStarted=Date.now();
    img=await gemini([{text:prompt+correction},fileImage(j,'original.jpg')],{image:true});
+   d.generation_phase='checking';persist();
    const generated=Date.now(),photo=await analysisImage({inlineData:img});
    const inspection=await inspectCandidate({verify:()=>verifyRoomFunction(before,photo,j.room_context),identify:()=>identifyPieces(photo,{keep:j.options.keep})});
    const check=inspection.check;inventory=inspection.inventory;
@@ -116,7 +118,7 @@ async function generateDesign(j,index){
  if(!checked)throw Error('ROOM_FUNCTION_MISMATCH');
  const buffer=Buffer.from(img.data,'base64');if(buffer.length<1000||buffer.length>15e6)throw Error('NO_IMAGE');
  // Native output MIME is retained; no upload metadata is copied into the result.
- d.image='design-'+index+(img.mimeType==='image/jpeg'?'.jpg':'.png');writeFileSync(resolve(DATA,j.id,d.image),buffer,{mode:0o600});d.status='ready';console.log('SPACES_DESIGN_READY',index);launch('shop:'+j.id+':'+index,()=>identifyAndShop(j,index,inventory));
+ d.image='design-'+index+(img.mimeType==='image/jpeg'?'.jpg':'.png');writeFileSync(resolve(DATA,j.id,d.image),buffer,{mode:0o600});d.status='ready';d.generation_phase='complete';console.log('SPACES_DESIGN_READY',index);launch('shop:'+j.id+':'+index,()=>identifyAndShop(j,index,inventory));
  }catch(e){d.status='error';d.error=e.message;console.error('SPACES_DESIGN_ERROR',index,e.message);}persist();await settleDesign(d,!!d.image);
 }
 async function generateJob(j){
@@ -208,7 +210,7 @@ async function replacePiece(j,index,item,offer){
 }
 function makeJob(owner,opt,buffer,idempotency='',charges=[]){
  const id=randomBytes(12).toString('hex');mkdirSync(resolve(DATA,id),{recursive:true,mode:0o700});writeFileSync(resolve(DATA,id,'original.jpg'),buffer,{mode:0o600});
- const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map((s,i)=>({billing:charges[i],id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
+ const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map((s,i)=>({billing:charges[i],id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',generation_phase:'understanding',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
 }
 export function createServer(){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{

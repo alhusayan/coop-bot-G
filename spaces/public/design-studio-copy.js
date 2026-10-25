@@ -222,3 +222,25 @@ export const studioCopy={
     "Rich textures. Quiet contrast. Refined details.": "Rijke texturen. Zachte contrasten. Verfijnde details."
   }
 };
+
+// Server-reported work phases, never elapsed-time estimates.
+const phaseCopy={
+ en:['Understanding your room…','Reviewing the details…'],
+ ar:['نفهم تفاصيل مساحتك…','نراجع تفاصيل التصميم…'],
+ fr:['Analyse de votre espace…','Vérification des détails…'],
+ de:['Ihr Raum wird analysiert…','Details werden geprüft…'],
+ es:['Analizando tu espacio…','Revisando los detalles…'],
+ it:['Analisi del tuo spazio…','Verifica dei dettagli…'],
+ pt:['Analisando seu espaço…','Revisando os detalhes…'],
+ tr:['Alanınız inceleniyor…','Ayrıntılar kontrol ediliyor…'],
+ ru:['Изучаем ваше пространство…','Проверяем детали…'],
+ zh:['正在分析你的空间…','正在检查设计细节…'],
+ ja:['空間を分析中…','細部を確認中…'],
+ ko:['공간을 분석하는 중…','세부 사항을 확인하는 중…'],
+ hi:['आपकी जगह को समझ रहे हैं…','बारीकियाँ जाँच रहे हैं…'],
+ ur:['آپ کی جگہ کو سمجھ رہے ہیں…','تفصیلات کی جانچ ہو رہی ہے…'],
+ id:['Memahami ruang Anda…','Memeriksa detail…'],
+ ms:['Memahami ruang anda…','Menyemak perincian…'],
+ nl:['Je ruimte wordt bekeken…','Details worden gecontroleerd…']
+};
+for(const [language,values] of Object.entries(phaseCopy))phaseCopy.en.forEach((key,i)=>studioCopy[language][key]=values[i]);

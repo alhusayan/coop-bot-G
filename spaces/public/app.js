@@ -8,7 +8,7 @@ import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} 
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261019-studio1';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261025-wait1';
 import {sceneText} from './space-scene-copy.js?v=20261019-studio1';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
@@ -112,7 +112,7 @@ function renderDesigns(){
  if(designJob!==j.id){designJob=j.id;designArrival=[];generationStarted=Date.now();}
  j.designs.forEach((d,i)=>{if(d.image&&!designArrival.includes(i))designArrival.push(i);});
  updateImage($('#original-thumb'),j.original);
- const tour={};styleTour.stop();
+ const tour=styleTour.sync({jobId:j.id,indexes:[0,1,2],active:active()&&!document.hidden&&pollErrors<2,reduced});
  const presentation=designPresentation(j,{...tour,reduced,escape:esc,icon,translate,messages,language:shell?.getLanguage()||document.documentElement.lang,order:designArrival,reconnecting:pollErrors>1,slow:Date.now()-generationStarted>60000});
  const status=$('#generation-status');if(status.textContent!==presentation.status)status.textContent=presentation.status;
  const studio=$('#design-studio');studio.hidden=!presentation.pending;
@@ -217,7 +217,7 @@ $('#selected-image').addEventListener('load',()=>{fitRoomPhoto();if(state.view==
 function renderVariants(){
  patchHTML($('#design-variants'),state.job.designs.map((d,i)=>{
   const title=translate(d.title),ready=!!d.image;
-  return `<button class="design-variant${ready?'':' is-pending'}" data-ui-key="variant:${state.job.id}:${i}" data-action="${ready?'choose':d.status==='error'?'retry':'pending'}" data-index="${i}" aria-current="${i===state.design}" ${!ready&&d.status!=='error'?'disabled':''} aria-label="${esc(title+(d.status==='error'?' — '+translate('Try again · 1 credit'):''))}">${ready?`<img src="${esc(d.image)}" alt="" decoding="async">`:`<span class="variant-placeholder">${d.status==='error'?icon('refresh',true):'<span class="scene-breath" aria-hidden="true"><i></i><i></i><i></i></span>'}</span>`}<span class="variant-title">${esc(d.status==='error'?translate('Try again · 1 credit'):title)}</span>${i===state.design?`<span class="variant-check" aria-hidden="true">${icon('check',true)}</span>`:''}</button>`;
+  return `<button class="design-variant${ready?'':' is-pending'}" data-ui-key="variant:${state.job.id}:${i}" data-action="${ready?'choose':d.status==='error'?'retry':'pending'}" data-index="${i}" aria-current="${i===state.design}" ${!ready&&d.status!=='error'?'disabled':''} aria-label="${esc(title+(d.status==='error'?' — '+translate('Try again · 1 credit'):''))}">${ready?`<img src="${esc(d.image)}" alt="" decoding="async">`:`<span class="variant-placeholder">${d.status==='error'?icon('refresh',true):'<span class="studio-spinner" aria-hidden="true"></span>'}</span>`}<span class="variant-title">${esc(d.status==='error'?translate('Try again · 1 credit'):title)}</span>${i===state.design?`<span class="variant-check" aria-hidden="true">${icon('check',true)}</span>`:''}</button>`;
  }).join(''));
 }
 function renderShop(){

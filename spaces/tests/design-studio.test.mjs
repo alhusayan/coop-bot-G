@@ -15,6 +15,31 @@ test('pending designs show one original-photo workspace and no disabled result c
  assert.equal(document.querySelectorAll('img').length,1);assert.equal(document.querySelectorAll('[data-action=studio-style]').length,0);
  assert.doesNotMatch(result.stage,/disabled|filter:blur|%|progressbar/);
 });
+test('waiting stages follow server phases, with no invented timer progress',()=>{
+ const j=job();
+ for(const [phase,label] of [['understanding','Understanding your room…'],['creating','Designing your space…'],['checking','Reviewing the details…']]){
+  j.designs.forEach(d=>d.generation_phase=phase);
+  const result=designPresentation(j,{...options,slow:true}),{document}=parseHTML(result.stage);
+  assert.equal(result.status,label);
+  assert.equal(document.querySelector('h2').textContent,label);
+  assert.equal(document.querySelector('[aria-current=step]').textContent.slice(1),label);
+  assert.equal(document.querySelectorAll('.studio-steps li').length,3);
+  assert.equal(document.querySelector('.scene-breath'),null);
+  assert.ok(document.querySelector('.studio-drawing svg'));
+ }
+ const disconnected=parseHTML(designPresentation(j,{...options,reconnecting:true}).stage).document;
+ assert.equal(disconnected.querySelector('[aria-current=step]'),null,'connection loss does not pretend work is advancing');
+});
+test('style inspiration changes without replacing the photo or animating the room surface',t=>{
+ const j=job(),{document}=parseHTML('<div id="studio"></div>');t.mock.property(globalThis,'document',document);
+ const root=document.querySelector('#studio');patchHTML(root,designPresentation(j,{...options,styleIndex:0}).stage);
+ const photo=root.querySelector('img'),drawing=root.querySelector('.studio-drawing');
+ patchHTML(root,designPresentation(j,{...options,styleIndex:1}).stage);
+ assert.equal(root.querySelector('img'),photo);assert.equal(root.querySelector('.studio-drawing'),drawing);
+ assert.match(root.querySelector('.studio-inspiration').textContent,/Earthy colours/);
+ assert.equal(root.querySelectorAll('.studio-palette i').length,3);
+ assert.equal(root.querySelectorAll('.studio-inspiration img').length,0);
+});
 test('a later-index result is immediately usable and stays first when another design arrives',t=>{
  const j=job();j.designs[2].image='/two.jpg';j.designs[2].status='ready';
  const a=designPresentation(j,{...options,order:[2]});
