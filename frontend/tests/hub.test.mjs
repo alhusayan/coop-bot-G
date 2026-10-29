@@ -327,3 +327,54 @@ test('every section keeps the same backdrop during dialogs, child typing and too
  f.window.innerWidth=800;f.window.innerHeight=460;f.window.visualViewport.height=460;f.listeners.resize();
  assert.equal(f.html.style['--hub-height'],'460px','rotation or a real width change gets a new layout');
 });
+
+test('project frames have stable names and retain their insertion order',()=>{
+ const f=hubFixture(),open=key=>f.groups['[data-experience]'].find(x=>x.dataset.experience===key).fire('click');
+ for(const key of ['services','space','shop'])open(key);
+ assert.deepEqual(f.frames.map(frame=>frame.name),['findzia-project-services','findzia-project-space','findzia-project-shop']);
+ assert.deepEqual(f.node('#project-content').children,f.frames);
+ const space=f.frames[1];space.contentWindow.location=new URL(space.src);
+ open('space');assert.equal(f.frames.length,3);assert.equal(space.hidden,false);
+ assert.equal(f.frames[0].hidden,true);assert.equal(f.frames[2].hidden,true);
+});
+test('Design replaces a cached frame restored with the Services document',()=>{
+ const f=hubFixture('https://findzia.com/?project=space'),space=f.frames[0];
+ space.contentWindow.location=new URL(space.src);
+ f.listeners.message({origin:'https://findzia.com',source:space.contentWindow,data:{findziaHub:true,type:'ready'}});
+ f.node('#close-layer').fire('click');
+ space.contentWindow.location=new URL('https://findzia.com/trial/services?hub=1&hubProject=services');
+ f.groups['[data-project]'].find(x=>x.dataset.project==='space').fire('click');
+ const replacement=f.frames.at(-1);
+ assert.equal(space.removed,true);assert.notEqual(replacement,space);
+ assert.equal(new URL(replacement.src).pathname,'/space');
+ assert.equal(f.html.dataset.activeProject,'space');assert.equal(f.node('#header-search').hidden,true);
+ assert.equal(f.node('#layer-status').hidden,false);
+});
+test('restored child documents cannot change the Design header or receive a search',()=>{
+ for(const trigger of ['load','ready','header-state','search']){
+  const f=hubFixture('https://findzia.com/?project=space'),space=f.frames[0],calls=[];
+  space.contentWindow.location=new URL(space.src);
+  space.contentWindow.FindziaHubBridge={action:name=>{calls.push(name);return name==='state'?{scene:true,cameraReady:true}:true}};
+  f.listeners.message({origin:'https://findzia.com',source:space.contentWindow,data:{findziaHub:true,type:'ready'}});
+  calls.length=0;
+  space.contentWindow.location=new URL('https://findzia.com/trial/services?hub=1&hubProject=services');
+  if(trigger==='load')space.fire('load');
+  else if(trigger==='search')f.node('#header-search').fire('submit');
+  else f.listeners.message({origin:'https://findzia.com',source:space.contentWindow,data:{findziaHub:true,type:trigger,scene:false,query:'wrong section'}});
+  assert.equal(space.removed,true,trigger);assert.equal(f.frames.length,2,trigger);
+  assert.equal(new URL(f.frames.at(-1).src).pathname,'/space',trigger);
+  assert.equal(f.node('#header-search').hidden,true,trigger);assert.equal(f.node('#header-query').value,'',trigger);
+  assert.deepEqual(calls,[],trigger);
+ }
+});
+test('page restoration reconciles the selected section with the URL',()=>{
+ const f=hubFixture('https://findzia.com/?project=services'),services=f.frames[0];
+ f.location.search='?project=space';f.listeners.pageshow();
+ assert.equal(f.html.dataset.activeProject,'space');assert.equal(services.hidden,true);
+ const space=f.frames.at(-1);assert.equal(new URL(space.src).pathname,'/space');
+ space.contentWindow.location=new URL('https://findzia.com/trial/services?hub=1&hubProject=services');
+ f.listeners.popstate();assert.equal(space.removed,true);
+ assert.equal(new URL(f.frames.at(-1).src).pathname,'/space');
+ const query=hubFixture('https://findzia.com/?q=chair');query.listeners.pageshow();
+ assert.equal(query.html.dataset.activeProject,'shop');assert.equal(query.frames.length,1);
+});
