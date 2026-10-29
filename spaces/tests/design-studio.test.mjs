@@ -48,7 +48,7 @@ test('a later-index result is immediately usable and stays first when another de
  const grid=document.getElementById('grid');patchHTML(grid,a.cards);const first=grid.firstElementChild,image=first.querySelector('img');
  j.designs[0].image='/zero.jpg';j.designs[0].status='ready';
  const b=designPresentation(j,{...options,order:[2,0]});patchHTML(grid,b.cards);
- assert.equal(grid.firstElementChild,first);assert.equal(first.querySelector('img'),image);assert.equal(grid.querySelectorAll('.design-card-body [data-action="choose"]')[1].dataset.index,'0');
+ assert.equal(grid.firstElementChild,first);assert.equal(first.querySelector('img'),image);assert.equal(grid.querySelectorAll('.design-image[data-action="choose"]')[1].dataset.index,'0');
 });
 test('completion removes activity; errors retain correct retry indexes; reconnection never claims progress',()=>{
  const j=job();j.designs.forEach((d,i)=>{d.image='/'+i+'.jpg';d.status='ready';});
@@ -109,13 +109,16 @@ test('design photos open the selected design directly instead of a duplicate pre
  const {document}=parseHTML(designPresentation(j,options).cards);
  const photo=document.querySelector('.design-image');assert.equal(photo.dataset.action,'choose');assert.equal(photo.dataset.index,'1');
  assert.equal(photo.querySelector('img').getAttribute('draggable'),'false');
+ assert.equal(document.querySelector('h2,.design-card-body'),null);
+ assert.equal(photo.getAttribute('aria-label').includes('Style 1'),true);
  assert.doesNotMatch(readFileSync(new URL('../public/app.js',import.meta.url),'utf8'),/case 'preview':/);
 });
 
-test('one optional request stays beside the photo and scope remains form-associated',()=>{
+test('optional customization stays inside the filter and remains form-associated',()=>{
  const {document}=parseHTML(readFileSync(new URL('../public/index.html',import.meta.url),'utf8'));
- assert.equal(document.querySelectorAll('#setup textarea').length,1);
- assert.equal(document.querySelector('#design-request').closest('form').id,'design-form');
+ assert.equal(document.querySelectorAll('#setup textarea').length,0);
+ assert.equal(document.querySelectorAll('#space-options #design-request').length,1);
+ assert.equal(document.querySelector('#design-request').getAttribute('form'),'design-form');
  assert.equal(document.querySelectorAll('#space-options input[name=scope]').length,3);
  for(const field of document.querySelectorAll('#space-options input,#space-options textarea'))assert.equal(field.getAttribute('form'),'design-form');
  assert.equal(document.querySelector('#space-options [name=scope][checked]').value,'full');

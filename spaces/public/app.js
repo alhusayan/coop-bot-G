@@ -8,7 +8,7 @@ import {canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination} 
 import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
-import {designPresentation,createStyleTour} from './design-studio.js?v=20261025-wait1';
+import {designPresentation,createStyleTour} from './design-studio.js?v=20261029-visual1';
 import {sceneText} from './space-scene-copy.js?v=20261019-studio1';
 import {createRoomContext,acceptsJob} from './room-state.js';
 const roomContext=createRoomContext(),optionOrder=new Map();
@@ -171,7 +171,7 @@ function feedbackMarkup(item){
  const action=free?'item':checked?'search-item':'start-piece';
  const button=free?translate('View options','عرض الخيارات'):translate('Find in stores','ابحث في المتاجر');
  const actions=(service?`<button class="piece-search-button" data-action="service-piece" data-id="${esc(item.id)}"><span>${esc(translate('Find a specialist','ابحث عن مختص'))}</span>${icon('forward',true)}</button>`:'')+(shop?`<button class="piece-search-button${service?' is-secondary':''}" data-action="${action}" data-id="${esc(item.id)}"><span>${esc(button)}</span><span>${free?icon('forward',true):esc(translate('2 credits','رصيدان'))}</span></button>`:'');
- return `<article class="piece-selection-card${busy?' is-searching':''}${item.error||busy||checked?' has-status':''}" data-ui-key="${esc(keyFor(item))}"><div class="piece-selection-media"><img src="${esc(item.crop||selected().image)}" alt="${esc(name)}" decoding="async">${!busy?`<button class="piece-clear" data-action="clear-piece" aria-label="${esc(translate('Clear selection','إلغاء التحديد'))}">${icon('close',true)}</button>`:''}</div><div class="piece-selection-content"><div class="piece-selection-summary"><strong dir="auto">${esc(name)}</strong><p role="status">${busy?'<span class="search-spinner" aria-hidden="true"></span>':''}${esc(caption)}${busy?` <span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span>`:''}</p></div>${busy?'<div class="piece-search-track" aria-hidden="true"><span></span></div>':actions}</div></article>`;
+ return `<article class="piece-selection-card${busy?' is-searching':''}${item.error||busy||checked?' has-status':''}" data-ui-key="${esc(keyFor(item))}"><div class="piece-selection-media"><img src="${esc(item.crop||selected().image)}" alt="${esc(name)}" decoding="async">${!busy?`<button class="piece-clear" data-action="clear-piece" aria-label="${esc(translate('Clear selection','إلغاء التحديد'))}">${icon('close',true)}</button>`:''}</div><div class="piece-selection-content"><div class="piece-selection-summary"><strong dir="auto">${esc(name)}</strong><p${caption===translate('Ready to find this piece','جاهز للبحث عن هذه القطعة')?' class="scene-sr-only"':''} role="status">${busy?'<span class="search-spinner" aria-hidden="true"></span>':''}${esc(caption)}${busy?` <span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span>`:''}</p></div>${busy?'<div class="piece-search-track" aria-hidden="true"><span></span></div>':actions}</div></article>`;
 }
 function selectPiece(id,marker){
  const items=selected()?.items||[],item=items.find(x=>x.id===id);if(!item)return;
@@ -217,7 +217,7 @@ $('#selected-image').addEventListener('load',()=>{fitRoomPhoto();if(state.view==
 function renderVariants(){
  patchHTML($('#design-variants'),state.job.designs.map((d,i)=>{
   const title=translate(d.title),ready=!!d.image;
-  return `<button class="design-variant${ready?'':' is-pending'}" data-ui-key="variant:${state.job.id}:${i}" data-action="${ready?'choose':d.status==='error'?'retry':'pending'}" data-index="${i}" aria-current="${i===state.design}" ${!ready&&d.status!=='error'?'disabled':''} aria-label="${esc(title+(d.status==='error'?' — '+translate('Try again · 1 credit'):''))}">${ready?`<img src="${esc(d.image)}" alt="" decoding="async">`:`<span class="variant-placeholder">${d.status==='error'?icon('refresh',true):'<span class="studio-spinner" aria-hidden="true"></span>'}</span>`}<span class="variant-title">${esc(d.status==='error'?translate('Try again · 1 credit'):title)}</span>${i===state.design?`<span class="variant-check" aria-hidden="true">${icon('check',true)}</span>`:''}</button>`;
+  return `<button class="design-variant${ready?'':' is-pending'}" data-ui-key="variant:${state.job.id}:${i}" data-action="${ready?'choose':d.status==='error'?'retry':'pending'}" data-index="${i}" aria-current="${i===state.design}" ${!ready&&d.status!=='error'?'disabled':''} aria-label="${esc(title+(d.status==='error'?' — '+translate('Try again · 1 credit'):''))}">${ready?`<img src="${esc(d.image)}" alt="" decoding="async">`:`<span class="variant-placeholder">${d.status==='error'?icon('refresh',true):'<span class="studio-spinner" aria-hidden="true"></span>'}</span>`}${!ready&&d.status==='error'?`<span class="variant-title">${esc(translate('Try again · 1 credit'))}</span>`:''}${i===state.design?`<span class="variant-check" aria-hidden="true">${icon('check',true)}</span>`:''}</button>`;
  }).join(''));
 }
 function renderShop(){
@@ -228,7 +228,7 @@ function renderShop(){
  $('#compare-label').textContent=sceneText(document.documentElement.lang,state.compare?'after':'before');$('[data-action="compare"]').setAttribute('aria-pressed',String(state.compare));$('#hotspots').classList.toggle('hidden',state.compare);
  const items=d.items||[],preparing=d.status==='analyzing',adapting=d.status==='adapting',conceptOnly=d.inventory_complete&&!items.length&&!preparing&&!adapting&&!d.error;
  const pending=items.find(pieceBusy);if(pending&&!items.some(x=>pointFocus?.key===keyFor(x)))pointFocus={key:keyFor(pending),id:pending.id,waiting:true};
- patchHTML($('.stage-hint'),preparing||adapting?'':`<span>${esc(sceneText(document.documentElement.lang,'tap'))}</span><button class="browse-pieces scene-link" data-action="${conceptOnly?'other-work':'pieces'}">${esc(sceneText(document.documentElement.lang,'allPieces'))}</button>`);
+ patchHTML($('.stage-hint'),preparing||adapting?'':`<span${pointFocus?' class="scene-sr-only"':''}>${esc(sceneText(document.documentElement.lang,'tap'))}</span><button class="browse-pieces scene-link" data-action="${conceptOnly?'other-work':'pieces'}">${esc(sceneText(document.documentElement.lang,'allPieces'))}</button>`);
  $('#shopping').classList.toggle('has-piece',!!pointFocus);
  $('#shop-count').textContent='';$('#search-progress').classList.add('hidden');$('#summary-button').classList.add('hidden');$('#items-list').replaceChildren();
  $('#empty-items').classList.toggle('hidden',items.length>0&&!preparing&&!adapting);

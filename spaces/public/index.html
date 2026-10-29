@@ -2,7 +2,7 @@
 <html lang="en" dir="ltr" data-space-scene>
 <head>
 <script src="/findzia/boot.js"></script><script src="/spaces-theme.js"></script><script src="/mobile-viewport.js" defer></script>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f6f6f2"><meta name="description" content="Any space. Three new possibilities. Find the pieces you love with Findzia Spaces."><title>Findzia Spaces — Design &amp; Shop. All in One Place.</title><link rel="icon" href="/icon.svg"><link rel="stylesheet" href="/style.css?v=20261016-guide1"><link rel="stylesheet" href="/findzia/original.css"><link rel="stylesheet" href="/findzia/fonts.css"><link rel="stylesheet" href="/findzia/motion.css"><link rel="stylesheet" href="/findzia-shell.css"><link rel="stylesheet" href="/spaces-typography.css"><link rel="stylesheet" href="/design-studio.css?v=20261016-guide1"><link rel="stylesheet" href="/space-scene.css?v=20261025-wait1"><script type="module" src="/app.js?v=20261025-wait1"></script>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f6f6f2"><meta name="description" content="Any space. Three new possibilities. Find the pieces you love with Findzia Spaces."><title>Findzia Spaces — Design &amp; Shop. All in One Place.</title><link rel="icon" href="/icon.svg"><link rel="stylesheet" href="/style.css?v=20261016-guide1"><link rel="stylesheet" href="/findzia/original.css"><link rel="stylesheet" href="/findzia/fonts.css"><link rel="stylesheet" href="/findzia/motion.css"><link rel="stylesheet" href="/findzia-shell.css"><link rel="stylesheet" href="/spaces-typography.css"><link rel="stylesheet" href="/design-studio.css?v=20261016-guide1"><link rel="stylesheet" href="/space-scene.css?v=20261029-visual1"><script type="module" src="/app.js?v=20261029-visual1"></script>
 </head>
 <body>
 <div id="shopify-section-spaces"><section class="fz-home" id="findzia-home-spaces" data-lang="en" dir="ltr" data-home-state="empty" data-theme="light"><div class="fz-dark-home" data-dark-home><header class="fz-dark-header">
@@ -26,13 +26,13 @@
  </div>
 </section>
 <section class="view space-scene hidden" id="setup" aria-label="Room preferences">
- <div class="scene-heading"><h1 data-scene="yourPhoto" data-no-i18n>Your space</h1><button class="scene-link" data-action="add-photo"><span class="icon small" data-icon="camera"></span><span data-scene="changePhoto" data-no-i18n>Change photo</span></button><button class="scene-link" id="return-designs" data-action="designs" hidden><span data-scene="backToDesign" data-no-i18n>Back to design</span></button></div>
+ <div class="scene-heading"><h1 class="scene-sr-only" data-scene="yourPhoto" data-no-i18n>Your space</h1><button class="scene-link" data-action="add-photo"><span class="icon small" data-icon="camera"></span><span class="scene-sr-only" data-scene="changePhoto" data-no-i18n>Change photo</span></button><button class="scene-link" id="return-designs" data-action="designs" hidden><span data-scene="backToDesign" data-no-i18n>Back to design</span></button></div>
  <div class="setup-workspace"><div class="scene-media"><img id="upload-preview" alt="Your room"></div>
  <form id="design-form" class="scene-bottom"><input type="hidden" name="room" value="auto">
-  <div class="scene-form-heading"><h2 data-scene="makeItYours" data-no-i18n>Make it yours.</h2><p data-scene="setupHint" data-no-i18n>One photo. Three ideas for your space.</p></div>
-  <label for="design-request" data-scene="wishes" data-no-i18n>Anything in mind? (optional)</label><textarea id="design-request" name="request" maxlength="600" rows="2" placeholder="e.g. Warm colours, easy to clean"></textarea>
-  <button class="scene-link scene-options" data-no-i18n type="button" data-action="options" aria-label="Design options"><span class="icon small" data-icon="options"></span><span data-scene="options">Options</span><span class="icon small" data-icon="chevron"></span></button>
+  <div class="scene-create-actions">
+  <button class="scene-float scene-options" data-no-i18n type="button" data-action="options" aria-label="Design options"><span class="icon" data-icon="options"></span></button>
   <button class="scene-primary" id="generate-button" type="submit"><span id="discover-label" data-scene="create" data-no-i18n>Create designs</span><span class="icon" data-icon="forward"></span></button>
+  </div>
   <p class="scene-cost" data-scene="cost" data-no-i18n>3 designs · 3 credits</p>
  </form></div>
 </section>
@@ -45,7 +45,7 @@
 </section>
 <section class="view space-scene hidden" id="shopping" aria-label="Shop your design">
  <div class="scene-tools" data-no-i18n><button type="button" data-action="redesign"><span class="icon" data-icon="refresh"></span><span data-scene="redesign">Redesign</span></button><button type="button" data-action="new-design"><span class="icon" data-icon="plus"></span><span data-scene="newDesign">New design</span></button></div>
- <h1 id="selected-title">Your room</h1>
+ <h1 id="selected-title" class="scene-sr-only">Your room</h1>
  <div class="shopping-layout"><div class="room-stage">
   <div class="scene-pick-media"><div class="design-canvas" id="design-canvas"><img id="selected-image" alt="Selected room design"><div id="hotspots"></div><button class="compare-button" data-action="compare" aria-pressed="false"><span class="icon small" data-icon="compare"></span><span id="compare-label">Before</span></button></div></div>
   <nav id="design-variants" aria-label="Choose a design"></nav>
@@ -56,7 +56,8 @@
 <section class="view hidden" id="history" aria-label="My rooms"><button class="back" data-action="home"><span class="icon" data-icon="back"></span>Back</button><div class="page-heading"><h1>Your designs.</h1></div><div id="history-list" class="history-grid"></div></section>
 </main>
 <dialog id="space-options" class="scene-sheet" aria-label="Design options">
- <div class="scene-sheet-head"><h2 data-scene="options" data-no-i18n>Options</h2><button class="scene-float" data-action="options-done" aria-label="Done"><span class="icon" data-icon="check"></span></button></div>
+ <div class="scene-sheet-head"><h2 data-scene="makeItYours" data-no-i18n>Make it yours.</h2><button class="scene-float" data-action="options-done" aria-label="Done"><span class="icon" data-icon="check"></span></button></div>
+ <label for="design-request" data-scene="wishes" data-no-i18n>Anything in mind? (optional)</label><textarea id="design-request" name="request" form="design-form" maxlength="600" rows="2" placeholder="e.g. Warm colours, easy to clean"></textarea>
  <fieldset><legend>How much would you change?</legend><div class="scene-scope"><label><input form="design-form" type="radio" name="scope" value="decor"><span>Furniture &amp; decor</span></label><label><input form="design-form" type="radio" name="scope" value="full" checked><span>Full refresh</span></label><label><input form="design-form" type="radio" name="scope" value="scratch"><span>From scratch</span></label></div></fieldset>
  <button type="button" class="scene-primary" data-action="options-done"><span data-scene="done" data-no-i18n>Done</span></button>
 </dialog>

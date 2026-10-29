@@ -50,7 +50,11 @@
  html[data-space-scene] .scene-form-heading p{font-size:13px!important;line-height:1.6!important;color:var(--scene-muted)!important;margin:0 0 6px!important}
  html[data-space-scene] #design-form>label{font-size:14px!important;line-height:1.5!important;color:inherit!important;margin:0!important}
  html[data-space-scene] #design-request{display:block!important;width:100%!important;min-height:76px!important;max-height:180px!important;padding:12px 14px!important;margin:-4px 0 0!important;border:1px solid var(--scene-line)!important;border-radius:12px!important;background:var(--scene-surface)!important;color:var(--scene-text)!important;font:inherit!important;font-size:16px!important;line-height:1.5!important;resize:vertical!important}
- html[data-space-scene] .scene-options{justify-content:flex-start!important;align-self:flex-start!important;margin-block:-6px!important}
+ html[data-space-scene] .scene-create-actions{display:flex!important;align-items:stretch!important;gap:12px!important}
+ html[data-space-scene] .scene-options{width:52px!important;height:52px!important;margin:0!important;flex:none!important;border-radius:14px!important}
+ html[data-space-scene] .scene-create-actions #generate-button{flex:1!important;min-width:0!important;width:auto!important}
+ html[data-space-scene] #setup .scene-heading{justify-content:flex-end!important}
+ html[data-space-scene] #setup .scene-heading [data-action=add-photo]{min-width:44px!important}
  html[data-space-scene] #generate-button{width:100%!important;margin:0!important;font-size:16px!important}
  html[data-space-scene] .scene-cost{font-size:12px!important;line-height:1.5!important;color:var(--scene-muted)!important;text-align:center!important;margin:-4px 0 0!important}
  /* One result canvas, with stable three-way thumbnail navigation directly below it. */
@@ -59,7 +63,7 @@
  html[data-space-scene] .scene-tools .icon{width:17px!important;height:17px!important;flex:none!important}
  html[data-space-scene] #shopping{display:flex!important;flex-direction:column!important}
  html[data-space-scene] #shopping>.scene-tools{order:3!important;padding-top:16px!important;border-top:1px solid var(--scene-line)!important;margin:16px 0 0!important}
- html[data-space-scene] #selected-title{font-size:23px!important;font-weight:500!important;line-height:1.45!important;margin:0 0 14px!important;color:inherit!important}
+ /* The selected title remains available to screen readers, without a visible heading. */
  html[data-space-scene] #shopping .shopping-layout{display:block!important;width:100%!important;max-width:none!important;padding:0!important;margin:0!important}
  html[data-space-scene] #shopping .room-stage{position:relative!important;top:auto!important;display:flex!important;flex-direction:column!important;min-height:0!important;width:100%!important;padding:0!important;background:transparent!important;color:inherit!important}
  html[data-space-scene] .scene-pick-media{display:flex!important;justify-content:center!important;align-items:flex-start!important;width:100%!important;min-height:0!important;padding:0!important}
@@ -71,6 +75,7 @@
  html[data-space-scene] .design-variant{position:relative!important;display:flex!important;flex-direction:column!important;align-items:stretch!important;gap:7px!important;min-width:0!important;padding:4px!important;margin:0!important;border:1px solid var(--scene-line)!important;border-radius:12px!important;background:var(--scene-surface)!important;color:var(--scene-muted)!important;text-align:start!important;box-shadow:none!important;cursor:pointer!important}
  html[data-space-scene] .design-variant[aria-current=true]{border-color:var(--scene-text)!important;box-shadow:0 0 0 1px var(--scene-text)!important;color:var(--scene-text)!important}
  html[data-space-scene] .design-variant>img,.variant-placeholder{display:flex!important;align-items:center!important;justify-content:center!important;width:100%!important;height:clamp(52px,14vw,86px)!important;object-fit:contain!important;border-radius:8px!important;background:var(--scene-wash)!important;margin:0!important;flex:none!important}
+ html[data-space-scene] #space-options #design-request{margin:0 0 22px!important}
  html[data-space-scene] .variant-title{font-size:11px!important;line-height:1.5!important;font-weight:500!important;padding:0 3px 3px!important;overflow-wrap:anywhere!important}
  html[data-space-scene] .variant-check{position:absolute!important;top:7px!important;inset-inline-end:7px!important;display:grid!important;place-items:center!important;width:22px!important;height:22px!important;border:1px solid #ffffff50!important;border-radius:50%!important;background:var(--scene-sage)!important;color:white!important}
  html[data-space-scene] .variant-check .icon{width:14px!important;height:14px!important}
