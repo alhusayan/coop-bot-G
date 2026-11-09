@@ -82,6 +82,26 @@ function keepAreaVisible(){
 function normalizeArea(){
  $('#svc-area').value=normalizeServiceArea($('#svc-area').value,country);updateLocation();remember();
 }
+let networkLocationTask=null;
+async function locateFromNetwork(){
+ if($('#svc-area').value.trim())return true;
+ if(networkLocationTask)return networkLocationTask;
+ const sequence=locationSequence,requestedCountry=country;
+ networkLocationTask=(async()=>{
+  try{
+   const url=new URL('https://api.bigdatacloud.net/data/reverse-geocode-client');
+   url.searchParams.set('localityLanguage',language);
+   const response=await fetch(url,{credentials:'omit',referrerPolicy:'no-referrer',signal:AbortSignal.timeout(3500)});
+   if(!response.ok)return false;
+   const found=serviceLocation(await response.json());
+   // An IP estimate never overwrites typing, a saved area, GPS, or a country edit.
+   if(!found||sequence!==locationSequence||requestedCountry!==country||$('#svc-area').value.trim())return false;
+   setCountry(found.country);$('#svc-area').value=found.area;updateLocation();
+   $('#svc-manual').textContent='≈ '+found.area;
+   return true;
+  }catch{return false;}finally{networkLocationTask=null;}
+ })();return networkLocationTask;
+}
 async function locateArea(){
  if(locating)return false;
  const sequence=++locationSequence;locating=true;$('#svc-locate').disabled=true;updateLocation();
@@ -234,7 +254,7 @@ for(const id of ['svc-camera-input','svc-gallery-input'])$('#'+id).onchange=e=>p
 $('#svc-photo-clear').onclick=()=>resetHome();
 const brand=$('.fz-brand');if(brand){brand.href='/trial/services';brand.onclick=e=>{e.preventDefault();history.replaceState({findziaServices:'home'},'',location.href);resetHome();};}
 window.addEventListener('popstate',()=>resetHome());window.addEventListener('pageshow',event=>{if(event.persisted)resetHome();});
-$('#svc-locate').onclick=()=>locateArea();$('#svc-manual').onclick=()=>manualArea();$('#svc-area').oninput=()=>{updateLocation();remember();};$('#svc-area').onchange=normalizeArea;$('#svc-area').addEventListener('focus',keepAreaVisible);
+$('#svc-locate').onclick=()=>locateArea();$('#svc-manual').onclick=()=>manualArea();$('#svc-area').oninput=()=>{locationSequence++;updateLocation();remember();};$('#svc-area').onchange=normalizeArea;$('#svc-area').addEventListener('focus',keepAreaVisible);
 window.addEventListener('resize',keepAreaVisible);window.visualViewport?.addEventListener('resize',keepAreaVisible);
 function setDirectory(open){
  const directory=$('#svc-directory');directory.hidden=!open;directory.inert=!open;directory.setAttribute('aria-hidden',String(!open));
@@ -246,7 +266,7 @@ $('#svc-directory-close').onclick=()=>{setDirectory(false);document.querySelecto
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('#svc-directory').hidden){event.preventDefault();event.stopImmediatePropagation();$('#svc-directory-close').click();}},true);
 root.querySelectorAll('.svc-page [data-icon],.svc-directory [data-icon]').forEach(el=>el.replaceWith(icon(el.dataset.icon)));
 const languageSelect=$('[data-profile-language-select]');for(const code of window.FindziaHomeCopy?.languages||[]){if(![...languageSelect.options].some(o=>o.value===code)){let name=code;try{name=new Intl.DisplayNames([code],{type:'language'}).of(code)}catch{}languageSelect.add(new Option(name,code));}}
-localize();restore();resetHome(false);const entryQuery=new URL(location.href).searchParams.get('q');if(entryQuery)chooseService(entryQuery.slice(0,200));history.replaceState({findziaServices:'home'},'',location.href);updateLocation();syncSelection();window.FindziaAppearance?.apply(root);
+localize();restore();resetHome(false);void locateFromNetwork();const entryQuery=new URL(location.href).searchParams.get('q');if(entryQuery)chooseService(entryQuery.slice(0,200));history.replaceState({findziaServices:'home'},'',location.href);updateLocation();syncSelection();window.FindziaAppearance?.apply(root);
 $('#svc-form').setAttribute('data-dark-form','');
 $('#svc-form').addEventListener('submit',async event=>{
  event.preventDefault();if(busy)return;if(!ready){notice(t('unavailable'));return;}
@@ -256,7 +276,7 @@ $('#svc-form').addEventListener('submit',async event=>{
  try{
   if(!$('#svc-area').value.trim()){
    if(!$('#svc-manual-fields').hidden||read('findzia-services-location-denied')==='1'){manualArea();$('#svc-area').reportValidity();return;}
-   if(!await locateArea())return;
+   if(!await locateFromNetwork()){manualArea();$('#svc-area').reportValidity();return;}
   }
   if(ticket!==generation)return;
   if(!$('#svc-area').checkValidity()){manualArea();$('#svc-area').reportValidity();return;}
@@ -285,3 +305,4 @@ $('#svc-form').addEventListener('submit',async event=>{
 });
 try{for(const name of ['i18n','support','account','billing'])await import(assets[name]);window.FindziaLocale.choose(language);window.FindziaI18n.set(root,language);localize();if(!root.fzAccount||!root.fzBilling)throw Error('shell');ready=true;const response=await fetch(api+'/api/billing/config',{signal:AbortSignal.timeout(8000)});if(response.ok){creditConfig=await response.json();creditLabel();}}catch(error){if(!ready){notice(t('unavailable'));const reload=node('button','',t('reload'));reload.onclick=()=>location.reload();$('#svc-message').append(reload);}}
 window.addEventListener('pagehide',remember);window.addEventListener('focus',creditLabel);setInterval(()=>{if(!document.hidden)creditLabel();},3000);
+

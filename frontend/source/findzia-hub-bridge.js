@@ -2,6 +2,7 @@
 (()=>{
 'use strict';
 const params=new URLSearchParams(location.search),project=params.get('hubProject');
+if(params.get('designContext')==='1'&&parent!==window)document.documentElement.dataset.designContext='true';
 const projectKeys=['shop','one','space','services','account'];
 // Shared links enter the same shell too. Unknown callback/payment parameters
 // retain their original handler and are never rewritten.
@@ -130,3 +131,4 @@ window.addEventListener('message',event=>{
 window.addEventListener('storage',event=>{if(event.key==='findzia-lang')applyLanguage(read('findzia-lang'));if(event.key==='findzia-appearance-v1')appearance();if(event.key==='findzia-market-country-v1')applyCountry(read('findzia-market-country-v1'));if(event.key==='findzia-account-v1-session')post({type:'account-state'})});
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount,{once:true});else mount();
 })();
+

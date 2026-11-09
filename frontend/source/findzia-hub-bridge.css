@@ -54,3 +54,28 @@ html[data-hub-account-only] .fz-account::backdrop{background:transparent}
  .home-product-examples button{font:inherit!important;font-size:13px!important;min-height:44px!important;border:1px solid #ffffff5c!important;border-radius:24px!important;padding:9px 16px!important;background:#17291f80!important;color:#fff!important;cursor:pointer!important}
  .home-service-link{font:inherit!important;font-size:14px!important;min-height:44px!important;padding:10px 16px!important;border:1px solid var(--line,#9baa99)!important;background:transparent!important;color:inherit!important;border-radius:24px!important;cursor:pointer!important;flex-shrink:0!important}
 }
+
+
+@layer findzia-hub-static {
+ html[data-space-scene][data-findzia-embedded]:has(#home.hidden),
+ html[data-space-scene][data-findzia-embedded]:has(#home.hidden) body{background:var(--scene-paper,#f4f1e9)!important}
+ html[data-design-context],html[data-design-context] body{background:#f4f1e9!important;color:#203a2e!important;margin:0!important}
+ html[data-design-context] :is(.fz-dark-header,.fza-nav-footer,.svc-intro,.svc-suggestions,body>footer){display:none!important}
+ html[data-design-context] :is(.fz-home,.fz-dark-home,.svc-page,.svc-main){min-height:0!important;height:auto!important;width:100%!important;max-width:none!important;margin:0!important;padding:0!important;background:transparent!important}
+ html[data-design-context] .svc-page{padding:14px 18px 24px!important;--svc-paper:#f4f1e9!important;--svc-surface:#fffdf8!important;--svc-ink:#203a2e!important;--svc-muted:#657167!important;--svc-line:#dcded5!important;--svc-soft:#e8ebe2!important;--svc-green:#244f3f!important}
+ html[data-design-context] #svc-form{margin:0 0 18px!important;border:1px solid var(--svc-line)!important;padding:16px!important;background:var(--svc-surface)!important;border-radius:20px!important;box-shadow:none!important}
+ html[data-design-context] .svc-fields{display:flex!important;flex-direction:column!important;gap:16px!important}
+ html[data-design-context] .svc-query-field{display:block!important}
+ html[data-design-context] .svc-input-wrap{background:var(--svc-soft)!important;border-radius:12px!important}
+ html[data-design-context] #svc-query{font-size:16px!important;color:var(--svc-ink)!important;background:transparent!important}
+ html[data-design-context] .svc-primary{width:100%!important;background:#244f3f!important;color:#fffdf5!important}
+ html[data-design-context] :is(.svc-results,.svc-results-head,.svc-result-meta,.svc-results-note){color:var(--svc-ink)!important;background:transparent!important}
+ html[data-design-context] :is(.svc-results-title,#svc-results-title):focus:not(:focus-visible){outline:none!important}
+ html[data-design-context][data-findzia-theme=dark],html[data-design-context][data-findzia-theme=dark] body{background:#15251d!important;color:#f2f3e9!important}
+ html[data-design-context][data-findzia-theme=dark] .svc-page{--svc-paper:#15251d!important;--svc-surface:#20342a!important;--svc-ink:#f2f3e9!important;--svc-muted:#b2bfb3!important;--svc-line:#3a4c3f!important;--svc-soft:#293d31!important}
+}
+@layer findzia-hub-static {
+ html[data-experience=services] .svc-page:has(.experience-entry[hidden]){min-height:100svh!important;background:var(--paper,#f4f1e9)!important;color:var(--ink,#213a2e)!important}
+ html[data-experience=services] .svc-page:has(.experience-entry[hidden]) #svc-form{background:var(--paper,#f4f1e9)!important;color:var(--ink,#213a2e)!important;border:1px solid var(--line)!important}
+ html[data-experience=services] .svc-page:has(.experience-entry[hidden]) :is(#svc-cost,#svc-manual,#svc-locate,.svc-results-note,.svc-result-meta){color:var(--ink,#213a2e)!important}
+}

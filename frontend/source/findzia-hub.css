@@ -128,3 +128,17 @@ html[data-project-open] .home-content{visibility:hidden;pointer-events:none}
 #layer-status{background:transparent;color:var(--ink)}
 .header-row{height:78px}
 @media(max-width:720px){.header-row{height:68px}}
+
+
+/* Warm entry shelf; the room keeps exactly the same geometry in every section. */
+html:not([data-project-open]) .home-hero:after{background:linear-gradient(transparent 48%,#f4f1e92b 72%,#f4f1e9 100%)}
+html:not([data-project-open]) .home-hero{background:#f4f1e9}
+html:not([data-project-open]) .home-content{max-width:660px;width:calc(100% - 32px);padding:22px 18px 16px;margin:0 auto 16px;background:#f4f1e9f5;border:1px solid #ffffff80;border-radius:24px;box-shadow:0 8px 32px #203a2e0c}
+html:not([data-project-open]) .home-content h1{color:#213a2e;text-shadow:none;font-size:clamp(24px,3vw,34px);margin-bottom:14px}
+html:not([data-project-open]) .home-action{color:#213a2e;min-height:88px}
+html:not([data-project-open]) .home-action-icon{background:#e7ebdf;border-color:#cfd8c9;color:#244f3f;box-shadow:none}
+html:not([data-project-open]) .design-action .home-action-icon{background:#244f3f;color:#fffdf5;border-color:#244f3f}
+html[data-theme=dark]:not([data-project-open]) .home-content{background:#17281ef5;border-color:#37483b}
+html[data-theme=dark]:not([data-project-open]) :is(.home-content h1,.home-action){color:#f3f4eb}
+html[data-theme=dark]:not([data-project-open]) .home-hero:after{background:linear-gradient(transparent 48%,#15251d2b 72%,#15251d 100%)}
+html[data-theme=dark]:not([data-project-open]) .home-hero{background:#15251d}
