@@ -240,7 +240,7 @@
  html[data-space-scene] .scene-pick-bottom{margin-top:14px!important}
  html[data-space-scene] #empty-items{padding:14px!important;border:0!important;background:var(--scene-wash)!important;border-radius:16px!important;font-size:13px!important}
  html[data-space-scene] #empty-items p{margin:6px 0!important;font-size:13px!important}
- html[data-space-scene] #sheet[data-mode=services]{width:min(780px,calc(100% - 16px))!important;height:calc(100svh - 24px)!important;max-height:none!important;padding:0!important;border:1px solid var(--scene-line)!important;border-radius:24px!important;background:var(--scene-paper)!important;color:var(--scene-text)!important;overflow:hidden!important;margin:auto!important}
+ html[data-space-scene] #sheet[data-mode=services]{width:min(780px,calc(100% - 16px))!important;height:min(480px,calc(100svh - 24px))!important;max-height:none!important;padding:0!important;border:1px solid var(--scene-line)!important;border-radius:24px!important;background:var(--scene-paper)!important;color:var(--scene-text)!important;overflow:hidden!important;margin:auto!important}
  html[data-space-scene] #sheet[data-mode=services] .sheet-handle{display:none!important}
  html[data-space-scene] #sheet[data-mode=services] #sheet-content{display:flex!important;flex-direction:column!important;height:100%!important;padding:0!important}
  html[data-space-scene] .design-services-head{padding:20px 58px 14px 20px!important;border-bottom:1px solid var(--scene-line)!important}
