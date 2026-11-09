@@ -108,7 +108,7 @@ async function generateDesign(j,index){
    img=await gemini([{text:prompt+correction},fileImage(j,'original.jpg')],{image:true});
    d.generation_phase='checking';persist();
    const generated=Date.now(),photo=await analysisImage({inlineData:img});
-   const inspection=await inspectCandidate({verify:()=>verifyRoomFunction(before,photo,j.room_context),identify:()=>identifyPieces(photo,{keep:j.options.keep})});
+   const inspection=await inspectCandidate({verify:()=>verifyRoomFunction(before,photo,j.room_context),identify:onProgress=>identifyPieces(photo,{keep:j.options.keep,onProgress})});
    const check=inspection.check;inventory=inspection.inventory;
    console.log('SPACES_DESIGN_TIMING',j.id,index,JSON.stringify({generation_ms:generated-generationStarted,verification_ms:Date.now()-generated,total_ms:Date.now()-started,attempt:attempt+1}));
    console.log('SPACES_FUNCTION_CHECK',j.id,index,JSON.stringify({type:j.room_context?.type,ok:check.ok,attempt:attempt+1}));
@@ -155,13 +155,22 @@ async function identifyAndShop(j,index,precomputed=null){
  if(previous.length&&!d.inventory_backup)d.inventory_backup={version:d.inventory_version||1,items:previous};
  d.status='analyzing';d.error=null;d.items=[];d.inventory_complete=false;d.inventory_revision=Date.now();d.matching_version=3;d.search_revision=SEARCH_REVISION;d.search_language=searchLanguage(j.options.language);d.grouping_version=0;persist();
  const revision=d.inventory_revision,bytes=readFileSync(resolve(DATA,j.id,image));
+ const publishPartial=items=>{
+  if(d.image!==image||d.inventory_revision!==revision||!items.length)return;
+  const next=retainInventoryResults(previous,items);
+  if(!d.items.length)console.log('SPACES_INVENTORY_FIRST',j.id,index,JSON.stringify({elapsed_ms:Date.now()-started}));
+  d.items=next.map(item=>d.items.find(old=>old.id===item.id)||item);
+  d.inventory_version=INVENTORY_VERSION;
+  persist();
+ };
+ precomputed?.subscribe?.(publishPartial);
  try{
  await prepareInventory({
-  identify:async()=>{if(precomputed){const result=await precomputed;if(result.error)throw result.error;return result.items;}return identifyPieces(await analysisImage(fileImage(j,image)),{keep:j.options.keep,onAttempt:details=>console.log('SPACES_INVENTORY_PARSE',j.id,index,JSON.stringify(details))});},
+  identify:async()=>{if(precomputed){const result=await precomputed;if(result.error)throw result.error;return result.items;}return identifyPieces(await analysisImage(fileImage(j,image)),{keep:j.options.keep,onProgress:publishPartial,onAttempt:details=>console.log('SPACES_INVENTORY_PARSE',j.id,index,JSON.stringify(details))});},
   isCurrent:()=>d.image===image&&d.inventory_revision===revision,
   canRefine:()=>d.opened_image!==image,
   prepare:async(items,review)=>{
-   const retained=retainInventoryResults(previous,items);
+   const retained=retainInventoryResults(previous,items).map(item=>!review?(d.items.find(old=>old.id===item.id)||item):item);
    await pool(retained,4,async item=>{
     try{
      const views=await pool(occurrences(item),3,async view=>{
@@ -181,7 +190,7 @@ async function identifyAndShop(j,index,precomputed=null){
   refine:items=>groupIdenticalPieces(items,fileImage(j,image),{keep:j.options.keep}),
   onReviewError:e=>console.log('SPACES_GROUPING_UNAVAILABLE',j.id,index,e.message)
  });
- }catch(e){if(!d.items?.length)d.items=previous;d.status=d.items?.length?'complete':'ready';d.error=e.message;console.error('SPACES_IDENTIFY_ERROR',j.id,index,e.message);persist();}
+ }catch(e){if(!d.inventory_complete)d.inventory_version=0;if(!d.items?.length)d.items=previous;d.status=d.items?.length?'complete':'ready';d.error=e.message;console.error('SPACES_IDENTIFY_ERROR',j.id,index,e.message);persist();}
 }
 async function replacePiece(j,index,item,offer){
  const d=j.designs[index];d.status='adapting';d.adaptation_error=null;persist();
@@ -395,4 +404,5 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 1.0.0');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
+
 

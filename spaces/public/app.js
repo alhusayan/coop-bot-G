@@ -195,8 +195,8 @@ function browsePieces(candidates=null){
 }
 function openServiceRequest(query){
  query=String(query||'').trim().slice(0,180);if(query.length<2)return;
- if(window.FindziaHubBridge){if(window.FindziaHubBridge.action('services',{query,country:countryCode()}))closeSheet();return;}
- location.assign(serviceDestination(query,countryCode()));
+ const url=new URL('/trial/services',location.origin);url.searchParams.set('designContext','1');url.searchParams.set('q',query);url.searchParams.set('country',countryCode());
+ showSheet(`<div class="design-services-head"><h2>${esc(translate('Find a specialist','ابحث عن مختص'))}</h2></div><iframe class="design-services-frame" src="${esc(url.href)}" title="${esc(translate('Specialists for your design','مختصون لتصميمك'))}" allow="geolocation" referrerpolicy="same-origin"></iframe>`,'services');
 }
 function findSpecialist(id){
  const item=selected()?.items.find(x=>x.id===id);if(!item)return;
@@ -226,7 +226,7 @@ function renderShop(){
  $('#selected-title').textContent=translate(d.title);renderVariants();
  updateImage($('#selected-image'),state.compare?state.job.original:d.image);fitRoomPhoto();
  $('#compare-label').textContent=sceneText(document.documentElement.lang,state.compare?'after':'before');$('[data-action="compare"]').setAttribute('aria-pressed',String(state.compare));$('#hotspots').classList.toggle('hidden',state.compare);
- const items=d.items||[],preparing=d.status==='analyzing',adapting=d.status==='adapting',conceptOnly=d.inventory_complete&&!items.length&&!preparing&&!adapting&&!d.error;
+ const items=d.items||[],preparing=d.status==='analyzing'&&!items.length,adapting=d.status==='adapting',conceptOnly=d.inventory_complete&&!items.length&&!preparing&&!adapting&&!d.error;
  const pending=items.find(pieceBusy);if(pending&&!items.some(x=>pointFocus?.key===keyFor(x)))pointFocus={key:keyFor(pending),id:pending.id,waiting:true};
  patchHTML($('.stage-hint'),preparing||adapting?'':`<span${pointFocus?' class="scene-sr-only"':''}>${esc(sceneText(document.documentElement.lang,'tap'))}</span><button class="browse-pieces scene-link" data-action="${conceptOnly?'other-work':'pieces'}">${esc(sceneText(document.documentElement.lang,'allPieces'))}</button>`);
  $('#shopping').classList.toggle('has-piece',!!pointFocus);
@@ -385,3 +385,4 @@ function refreshSceneCopy(){
 refreshSceneCopy();
 new MutationObserver(refreshSceneCopy).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
 $('#space-options').addEventListener('click',event=>{if(event.target===$('#space-options')){const r=event.target.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)event.target.close();}});
+

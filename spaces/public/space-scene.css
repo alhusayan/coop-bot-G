@@ -222,3 +222,29 @@
  html[data-space-scene][dir=rtl] .piece-selected-label{left:auto!important;right:12px!important}
  html[data-space-scene] #design-canvas{overflow:hidden!important}
 }
+
+
+/* A continuous, photo-led workspace with a compact action shelf. */
+@layer findzia-space-scene {
+ html[data-space-scene]{--scene-paper:#f4f1e9;--scene-surface:#fffdf8;--scene-text:#213a2e;--scene-muted:#697568;--scene-line:#dcded2;--scene-wash:#e4e9dc}
+ html[data-space-scene] [data-spaces-content]{min-height:100svh!important;padding:16px 18px 24px!important}
+ html[data-space-scene] #setup{min-height:calc(100svh - 40px)!important;display:flex!important;flex-direction:column!important}
+ html[data-space-scene] #setup .scene-heading{position:absolute!important;inset:10px 10px auto auto!important;z-index:5!important;margin:0!important}
+ html[data-space-scene] #setup .scene-heading [data-action=add-photo]{padding:10px!important;width:44px!important;border:1px solid var(--scene-line)!important;border-radius:50%!important;background:var(--scene-surface)!important;box-shadow:0 2px 12px #17291d14!important}
+ html[data-space-scene] #setup .setup-workspace{flex:1!important;display:flex!important;flex-direction:column!important;gap:16px!important}
+ html[data-space-scene] #setup .scene-media{flex:1!important;min-height:220px!important;background:var(--scene-wash)!important;border-radius:22px!important;overflow:hidden!important}
+ html[data-space-scene] #setup .scene-media>img{width:100%!important;max-height:calc(100svh - 180px)!important;object-fit:contain!important}
+ html[data-space-scene] #setup #design-form{flex:none!important;padding:16px!important;border:1px solid var(--scene-line)!important;border-radius:20px!important;background:var(--scene-surface)!important}
+ html[data-space-scene] #shopping{min-height:calc(100svh - 40px)!important}
+ html[data-space-scene] #shopping>.scene-tools{margin-top:auto!important;padding-top:18px!important;justify-content:flex-end!important;border:0!important}
+ html[data-space-scene] .scene-pick-bottom{margin-top:14px!important}
+ html[data-space-scene] #empty-items{padding:14px!important;border:0!important;background:var(--scene-wash)!important;border-radius:16px!important;font-size:13px!important}
+ html[data-space-scene] #empty-items p{margin:6px 0!important;font-size:13px!important}
+ html[data-space-scene] #sheet[data-mode=services]{width:min(780px,calc(100% - 16px))!important;height:calc(100svh - 24px)!important;max-height:none!important;padding:0!important;border:1px solid var(--scene-line)!important;border-radius:24px!important;background:var(--scene-paper)!important;color:var(--scene-text)!important;overflow:hidden!important;margin:auto!important}
+ html[data-space-scene] #sheet[data-mode=services] .sheet-handle{display:none!important}
+ html[data-space-scene] #sheet[data-mode=services] #sheet-content{display:flex!important;flex-direction:column!important;height:100%!important;padding:0!important}
+ html[data-space-scene] .design-services-head{padding:20px 58px 14px 20px!important;border-bottom:1px solid var(--scene-line)!important}
+ html[data-space-scene] .design-services-head h2{font-family:inherit!important;font-size:18px!important;font-weight:500!important;line-height:1.5!important;margin:0!important}
+ html[data-space-scene] .design-services-frame{display:block!important;flex:1!important;width:100%!important;min-height:0!important;border:0!important;background:var(--scene-paper)!important}
+ @media(min-width:900px){html[data-space-scene] #setup .setup-workspace{display:grid!important;grid-template-columns:minmax(0,1.7fr) minmax(280px,1fr)!important;align-items:center!important}html[data-space-scene] #setup .scene-media>img{max-height:calc(100svh - 70px)!important}}
+}

@@ -17,7 +17,10 @@ export async function prepareInventory({identify,prepare,publish,refine,isCurren
 // Start detection while the independent design check runs. Capture rejection
 // immediately so a rejected candidate can be discarded without an unhandled task.
 export async function inspectCandidate({verify,identify}){
- const inventory=Promise.resolve().then(identify).then(items=>({items}),error=>({error}));
+ let latest=[],listener;
+ const inventory=Promise.resolve().then(()=>identify(items=>{latest=items;listener?.(items);})).then(items=>({items}),error=>({error}));
+ inventory.subscribe=fn=>{listener=fn;if(latest.length)fn(latest);};
  const check=await verify();
  return {check,inventory};
 }
+
