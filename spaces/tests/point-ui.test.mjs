@@ -1,7 +1,7 @@
 import {sceneText} from '../public/space-scene-copy.js';
 import {designPresentation,createStyleTour} from '../public/design-studio.js';
 import {bindStoreLinks} from '../public/store-links.js';
-import {MARKETS,orderedMarkets,browserMarket} from '../public/markets.js';
+import {MARKETS,orderedMarkets,browserMarket,savedMarket} from '../public/markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from '../public/design-picks.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,7 +27,7 @@ test('clean photo selection is free and opens the original layer without a Space
  document.querySelector('.fz-home').fzBilling={authorizePiece:async()=>{authorizations++;},refresh(){}};
  const fetch=async(path,options={})=>{if(path==='/api/config')return Response.json({markets:{US:{currency:'USD',en:'United States',flag:'US'},SA:{currency:'SAR',en:'Saudi Arabia',flag:'SA'}},demo:job.id});if(/\/(focus|search)\//.test(path))searches++;return Response.json(structuredClone(job));};
  globalThis.fetch=fetch;const storage={getItem:()=>null,setItem:()=>{}};
- const context=vm.createContext({document,window,console,sceneText,designPresentation,createStyleTour,MutationObserver:window.MutationObserver,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,bindStoreLinks,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
+ const context=vm.createContext({document,window,console,sceneText,designPresentation,createStyleTour,MutationObserver:window.MutationObserver,crypto:webcrypto,URL,Intl,Date,Number,String,Boolean,Math,JSON,Map,Set,Image:window.Image,localStorage:storage,matchMedia:()=>({matches:true}),location:{origin:'https://spaces.test'},ResizeObserver:class{observe(){}},setTimeout:(f,ms)=>{const id=setTimeout(f,ms);timers.add(id);return id;},clearTimeout,fetch,request,bindStoreLinks,patchHTML,updateImage,pieceActivity,pieceViews,pickPhotoCandidates,canShopPiece,canServicePiece,pieceName,serviceQuery,serviceDestination,createLocalCatalog,MARKETS,orderedMarkets,browserMarket,savedMarket:()=>savedMarket(storage.getItem),detectMarket:async()=>'US',createRoomContext,acceptsJob,productKey,updateDesignPicks,hasSavedResults,savedPickImage,createOriginalLayer:()=>({has:()=>false,busy:()=>false,close(){},open:async value=>opens.push(value)}),mountFindzia:async()=>({sync(){},setMarketLanguage(){},getLanguage:()=> 'en'})});
  try{
   vm.runInContext(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),context);
   let photoOpens=0;document.querySelector('#file-input').click=()=>photoOpens++;

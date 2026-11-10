@@ -1,4 +1,4 @@
-import {MARKETS,orderedMarkets,browserMarket,detectMarket} from './markets.js';
+import {MARKETS,orderedMarkets,browserMarket,detectMarket,savedMarket} from './markets.js';
 import {productKey,updateDesignPicks,hasSavedResults,savedPickImage} from './design-picks.js';
 import {createOriginalLayer} from './original-results.js?v=20261019-studio1';
 import {bindStoreLinks} from './store-links.js';
@@ -20,8 +20,9 @@ $$('[data-icon]').forEach(el=>el.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safe=u=>{try{const a=new URL(u,location.origin);return (a.protocol==='https:'||a.origin===location.origin)&&!a.username&&!a.password?a.href:'';}catch{return '';}};
 const fallbackMarkets=MARKETS;
-const initialMarket=browserMarket({timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,languages:globalThis.navigator?.languages||[]});
-let marketChosen=false;
+const preferredMarket=savedMarket();
+const initialMarket=preferredMarket||browserMarket({timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,languages:globalThis.navigator?.languages||[]});
+let marketChosen=!!preferredMarket;
 const state={view:'home',market:initialMarket,detectedMarket:initialMarket,image:null,job:null,design:0,compare:false,config:{markets:fallbackMarkets},auth:null,selections:{},quantities:{},itemId:null};
 try{state.selections=JSON.parse(localStorage.getItem('spaces-v2-selections')||'{}');state.quantities=JSON.parse(localStorage.getItem('spaces-v2-quantities')||'{}');}catch{}
 const designBookmarks={},demoViews={};

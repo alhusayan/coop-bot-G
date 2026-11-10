@@ -1,19 +1,22 @@
 // Markets already supported by Findzia's original search engine.
 const rows=[
- ['US','United States','United States','USD','$','🇺🇸','en'],['CN','中国','China','CNY','¥','🇨🇳','zh'],
- ['JP','日本','Japan','JPY','¥','🇯🇵','ja'],['DE','Deutschland','Germany','EUR','€','🇩🇪','de'],
- ['GB','United Kingdom','United Kingdom','GBP','£','🇬🇧','en'],['FR','France','France','EUR','€','🇫🇷','fr'],
- ['IN','भारत','India','INR','₹','🇮🇳','hi'],['KR','대한민국','South Korea','KRW','₩','🇰🇷','ko'],
- ['CA','Canada','Canada','CAD','$','🇨🇦','en'],['IT','Italia','Italy','EUR','€','🇮🇹','it'],
- ['BR','Brasil','Brazil','BRL','R$','🇧🇷','pt'],['AU','Australia','Australia','AUD','$','🇦🇺','en'],
- ['ES','España','Spain','EUR','€','🇪🇸','es'],['MX','México','Mexico','MXN','$','🇲🇽','es'],
- ['NL','Nederland','Netherlands','EUR','€','🇳🇱','nl'],['TR','Türkiye','Türkiye','TRY','₺','🇹🇷','tr'],
+ ['KW','الكويت','Kuwait','KWD','د.ك','🇰🇼','ar'],
  ['SA','السعودية','Saudi Arabia','SAR','ر.س','🇸🇦','ar'],['AE','الإمارات','United Arab Emirates','AED','د.إ','🇦🇪','ar'],
- ['SG','Singapore','Singapore','SGD','$','🇸🇬','en'],['EG','مصر','Egypt','EGP','ج.م','🇪🇬','ar']
+ ['QA','قطر','Qatar','QAR','ر.ق','🇶🇦','ar'],['BH','البحرين','Bahrain','BHD','د.ب','🇧🇭','ar'],['OM','عُمان','Oman','OMR','ر.ع','🇴🇲','ar'],
+ ['US','United States','United States','USD','$','🇺🇸','en'],['CN','中国','China','CNY','¥','🇨🇳','zh'],
+ ['GB','United Kingdom','United Kingdom','GBP','£','🇬🇧','en'],['DE','Deutschland','Germany','EUR','€','🇩🇪','de'],
+ ['FR','France','France','EUR','€','🇫🇷','fr'],['IT','Italia','Italy','EUR','€','🇮🇹','it'],
+ ['ES','España','Spain','EUR','€','🇪🇸','es'],['NL','Nederland','Netherlands','EUR','€','🇳🇱','nl'],
+ ['CA','Canada','Canada','CAD','$','🇨🇦','en'],['AU','Australia','Australia','AUD','$','🇦🇺','en'],
+ ['JP','日本','Japan','JPY','¥','🇯🇵','ja'],['KR','대한민국','South Korea','KRW','₩','🇰🇷','ko'],
+ ['IN','भारत','India','INR','₹','🇮🇳','hi'],['TR','Türkiye','Türkiye','TRY','₺','🇹🇷','tr'],
+ ['SG','Singapore','Singapore','SGD','$','🇸🇬','en'],['EG','مصر','Egypt','EGP','ج.م','🇪🇬','ar'],
+ ['BR','Brasil','Brazil','BRL','R$','🇧🇷','pt'],['MX','México','Mexico','MXN','$','🇲🇽','es']
 ];
-export function supportedMarket(code,fallback='US'){return ({KW:'SA',QA:'SA',BH:'SA',OM:'AE'})[code]||(rows.some(row=>row[0]===code)?code:fallback);}
+export function supportedMarket(code,fallback='US'){return rows.some(row=>row[0]===code)?code:fallback;}
+export function savedMarket(read=key=>localStorage.getItem(key)){try{return supportedMarket(String(read('findzia-market-country-v1')||'').toUpperCase(),'');}catch{return '';}}
 export const MARKETS=Object.fromEntries(rows.map(([code,name,en,currency,symbol,flag,lang])=>[code,{name,en,currency,symbol,flag,lang}]));
-export function orderedMarkets(markets,detected){return [...new Set([detected,...rows.map(row=>row[0]),...Object.keys(markets)])].filter(code=>markets[code]).map(code=>[code,markets[code]]);}
+export function orderedMarkets(markets){return [...new Set([...rows.map(row=>row[0]),...Object.keys(markets)])].filter(code=>markets[code]).map(code=>[code,markets[code]]);}
 export function browserMarket({timeZone='',languages=[]}={}){
  const zones={'Asia/Kuwait':'KW','Asia/Riyadh':'SA','Asia/Dubai':'AE','Asia/Qatar':'QA','Asia/Bahrain':'BH','Asia/Muscat':'OM','Asia/Tokyo':'JP','Asia/Shanghai':'CN','Asia/Hong_Kong':'CN','Asia/Seoul':'KR','Asia/Kolkata':'IN','Asia/Calcutta':'IN','Asia/Singapore':'SG','Africa/Cairo':'EG','Europe/London':'GB','Europe/Berlin':'DE','Europe/Paris':'FR','Europe/Rome':'IT','Europe/Madrid':'ES','Europe/Amsterdam':'NL','Europe/Istanbul':'TR','America/Toronto':'CA','America/Vancouver':'CA','America/Mexico_City':'MX','America/Sao_Paulo':'BR','Australia/Sydney':'AU','Australia/Melbourne':'AU','Australia/Perth':'AU','America/New_York':'US','America/Los_Angeles':'US','America/Chicago':'US','America/Denver':'US'};
  if(zones[timeZone])return supportedMarket(zones[timeZone]);

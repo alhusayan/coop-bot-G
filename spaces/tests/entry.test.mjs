@@ -2,7 +2,22 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
+import {MARKETS,browserMarket,savedMarket} from '../public/markets.js';
 const source=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
+
+test('opening Design preserves the shared country after delayed location detection',async()=>{
+ const initial=source.slice(source.indexOf('const fallbackMarkets='),source.indexOf('try{state.selections='));
+ const initialize=source.slice(source.indexOf('function syncMarket('),source.indexOf("$('#retry-access').addEventListener"));
+ const storage=new Map([['findzia-market-country-v1','KW'],['spaces-market','SA']]);
+ const context=vm.createContext({MARKETS,browserMarket,savedMarket:()=>savedMarket(key=>storage.get(key)),Intl,
+  localStorage:{setItem:(key,value)=>storage.set(key,value)},shell:null,
+  $:()=>({classList:{add(){},remove(){}}}),api:async()=>({markets:MARKETS}),detectMarket:async()=>'SA'});
+ vm.runInContext(initial+initialize,context);
+ assert.equal(vm.runInContext('state.market',context),'KW');
+ assert.equal(await vm.runInContext('init()',context),true);
+ assert.equal(vm.runInContext('state.market',context),'KW');
+ assert.equal(storage.get('spaces-market'),'KW');
+});
 
 test('selecting a local photo previews it while account/config are still pending',async()=>{
  const nodes=new Map(),$=key=>{if(!nodes.has(key))nodes.set(key,{reset(){},value:'selected'});return nodes.get(key)};
