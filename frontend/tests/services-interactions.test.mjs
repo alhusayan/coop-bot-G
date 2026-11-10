@@ -17,7 +17,7 @@ function fixture(){
  }
  const $=s=>{if(!nodes.has(s))nodes.set(s,new Element());return nodes.get(s)};
  const context={$ ,URL,AbortController,language:'en',country:'KW',busy:false,ready:true,generation:0,pendingPhoto:null,retrieving:false,api:'https://api.findzia.com',
-  document:{activeElement:null,createElement:()=>new Element(),dispatchEvent(){},addEventListener(){},querySelector:()=>null},window:{innerHeight:500,visualViewport:{height:280}},requestAnimationFrame:fn=>fn(),setTimeout:()=>1,clearTimeout(){},
+  document:{documentElement:{dataset:{}},activeElement:null,createElement:()=>new Element(),dispatchEvent(){},addEventListener(){},querySelector:()=>null},window:{innerHeight:500,visualViewport:{height:280}},requestAnimationFrame:fn=>fn(),setTimeout:()=>1,clearTimeout(){},
   savedServiceArea,normalizeServiceArea,serviceResults,serviceWhatsApp,notice(){},updateLocation(){},creditLabel(){},clearPhoto(){},t:k=>k,
   read:()=>'',write(){},remember(){},normalizeArea(){},motion:()=> 'instant',icon:()=>new Element(),sessionStorage:{getItem:()=>null,removeItem(){}},
   setCountry:value=>context.country=value,Event,setDirectory(){},root:{dataset:{},fzBilling:{refresh:async()=>{}}}};
@@ -41,10 +41,11 @@ test('inline directory opens without a modal and uses the existing service query
  const html=readFileSync(new URL('../source/findzia-services.html',import.meta.url),'utf8');
  assert.match(html,/<section id="svc-directory"/);assert.doesNotMatch(html,/svc-directory-(query|form|submit)/);
 });
-test('saved area searches without GPS; denied permission opens manual entry without charging',async()=>{
+test('saved area searches without GPS; failed network lookup offers manual entry without charging',async()=>{
  const f=fixture(),payloads=[];let gps=0,manual=0;
  f.$('#svc-query').value='نجار';f.$('#svc-area').value='السالمية';f.$('#svc-manual-fields').hidden=true;
  f.context.locateArea=async()=>{gps++;return false};f.context.manualArea=()=>manual++;f.context.renderResults=()=>{};
+ f.context.locateFromNetwork=async()=>false;
  f.context.root.fzBilling={beforeSearch:async()=>true,fetch:async(url,options)=>{payloads.push(JSON.parse(options.body));return{ok:true,json:async()=>({items:[],area:'السالمية',query:'نجار'})}},refresh:async()=>{}};
  f.run(section("$('#svc-form').addEventListener('submit'","try{for(const name of"));
  await f.$('#svc-form').events.submit({preventDefault(){}});
@@ -75,4 +76,46 @@ test('switching country clears in-flight results and restores only that country�
  f.run(section('const changeCountry=','$('+'\'#svc-country\').onchange'));
  f.run("changeCountry('KW')");assert.equal(f.context.country,'KW');assert.equal(f.$('#svc-area').value,'Salmiya');assert.equal(aborted,1);assert.equal(f.context.busy,false);assert.equal(f.context.results,null);assert.equal(f.$('#svc-results').hidden,true);
  f.run("changeCountry('SA')");assert.equal(f.$('#svc-area').value,'Riyadh');
+});
+
+
+test('explicit design intent searches once with automatic location, including after GPS denial',async()=>{
+ const f=fixture(),payloads=[],pending=[],saved=new Map();let credits=0,network=0;
+ const url='https://findzia.com/trial/services?designContext=1&q=Carpenter&searchIntent=12345678-1234-1234-1234-123456789abc';
+ Object.assign(f.context,{entryQuery:'Carpenter',location:{href:url,origin:'https://findzia.com'},parent:{location:{origin:'https://findzia.com'}},history:{state:{},replaceState:(state,title,url)=>f.context.location.href=url},sessionStorage:{getItem:k=>saved.get(k),setItem:(k,v)=>saved.set(k,v)},read:()=> '1',renderResults(){}});
+ f.$('#svc-query').value='Carpenter';f.$('#svc-manual-fields').hidden=true;
+ f.context.locateArea=()=>{throw Error('GPS must not be requested')};
+ f.context.locateFromNetwork=async()=>{network++;f.$('#svc-area').value='Kuwait City';return true};
+ f.context.root.fzBilling={beforeSearch:async()=>{credits++;return true},fetch:async(url,options)=>{payloads.push(JSON.parse(options.body));return{ok:true,json:async()=>({items:[],area:'Kuwait City'})}},refresh:async()=>{}};
+ f.run(section("$('#svc-form').addEventListener('submit'","try{for(const name of"));
+ f.$('#svc-form').requestSubmit=()=>pending.push(f.$('#svc-form').events.submit({preventDefault(){}}));
+ f.run(section('function startDesignSearch(){',"if(document.documentElement.dataset.serviceAutostart)"));
+ f.run('startDesignSearch();startDesignSearch()');await Promise.all(pending);
+ assert.equal(network,1);assert.equal(credits,1);assert.equal(payloads.length,1);assert.equal(payloads[0].area,'Kuwait City');
+ assert.equal(f.$('.svc-page').dataset.searching,'false');assert.ok(!f.context.location.href.includes('searchIntent'));
+ f.context.location.href=url;f.run('startDesignSearch()');assert.equal(pending.length,1);
+});
+
+test('a normal link or foreign parent cannot automatically submit a search',()=>{
+ for(const foreign of [false,true]){
+  const f=fixture();Object.assign(f.context,{entryQuery:'Carpenter',location:{href:'https://findzia.com/trial/services?designContext=1&q=Carpenter'+(foreign?'&searchIntent=12345678-1234-1234-1234-123456789abc':''),origin:'https://findzia.com'},parent:{location:{origin:foreign?'https://other.example':'https://findzia.com'}}});
+  f.run(section('function startDesignSearch(){',"if(document.documentElement.dataset.serviceAutostart)"));f.run('startDesignSearch()');assert.equal(f.$('#svc-form').submits,undefined);
+ }
+});
+
+test('failed automatic location reveals manual fallback before any credit check',async()=>{
+ const f=fixture();let credits=0;f.$('#svc-query').value='Carpenter';f.$('#svc-manual-fields').hidden=true;f.$('.svc-location').hidden=true;
+ f.context.locationSequence=0;f.context.locateFromNetwork=async()=>false;f.context.keepAreaVisible=()=>{};
+ f.context.root.fzBilling={beforeSearch:async()=>{credits++;return true},refresh:async()=>{}};
+ f.run(section('function manualArea(','function keepAreaVisible('));
+ f.run(section("$('#svc-form').addEventListener('submit'","try{for(const name of"));
+ await f.$('#svc-form').events.submit({preventDefault(){}});
+ assert.equal(credits,0);assert.equal(f.$('.svc-location').hidden,false);assert.equal(f.$('#svc-manual-fields').hidden,false);assert.equal(f.context.busy,false);
+});
+
+test('a cancelled location lookup cannot start a stale search',async()=>{
+ const f=fixture();let resolve,credits=0;f.$('#svc-query').value='Carpenter';f.$('#svc-manual-fields').hidden=true;
+ f.context.locateFromNetwork=()=>new Promise(r=>resolve=r);f.context.root.fzBilling={beforeSearch:async()=>{credits++;return true},refresh:async()=>{}};
+ f.run(section("$('#svc-form').addEventListener('submit'","try{for(const name of"));
+ const pending=f.$('#svc-form').events.submit({preventDefault(){}});f.context.generation++;resolve(true);await pending;assert.equal(credits,0);
 });

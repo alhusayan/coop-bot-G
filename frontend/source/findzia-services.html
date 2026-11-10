@@ -15,19 +15,19 @@
   <form id="svc-form" class="svc-search" role="search" data-dark-form novalidate>
    <div class="svc-fields">
     <label class="svc-field svc-query-field"><span class="svc-sr-only" data-copy="need">What do you need?</span><span class="svc-input-wrap"><span data-icon="search"></span><input id="svc-query" name="query" type="text" required minlength="2" maxlength="200" dir="auto" autocomplete="off" enterkeyhint="next" data-placeholder="queryExample" placeholder="Or type any service…"></span></label>
-    <div class="svc-location">
+    <div class="svc-location" hidden>
      <div class="svc-location-actions"><button type="button" id="svc-locate" class="svc-locate" data-copy-aria="useLocation" aria-label="Use my location"><span data-icon="locate"></span></button><button type="button" id="svc-manual" class="svc-manual" aria-controls="svc-manual-fields" aria-expanded="false" data-copy="enterArea">Enter area</button></div>
      <div id="svc-manual-fields" class="svc-manual-fields" hidden><label class="svc-field"><span class="svc-field-label" data-copy="where">City or area</span><input id="svc-area" name="area" type="text" required minlength="2" maxlength="120" dir="auto" autocomplete="address-level2" enterkeyhint="search" data-placeholder="areaExample" placeholder="e.g. Salmiya"></label><label class="svc-field svc-country-label"><span class="svc-field-label" data-copy="country">Country</span><select id="svc-country" aria-label="Country"></select></label></div>
      <p class="svc-location-status" id="svc-location-status" role="status" aria-live="polite" hidden></p>
     </div>
     <button type="submit" class="svc-primary" id="svc-submit"><span data-copy="search">Find someone nearby</span><span data-icon="arrow"></span></button>
    </div>
-   <div class="svc-form-meta"><p id="svc-cost" data-copy="costPending">Uses your Findzia credits.</p></div>
+   <div class="svc-form-meta"><p id="svc-cost" data-copy="costPending">Uses your Findzia credits.</p><button type="button" id="svc-change-area" data-copy="changeLocation" data-copy-aria="where">Change</button></div>
   </form>
   <div class="svc-message" id="svc-message" role="status" aria-live="polite" hidden></div>
   <section id="svc-results" class="svc-results" hidden aria-labelledby="svc-results-title">
    <div class="svc-results-head"><h2 id="svc-results-title" tabindex="-1" dir="auto"></h2><button id="svc-edit" type="button" aria-controls="svc-form" data-copy="newSearch">New search</button></div>
-   <div class="svc-result-meta"><p id="svc-results-location"></p><label class="svc-sort"><span class="svc-sr-only" data-copy="sort">Sort by</span><select id="svc-sort"><option value="relevance" data-copy="relevance">Best match</option><option value="rating" data-copy="rating">Highest rated</option></select></label></div>
+   <div class="svc-result-meta"><p id="svc-results-location"></p><button type="button" id="svc-results-change-area" class="svc-location-edit" data-copy="changeLocation" data-copy-aria="where">Change</button><label class="svc-sort"><span class="svc-sr-only" data-copy="sort">Sort by</span><select id="svc-sort"><option value="relevance" data-copy="relevance">Best match</option><option value="rating" data-copy="rating">Highest rated</option></select></label></div>
    <div class="svc-cards" id="svc-cards"></div>
    <p class="svc-results-note" data-copy="resultsNote">Google Maps listings · Confirm details with the provider.</p>
   </section>
@@ -36,3 +36,4 @@
 </div>
 <dialog id="svc-market" class="svc-market" data-no-i18n aria-labelledby="svc-market-title"><div class="svc-dialog-head"><h2 id="svc-market-title" data-copy="preferences">Your preferences</h2><button type="button" id="svc-market-close" aria-label="Close">×</button></div><label><span data-copy="country">Country</span><select data-profile-market-select aria-label="Country"></select></label><label><span data-copy="language">Language</span><select data-profile-language-select aria-label="Language"><option value="en">English</option><option value="ar">العربية</option></select></label><label><span data-copy="appearance">Appearance</span><select data-solar-mode aria-label="Appearance"><option value="auto" data-copy="auto">Automatic</option><option value="light" data-copy="light">Light</option><option value="dark" data-copy="dark">Dark</option></select></label></dialog>
 <noscript><p>Please enable JavaScript to search for services.</p></noscript>
+

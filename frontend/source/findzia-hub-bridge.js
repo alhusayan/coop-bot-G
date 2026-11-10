@@ -3,6 +3,7 @@
 'use strict';
 const params=new URLSearchParams(location.search),project=params.get('hubProject');
 if(params.get('designContext')==='1'&&parent!==window)document.documentElement.dataset.designContext='true';
+if(params.get('designContext')==='1'&&parent!==window&&/^[a-f0-9-]{36}$/i.test(params.get('searchIntent')||''))document.documentElement.dataset.serviceAutostart='true';
 const projectKeys=['shop','one','space','services','account'];
 // Shared links enter the same shell too. Unknown callback/payment parameters
 // retain their original handler and are never rewritten.
