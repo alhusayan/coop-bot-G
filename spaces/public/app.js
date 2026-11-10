@@ -76,7 +76,7 @@ function init(){
  accessCheck=(async()=>{
   try{const [config,detected]=await Promise.all([api('/api/config'),detectMarket({fallback:initialMarket})]);state.config=config;state.detectedMarket=detected;if(!marketChosen&&!state.job)state.market=detected;state.auth=true;syncMarket();shell?.setMarketLanguage();$('#auth-notice').classList.add('hidden');$('#retry-access').classList.add('hidden');return true;}
   catch(e){state.auth=e.code==='TRIAL_LINK_REQUIRED'?false:null;$('#auth-notice').textContent=state.auth===false?'This is a private preview. Open the invitation link shared with you.':'Couldn’t connect. Please try again.';$('#auth-notice').classList.remove('hidden');$('#retry-access').classList.remove('hidden');return false;}
-  finally{$$('[data-action="add-photo"], [data-action="upload"], [data-action="camera"], [data-action="demo"]').forEach(el=>el.disabled=state.auth!==true);$('#retry-access').disabled=false;}
+  finally{$('#retry-access').disabled=false;}
  })().finally(()=>accessCheck=null);
  return accessCheck;
 }
@@ -97,10 +97,10 @@ async function prepareRedesign(){
  const scope=$('#space-options input[name="scope"][value="'+(job.options?.scope||'full')+'"]');if(scope)scope.checked=true;
  view('setup');
 }
-async function loadFile(file){if(!file)return;resetRoom();$('#design-form').reset();const token=roomContext.capture();try{if(state.auth!==true&&!await init())return;const image=await normalizeImage(file);if(!roomContext.current(token))return;state.image=image;$('#upload-preview').src=state.image;view('setup');}catch(e){toast(e.message);}finally{$('#file-input').value='';$('#camera-input').value='';}}
+async function loadFile(file){if(!file)return;resetRoom();$('#design-form').reset();const token=roomContext.capture();try{const image=await normalizeImage(file);if(!roomContext.current(token))return;state.image=image;$('#upload-preview').src=state.image;view('setup');}catch(e){toast(e.message);}finally{$('#file-input').value='';$('#camera-input').value='';}}
 $('#file-input').addEventListener('change',e=>loadFile(e.target.files[0]));$('#camera-input').addEventListener('change',e=>loadFile(e.target.files[0]));
 for(const e of ['dragenter','dragover'])$('#drop-zone').addEventListener(e,x=>{x.preventDefault();$('#drop-zone').classList.add('dragging');});for(const e of ['drop','dragleave'])$('#drop-zone').addEventListener(e,x=>{x.preventDefault();$('#drop-zone').classList.remove('dragging');if(e==='drop')loadFile(x.dataTransfer.files[0]);});
-$('#design-form').addEventListener('submit',async e=>{e.preventDefault();if(submitting)return;if(!state.image)return toast('Add a photo of your space first.');submitting=true;const token=roomContext.begin();clearTimeout(pollTimer);$('#generate-button').disabled=true;try{const authorization=await document.querySelector('.fz-home')?.fzBilling?.authorizeDesign(3);if(!authorization)return;const job=await api('/api/jobs',{method:'POST',headers:{...authorization,'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({...Object.fromEntries(new FormData(e.target)),market:state.market,language:shell?.getLanguage()||'en',image:state.image})});if(!applyJob(job,token))return;renderKey='';view('designs');poll();}catch(e){toast(e.message);}finally{submitting=false;$('#generate-button').disabled=false;}});
+$('#design-form').addEventListener('submit',async e=>{e.preventDefault();if(submitting)return;if(!state.image)return toast('Add a photo of your space first.');submitting=true;const token=roomContext.begin();clearTimeout(pollTimer);$('#generate-button').disabled=true;try{if(state.auth!==true&&!await init())return;await shellReady;if(!roomContext.current(token))return;if(!document.querySelector('.fz-home')?.fzBilling?.authorizeDesign)throw Error('Please try again when your account has loaded.');const authorization=await document.querySelector('.fz-home')?.fzBilling?.authorizeDesign(3);if(!authorization)return;const job=await api('/api/jobs',{method:'POST',headers:{...authorization,'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({...Object.fromEntries(new FormData(e.target)),market:state.market,language:shell?.getLanguage()||'en',image:state.image})});if(!applyJob(job,token))return;renderKey='';view('designs');poll();}catch(e){toast(e.message);}finally{submitting=false;$('#generate-button').disabled=false;}});
 function active(){return state.job?.designs.some(d=>['generating','analyzing','searching','adapting'].includes(d.status)||d.items?.some(x=>x.status==='searching'));}
 function poll(){clearTimeout(pollTimer);const token=roomContext.capture(),id=state.job?.id;if(!id)return;pollTimer=setTimeout(async()=>{if(!roomContext.current(token)||state.job?.id!==id)return;try{const job=await api('/api/jobs/'+id);if(!applyJob(job,token)){if(roomContext.current(token)&&state.job?.id===id&&active())poll();return;}pollErrors=0;if(state.view==='designs')renderDesigns();if(state.view==='shopping')renderShop();if(active())poll();else document.querySelector('.fz-home')?.fzBilling?.refresh(true);}catch(e){if(!roomContext.current(token))return;pollErrors++;if(pollErrors===2)toast(translate('Reconnecting to your search…','جارٍ الاتصال…'));if(state.view==='shopping')renderShop();if(state.view==='designs')renderDesigns();if(active())poll();else toast(e.message);}},Math.min(10000,1500*(pollErrors+1)));}
 function renderDesigns(){
@@ -356,6 +356,9 @@ document.addEventListener('load',event=>{if(state.view==='shopping'&&event.targe
 document.addEventListener('spaces:account-navigation',()=>{
  try{sessionStorage.setItem('spaces-account-room',JSON.stringify({job:state.job?.id,design:state.design,view:state.view,market:state.market,at:Date.now()}));}catch{}
 });
+// Photo selection is local: enable it as soon as its handlers are attached.
+// Access and credit checks still run before generating any design.
+$$('[data-action="add-photo"], [data-action="upload"], [data-action="camera"], [data-action="demo"]').forEach(el=>el.disabled=false);
 init().then(async allowed=>{
  if(!allowed)return;
  let saved;try{saved=JSON.parse(sessionStorage.getItem('spaces-account-room'));sessionStorage.removeItem('spaces-account-room');}catch{}
@@ -366,7 +369,7 @@ init().then(async allowed=>{
 });
 
 
-mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();shell.setMarketLanguage();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));
+const shellReady=mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();shell.setMarketLanguage();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));
 
 document.addEventListener('spaces:locale',()=>{if(state.view==='designs')renderDesigns();if(state.view==='shopping')renderShop();originalLayer.refreshLanguage?.();});
 
