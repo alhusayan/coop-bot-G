@@ -66,13 +66,30 @@ def whatsapp_link(value):
             return ''
         if url.hostname in {'wa.me', 'www.wa.me'}:
             number = url.path.strip('/')
-        elif url.hostname in {'api.whatsapp.com', 'www.whatsapp.com'} and url.path.rstrip('/') == '/send':
+        elif url.hostname in {'api.whatsapp.com', 'www.whatsapp.com', 'whatsapp.com', 'web.whatsapp.com'} and url.path.rstrip('/') == '/send':
             number = parse_qs(url.query).get('phone', [''])[0]
         else:
             return ''
         return 'https://wa.me/' + number if re.fullmatch(r'[1-9]\d{6,14}', number) else ''
     except (TypeError, ValueError):
         return ''
+
+
+PLATFORM_HANDLES = {'whatsapp', 'whatsappbusiness', 'instagram', 'facebook', 'meta',
+                    'google', 'youtube', 'tiktok', 'wix', 'wordpress', 'squarespace',
+                    'webflow', 'godaddy', 'linktree'}
+
+
+def platform_contact_page(value):
+    """A platform's own navigation/footer is not the listed business's identity."""
+    try:
+        host = (urlsplit(value).hostname or '').lower()
+        domains = {'whatsapp.com', 'wa.me', 'wa.link', 'facebook.com', 'fb.com',
+                   'messenger.com', 'm.me', 'instagram.com', 'tiktok.com',
+                   'google.com', 'maps.app.goo.gl', 'youtube.com', 'youtu.be'}
+        return any(host == domain or host.endswith('.' + domain) for domain in domains)
+    except (ValueError, TypeError, AttributeError):
+        return True
 
 
 def instagram_link(value):
@@ -90,7 +107,7 @@ def instagram_link(value):
                     'about', 'legal', 'privacy', 'terms', 'developer', 'developers',
                     'web', 'share', 'sharing', 'tv', 'directory', 'challenge', 'oauth'}
         if (not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.]{0,29}', handle)
-                or handle.endswith('.') or '..' in handle or handle.lower() in reserved):
+                or handle.endswith('.') or '..' in handle or handle.lower() in reserved | PLATFORM_HANDLES):
             return ''
         return f'https://www.instagram.com/{handle}/'
     except ValueError:
@@ -115,12 +132,17 @@ def published_contacts(url, safe_get):
               [('whatsapp', whatsapp_link(url)), ('instagram', instagram_link(url))] if value}
     if direct:
         return direct
-    if not url or not safe_get:
+    if not url or not safe_get or platform_contact_page(url):
         return {}
     response = None
     try:
         # Reuses the main application's DNS, connected-peer and redirect checks.
         response = safe_get(url, timeout=(1, 2), max_redirects=1)
+        # Some listings call a WhatsApp contact page their website, including
+        # shortened links. Never scrape its corporate Instagram/footer links.
+        destination = getattr(response, 'url', None)
+        if isinstance(destination, str) and platform_contact_page(destination):
+            return {}
         if response.status_code != 200 or 'html' not in response.headers.get('content-type', '').lower():
             return {}
         parser, raw, deadline = ContactLinks(), bytearray(), time.monotonic() + 2

@@ -24,7 +24,7 @@ if(embedded){
    try{const control=parent.document.querySelector(selector);if(control&&!control.disabled){mode==='photo'?control.click():control.focus();return true}}catch{}
    post({type:'composer',mode:mode==='photo'?'photo':'query'});return false;
   },
-  action,connectSpace(adapter){space=adapter;publishState()},
+  action,connectSpace(adapter){space=adapter;publishState();post({type:'surface-ready'})},
   authReturnURL(){const url=new URL(parent.location.href);url.hash='';url.searchParams.set('project',project);return url.href},
   navigateAuth(value){const url=new URL(value);if(url.protocol!=='https:'||!['https://accounts.google.com','https://appleid.apple.com'].includes(url.origin))throw Error('invalid_redirect');parent.location.assign(url.href)}
  };

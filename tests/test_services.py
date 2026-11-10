@@ -285,6 +285,35 @@ class ServicesTests(unittest.TestCase):
         safe.side_effect = ValueError('unsafe_outbound_url')
         self.assertEqual(published_contacts('http://127.0.0.1', safe), {})
 
+    def test_platform_footer_is_never_a_business_instagram(self):
+        from findzia_services import published_contacts, instagram_link
+        safe = Mock()
+        for url in ['https://www.whatsapp.com/', 'https://api.whatsapp.com/message/ABC',
+                    'https://wa.link/abc', 'https://www.facebook.com/fixture']:
+            self.assertEqual(published_contacts(url, safe), {})
+        safe.assert_not_called()
+        self.assertEqual(published_contacts('https://whatsapp.com/send?phone=96550266001', safe),
+                         {'whatsapp': 'https://wa.me/96550266001'})
+        for handle in ['whatsapp', 'WhatsAppBusiness', 'instagram', 'wix']:
+            self.assertEqual(instagram_link('https://www.instagram.com/' + handle + '/'), '')
+        response = Mock(status_code=200, headers={'content-type': 'text/html'},
+                        url='https://www.whatsapp.com/contact/', _findzia_session=None)
+        response.iter_content.return_value = [b'<a href="https://instagram.com/whatsapp">Instagram</a>']
+        safe.return_value = response
+        self.assertEqual(published_contacts('https://example.com/contact', safe), {})
+        response.iter_content.assert_not_called()
+        response.close.assert_called_once()
+
+    def test_platform_profile_does_not_hide_the_business_profile(self):
+        from findzia_services import published_contacts
+        response = Mock(status_code=200, headers={'content-type': 'text/html'},
+                        url='https://example.com/', _findzia_session=None)
+        response.iter_content.return_value = [
+            b'<a href="https://www.instagram.com/whatsapp/">WhatsApp</a>',
+            b'<a href="https://www.instagram.com/fixture.carpentry/">Our Instagram</a>']
+        result = published_contacts('https://example.com/', Mock(return_value=response))
+        self.assertEqual(result, {'instagram': 'https://www.instagram.com/fixture.carpentry/'})
+
 
 if __name__ == '__main__':
     unittest.main()

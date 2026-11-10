@@ -142,3 +142,13 @@ html[data-theme=dark]:not([data-project-open]) .home-content{background:#17281ef
 html[data-theme=dark]:not([data-project-open]) :is(.home-content h1,.home-action){color:#f3f4eb}
 html[data-theme=dark]:not([data-project-open]) .home-hero:after{background:linear-gradient(transparent 48%,#15251d2b 72%,#15251d 100%)}
 html[data-theme=dark]:not([data-project-open]) .home-hero{background:#15251d}
+
+/* Design keeps the same bright room while its foreground controls load. */
+html[data-active-project=space] .home-hero:after{background:linear-gradient(transparent 48%,#f4f1e92b 72%,#f4f1e9 100%)}
+html[data-theme=dark][data-active-project=space] .home-hero:after{background:linear-gradient(transparent 48%,#15251d2b 72%,#15251d 100%)}
+.project-content iframe[data-surface=pending]{opacity:0;pointer-events:none}
+html[data-active-project=space] #layer-status{justify-content:flex-end;gap:12px;padding:24px;color:var(--ink);text-shadow:none}
+html[data-active-project=space] #layer-status [data-t=loading]{display:flex;align-items:center;justify-content:center;gap:12px;width:min(660px,100%);min-height:120px;padding:24px;background:var(--bg);border:1px solid var(--line);border-radius:24px;box-shadow:0 8px 28px #203a2e12}
+html[data-active-project=space] #layer-status [data-t=loading]:before{content:'';width:22px;height:22px;border:2px solid var(--line);border-top-color:#357151;border-radius:50%;animation:entry-loading .9s linear infinite}
+@keyframes entry-loading{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){html[data-active-project=space] #layer-status [data-t=loading]:before{animation:none}}

@@ -38,7 +38,12 @@ export function serviceWhatsApp(row){
 export function serviceInstagram(row){
  if(!row?.instagram_source||row.instagram_source!==row.website||!/^https?:\/\//.test(row.instagram_source))return '';
  const match=/^https:\/\/www\.instagram\.com\/([A-Za-z0-9_][A-Za-z0-9_.]{0,29})\/$/.exec(row.instagram||'');
- if(!match||match[1].endsWith('.')||match[1].includes('..')||/^(p|reel|reels|stories|explore|accounts|direct|about|legal|privacy|terms|developer|developers|web|share|sharing|tv|directory|challenge|oauth)$/i.test(match[1]))return '';
+ if(!match||match[1].endsWith('.')||match[1].includes('..')||/^(p|reel|reels|stories|explore|accounts|direct|about|legal|privacy|terms|developer|developers|web|share|sharing|tv|directory|challenge|oauth|whatsapp|whatsappbusiness|instagram|facebook|meta|google|youtube|tiktok|wix|wordpress|squarespace|webflow|godaddy|linktree)$/i.test(match[1]))return '';
+ try{
+  const source=new URL(row.instagram_source),host=source.hostname.toLowerCase();
+  if(source.username||source.password)return '';
+  if(['whatsapp.com','wa.me','wa.link','facebook.com','fb.com','messenger.com','m.me','tiktok.com','google.com','maps.app.goo.gl','youtube.com','youtu.be'].some(domain=>host===domain||host.endsWith('.'+domain)))return '';
+ }catch{return '';}
  return row.instagram;
 }
 export function serviceLocation(data){

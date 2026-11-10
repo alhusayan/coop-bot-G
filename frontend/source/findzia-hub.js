@@ -88,8 +88,10 @@ function openProductSearch(){
  query.focus({preventScroll:true});
 }
 function revealFrame(){
- if(!frame||window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return;
- frame.animate?.([{opacity:0},{opacity:1}],{duration:420,easing:'cubic-bezier(.2,.75,.25,1)'});
+ if(!frame||frame.dataset.surface==='ready')return;
+ frame.dataset.surface='ready';status.hidden=true;
+ if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return;
+ frame.animate?.([{opacity:0,transform:'translateY(8px)'},{opacity:1,transform:'translateY(0)'}],{duration:240,easing:'cubic-bezier(.2,.75,.25,1)'});
 }
 function measureHeader(){const height=Math.ceil(header.getBoundingClientRect().height);if(height)html.style.setProperty('--header-height',height+'px')}
 function renderMarkets(){const select=$('#hub-country');select.replaceChildren();let names;try{names=new Intl.DisplayNames([lang],{type:'region'})}catch{}for(const code of marketOptions){const option=document.createElement('option');option.value=code;option.textContent=flag(code)+' '+(names?.of(code)||code);select.append(option)}select.value=currentCountry}
@@ -149,12 +151,12 @@ function ensureProjectFrame(){
  if(frameMatchesProject(frame,active))return true;
  mountFrame();return false;
 }
-function ready(){if(!ensureProjectFrame())return;clearTimeout(loadTimer);isReady=true;if(sessions.has(active))sessions.get(active).ready=true;status.hidden=true;retry.hidden=true;send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto',country:read('findzia-market-country-v1')});headerState(action('state')||{});if(pendingQuery!==null){query.value=pendingQuery;action('prepare',{query:pendingQuery});pendingQuery=null}syncAccount()}
+function ready(){if(!ensureProjectFrame())return;revealFrame();clearTimeout(loadTimer);isReady=true;if(sessions.has(active))sessions.get(active).ready=true;status.hidden=true;retry.hidden=true;send({type:'preferences',language:lang,theme:read('findzia-appearance-v1')||'auto',country:read('findzia-market-country-v1')});headerState(action('state')||{});if(pendingQuery!==null){query.value=pendingQuery;action('prepare',{query:pendingQuery});pendingQuery=null}syncAccount()}
 function showError(){status.hidden=false;status.querySelector('[data-t]').textContent=t('error');retry.hidden=false}
 function mountFrame(hash=''){
  const old=sessions.get(active);if(old){old.frame.remove();sessions.delete(active)}isReady=false;query.value='';query.disabled=true;$('#submit-search').disabled=true;$('#header-camera').disabled=true;status.hidden=false;retry.hidden=true;status.querySelector('[data-t]').textContent=t('loading');
  const url=new URL(projects[active].path,location.origin);if(active!=='account'){const outer=new URL(location.href);for(const key of ['q','country'])if(outer.searchParams.has(key))url.searchParams.set(key,outer.searchParams.get(key))}url.searchParams.set('hub','1');url.searchParams.set('hubProject',active);if(active==='account')url.searchParams.set('account','1');if(hash)url.hash=hash;
- frame=document.createElement('iframe');frame.name='findzia-project-'+active;frame.title=active==='account'?t('account'):projects[active].title;frame.allow='camera; microphone; geolocation; payment; clipboard-write';frame.referrerPolicy='same-origin';frame.src=url.href;const mountedFrame=frame;frame.addEventListener('error',()=>{if(frame===mountedFrame)showError()});frame.addEventListener('load',()=>{if(frame===mountedFrame)ensureProjectFrame()});content.append(frame);sessions.set(active,{frame,ready:false});
+ frame=document.createElement('iframe');frame.dataset.surface='pending';frame.name='findzia-project-'+active;frame.title=active==='account'?t('account'):projects[active].title;frame.allow='camera; microphone; geolocation; payment; clipboard-write';frame.referrerPolicy='same-origin';frame.src=url.href;const mountedFrame=frame;frame.addEventListener('error',()=>{if(frame===mountedFrame)showError()});frame.addEventListener('load',()=>{if(frame===mountedFrame&&ensureProjectFrame())revealFrame()});content.append(frame);sessions.set(active,{frame,ready:false});
  clearTimeout(loadTimer);loadTimer=setTimeout(showError,30000);
 }
 function openProject(key,{push=true,hash='',prefill=null,carryQuery=false}={}){
@@ -163,8 +165,8 @@ function openProject(key,{push=true,hash='',prefill=null,carryQuery=false}={}){
  endSearchFocus();
  for(const session of sessions.values())session.frame.hidden=true;frame=null;clearTimeout(loadTimer);isReady=false;query.value='';pendingQuery=prefill;if(!active)returnFocus=document.activeElement;active=key;overlayOpen=false;spaceScene=key==='space';productLanding=['shop','one'].includes(key);render();headerState({});if(!layer.open)layer.show();
  if(push){const url=new URL(location.href);if(!carryQuery)url.searchParams.delete('q');url.searchParams.set('project',key);url.hash='';history.pushState({findziaHub:true},'',url.pathname+url.search)}
- const saved=sessions.get(key);if(saved&&!hash&&frameMatchesProject(saved.frame,key)){frame=saved.frame;frame.hidden=false;status.hidden=saved.ready;retry.hidden=true;if(saved.ready){ready();if(key==='account')send({type:'account'})}else loadTimer=setTimeout(showError,30000)}else mountFrame(hash);
- revealFrame();
+ const saved=sessions.get(key);if(saved&&!hash&&frameMatchesProject(saved.frame,key)){frame=saved.frame;frame.hidden=false;status.hidden=saved.ready||frame.dataset.surface==='ready';retry.hidden=true;if(saved.ready){ready();if(key==='account')send({type:'account'})}else if(frame.dataset.surface!=='ready')loadTimer=setTimeout(showError,30000)}else mountFrame(hash);
+ if(saved?.ready)revealFrame();
 }
 function closeProject({update=true}={}){
  endSearchFocus();
@@ -183,6 +185,7 @@ window.addEventListener('message',event=>{
  const known=[...sessions.values()].find(session=>session.frame.contentWindow===event.source);if(!known)return;
  const data=event.data;if(event.source!==frame?.contentWindow){if(data.type==='ready')known.ready=true;return}if(!ensureProjectFrame())return;if(data.type==='ready')known.ready=true;
  if(data.type==='ready')ready();
+ if(data.type==='surface-ready'&&active==='space'){clearTimeout(loadTimer);revealFrame();}
  if(data.type==='composer'){if(data.mode==='photo')$('#header-camera').click();else openProductSearch();}
  if(data.type==='header-state')headerState(data);
  if(data.type==='search-blocked'){endSearchFocus();notice('unavailable',typeof data.message==='string'?data.message.slice(0,500):'')}
@@ -228,3 +231,4 @@ viewport();render();syncTheme();syncAccount();
 const initial=new URL(location.href),auth=/(?:^#|&)(?:findzia-login|findzia-auth-error)=/.test(initial.hash),key=initial.searchParams.get('project');
 if(auth){const hash=initial.hash;initial.hash='';const project=Object.hasOwn(projects,key)?key:'account';initial.searchParams.set('project',project);history.replaceState({findziaHub:true},'',initial.pathname+initial.search);openProject(project,{push:false,hash})}else if(Object.hasOwn(projects,key))openProject(key,{push:false});else if(initial.searchParams.has('q'))openProject('shop',{push:false});
 })();
+

@@ -128,6 +128,8 @@ test('details show only source-backed Instagram profiles, without duplicate webs
   ['https://example.com','https://www.instagram.com/fixture_company/','https://unrelated.example',1],
   ['https://example.com','https://www.instagram.com/p/','https://example.com',1],
   ['https://example.com','https://www.instagram.com.evil.com/company/','https://example.com',1],
+  ['https://example.com','https://www.instagram.com/whatsapp/','https://example.com',1],
+  ['https://api.whatsapp.com/message/ABC','https://www.instagram.com/fixture_company/','https://api.whatsapp.com/message/ABC',1],
   ['https://example.com','','',1]
  ]){
   const f=fixture();f.context.results={area:'Kuwait',items:[{title:'Fixture carpenter',website,instagram,instagram_source:source}]};
