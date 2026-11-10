@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from findzia_services import install_services, listings, phone, PATH
+from findzia_services import install_services, listings, phone, service_areas, PATH
 from findzia_billing import CreditMiddleware
 
 
@@ -47,10 +47,65 @@ class ServicesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['items'][0]['tel'], 'tel:+96522221234')
         self.assertEqual(runtime.outcomes, [True])
-        args = provider.call_args.args
-        self.assertEqual(args[0], 'places')
-        self.assertEqual(args[1]['gl'], 'kw')
-        self.assertIn('السالمية, Kuwait', args[1]['q'])
+        self.assertEqual(provider.call_count, 2)
+        for call in provider.call_args_list:
+            self.assertEqual(call.args[0], 'places')
+            self.assertEqual(call.args[1]['gl'], 'kw')
+        self.assertIn('سباك, السالمية, Kuwait', [call.args[1]['q'] for call in provider.call_args_list])
+        self.assertEqual(response.json()['search_area'], 'Kuwait')
+
+    def test_wider_search_runs_in_parallel_merges_and_charges_once(self):
+        from threading import Barrier
+        started = Barrier(2, timeout=3)
+        def lookup(kind, body, timeout):
+            started.wait()  # A sequential implementation cannot pass this barrier.
+            if body['q'] == 'Electrician, Kuwait':
+                return {'places': [
+                    {'title': 'Same local business', 'address': 'Khaitan', 'cid': '123456'},
+                    {'title': 'Hawally electrician', 'address': 'Hawally, Kuwait', 'cid': '234567'},
+                    {'title': 'Shuwaikh electrician', 'address': 'Shuwaikh, Kuwait', 'cid': '345678'}]}
+            return {'places': [{'title': 'Local electrician', 'address': 'Khaitan, Kuwait', 'cid': '123456'}]}
+        client, provider, runtime = self.client(None)
+        provider.side_effect = lookup
+        result = self.search(client, query='Electrician', area='Abraq Khaytan, Kuwait City').json()
+        self.assertEqual([row['title'] for row in result['items']],
+                         ['Local electrician', 'Hawally electrician', 'Shuwaikh electrician'])
+        self.assertEqual(result['area'], 'Abraq Khaytan, Kuwait City')
+        self.assertEqual(result['search_area'], 'Kuwait')
+        self.assertEqual(runtime.outcomes, [True])
+        self.assertEqual(provider.call_count, 2)
+
+    def test_wider_search_failure_keeps_local_results_and_honest_scope(self):
+        client, provider, runtime = self.client(None)
+        def lookup(kind, body, timeout):
+            if body['q'] == 'سباك, Kuwait':
+                raise RuntimeError('provider unavailable')
+            return {'places': [{'title': 'Local plumber', 'address': 'Salmiya, Kuwait'}]}
+        provider.side_effect = lookup
+        response = self.search(client)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['search_area'], 'السالمية')
+        self.assertEqual(runtime.outcomes, [True])
+
+    def test_wider_search_can_recover_from_local_failure(self):
+        client, provider, runtime = self.client(None)
+        provider.side_effect = lambda kind, body, timeout: (
+            {'places': [{'title': 'Plumber', 'address': 'Hawally, Kuwait'}]}
+            if body['q'] == 'سباك, Kuwait' else None)
+        self.assertEqual(self.search(client).json()['items'][0]['title'], 'Plumber')
+        self.assertEqual(runtime.outcomes, [True])
+
+    def test_expansion_stays_bounded_and_does_not_search_whole_large_countries(self):
+        self.assertEqual(service_areas('Kuwait', 'kw', 'Kuwait'), ['Kuwait'])
+        self.assertEqual(service_areas('Chelsea, London', 'gb', 'United Kingdom'), ['Chelsea, London', 'London'])
+        self.assertEqual(service_areas('Chelsea, London, UK', 'gb', 'United Kingdom'), ['Chelsea, London, UK', 'London'])
+        self.assertEqual(service_areas('Brooklyn, New York, USA', 'us', 'United States'), ['Brooklyn, New York, USA', 'New York'])
+        self.assertEqual(service_areas('London', 'gb', 'United Kingdom'), ['London'])
+        self.assertEqual(service_areas('New York, NY 10001', 'us', 'United States'), ['New York, NY 10001'])
+
+    def test_expanded_results_allow_more_options_with_a_hard_cap(self):
+        places = [{'title': f'Business {i}', 'address': f'Area {i}, Kuwait'} for i in range(60)]
+        self.assertEqual(len(listings({'places': places}, 'kw')), 24)
 
     def test_zero_balance_never_calls_provider(self):
         client, provider, runtime = self.client({'places': []}, blocked=True)
@@ -189,3 +244,4 @@ class ServicesTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

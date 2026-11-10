@@ -17,6 +17,47 @@ from fastapi.responses import JSONResponse
 PATH = '/api/services/search'
 
 
+def service_areas(area, country, country_name):
+    """Keep the user's area, plus one wider scope; never infer a kilometre radius."""
+    if country == 'kw':
+        # Home trades commonly serve customers across Kuwait, not just one district.
+        wider = country_name
+    else:
+        parts = [part.strip() for part in re.split('[,،]', area) if part.strip()]
+        country_labels = {country.casefold(), country_name.casefold()}
+        country_labels.update({'gb': {'uk', 'united kingdom'},
+                               'us': {'usa', 'united states', 'united states of america'}}.get(country, set()))
+        while len(parts) > 1 and parts[-1].casefold() in country_labels:
+            parts.pop()
+        wider = parts[-1] if len(parts) > 1 or len(parts) == 1 and parts[0] != area else area
+        # Avoid treating a postcode/state abbreviation as a wider city search.
+        if len(wider) < 3 or any(char.isdigit() for char in wider):
+            wider = area
+    return [area] if wider.casefold() == area.casefold() else [area, wider]
+
+
+async def discover_services(provider, query, area, country, country_name, language):
+    areas = service_areas(area, country, country_name)
+
+    async def discover(scope):
+        location = scope if scope.casefold() == country_name.casefold() else f'{scope}, {country_name}'
+        body = {'q': f'{query}, {location}', 'gl': country, 'hl': language}
+        try:
+            data = await asyncio.wait_for(asyncio.to_thread(provider, 'places', body, (4, 18)), timeout=24)
+            return data if isinstance(data, dict) and isinstance(data.get('places'), list) else None
+        except Exception:
+            return None
+
+    # Two bounded calls share one request/credit, and run together rather than sequentially.
+    responses = await asyncio.gather(*(discover(scope) for scope in areas))
+    valid = [(scope, data) for scope, data in zip(areas, responses) if data is not None]
+    if not valid:
+        raise RuntimeError('services_unavailable')
+    # Keep the local provider ordering first; append wider matches and deduplicate below.
+    places = [place for _, data in valid for place in data['places'][:30]]
+    return listings({'places': places}, country), valid[-1][0]
+
+
 def whatsapp_link(value):
     """Accept explicit published click-to-chat links, never derive one from a phone."""
     try:
@@ -125,8 +166,8 @@ def phone(value, country=None):
 
 
 def listings(data, country=None):
-    rows, seen = [], set()
-    for place in data.get('places', [])[:30]:
+    rows, seen, seen_cids = [], set(), set()
+    for place in data.get('places', [])[:60]:
         if not isinstance(place, dict):
             continue
         title, address = clean(place.get('title')), clean(place.get('address'), 400)
@@ -142,9 +183,12 @@ def listings(data, country=None):
             continue
         maps = 'https://www.google.com/maps?' + urlencode({'cid': cid}) if re.fullmatch(r'\d{5,25}', cid) else 'https://www.google.com/maps/search/?' + urlencode({'api': 1, 'query': title + ' ' + address})
         key = (title.casefold(), address.casefold())
-        if key in seen:
+        valid_cid = cid if re.fullmatch(r'\d{5,25}', cid) else ''
+        if key in seen or valid_cid and valid_cid in seen_cids:
             continue
         seen.add(key)
+        if valid_cid:
+            seen_cids.add(valid_cid)
         number, tel = phone(place.get('phoneNumber'), country)
         rating = place.get('rating')
         count = place.get('ratingCount')
@@ -152,7 +196,7 @@ def listings(data, country=None):
                          phone=number, tel=tel, website=website(place.get('website')), link=maps,
                          rating=rating if type(rating) in (int, float) and 0 < rating <= 5 else None,
                          reviews=count if type(count) is int and count >= 0 else None))
-        if len(rows) == 12:
+        if len(rows) == 24:
             break
     return rows
 
@@ -199,14 +243,12 @@ def install_services(app, provider, countries, configured, *, vision=None, safe_
             if photo['status'] != 'clear':
                 return reply({'ok': True, 'items': [], 'photo': photo, 'area': area, 'country': country.upper()})
             query = photo['options'][0][language]
-        # Explicit area and country keep a Kuwait search in Kuwait, not its shopping fallback market.
-        body = {'q': f'{query}, {area}, {countries[country]}', 'gl': country, 'hl': language}
         try:
-            data = await asyncio.wait_for(asyncio.to_thread(provider, 'places', body, (4, 18)), timeout=24)
+            rows, search_area = await discover_services(provider, query, area, country, countries[country], language)
         except Exception:
             return reply({'error': 'services_unavailable'}, 503)
-        if not isinstance(data, dict) or not isinstance(data.get('places'), list):
-            return reply({'error': 'services_unavailable'}, 503)
-        rows = await add_published_contacts(listings(data, country), safe_get)
+        rows = await add_published_contacts(rows, safe_get)
         return reply({'ok': True, 'items': rows, 'query': query, 'area': area,
+                      'search_area': search_area,
                       'country': country.upper(), 'source': 'Google Maps', 'photo': photo})
+

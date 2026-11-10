@@ -155,7 +155,7 @@ function renderResults(focus=true){
  $('#svc-suggestions').hidden=!!view.total;
  $('#svc-form').hidden=!!view.total;$('#svc-photo-panel').hidden=!!view.total||!pendingPhoto;
  text($('#svc-results-title'),t('resultsHeading'));
- text($('#svc-results-location'),`${results.area} · ${view.total} ${t('count')}`);
+ text($('#svc-results-location'),`${results.search_area||results.area} · ${view.total} ${t('count')}`);
  const box=$('#svc-cards');box.replaceChildren();
  view.items.forEach((row,index)=>{
   const card=node('article','svc-card'),title=node('h3','',row.title);
