@@ -8,7 +8,7 @@ import re
 import time
 import phonenumbers
 from html.parser import HTMLParser
-from urllib.parse import urlencode, urlsplit, parse_qs
+from urllib.parse import urlencode, urlsplit, parse_qs, urljoin
 from findzia_service_photo import normalize_photo, photo_suggestions
 
 from fastapi import Request
@@ -75,37 +75,64 @@ def whatsapp_link(value):
         return ''
 
 
+def instagram_link(value):
+    """Only a published profile URL, never a guessed handle or a post/share link."""
+    if not isinstance(value, str) or re.search(r'\s', value):
+        return ''
+    try:
+        url = urlsplit(value)
+        if (url.scheme not in {'http', 'https'} or url.username or url.password
+                or url.port not in (None, 80, 443)
+                or url.hostname not in {'instagram.com', 'www.instagram.com'}):
+            return ''
+        handle = url.path.strip('/')
+        reserved = {'p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct',
+                    'about', 'legal', 'privacy', 'terms', 'developer', 'developers',
+                    'web', 'share', 'sharing', 'tv', 'directory', 'challenge', 'oauth'}
+        if (not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.]{0,29}', handle)
+                or handle.endswith('.') or '..' in handle or handle.lower() in reserved):
+            return ''
+        return f'https://www.instagram.com/{handle}/'
+    except ValueError:
+        return ''
+
+
 class ContactLinks(HTMLParser):
     def __init__(self):
         super().__init__()
         self.whatsapp = ''
+        self.instagram = ''
 
     def handle_starttag(self, tag, attrs):
-        if tag == 'a' and not self.whatsapp:
-            self.whatsapp = whatsapp_link(dict(attrs).get('href', ''))
+        if tag == 'a':
+            href = urljoin('https://placeholder.invalid/', dict(attrs).get('href') or '')
+            self.whatsapp = self.whatsapp or whatsapp_link(href)
+            self.instagram = self.instagram or instagram_link(href)
 
 
-def published_whatsapp(url, safe_get):
-    direct = whatsapp_link(url)
+def published_contacts(url, safe_get):
+    direct = {key: value for key, value in
+              [('whatsapp', whatsapp_link(url)), ('instagram', instagram_link(url))] if value}
     if direct:
         return direct
     if not url or not safe_get:
-        return ''
+        return {}
     response = None
     try:
         # Reuses the main application's DNS, connected-peer and redirect checks.
         response = safe_get(url, timeout=(1, 2), max_redirects=1)
         if response.status_code != 200 or 'html' not in response.headers.get('content-type', '').lower():
-            return ''
+            return {}
         parser, raw, deadline = ContactLinks(), bytearray(), time.monotonic() + 2
         for chunk in response.iter_content(16384):
             raw.extend(chunk)
             if len(raw) > 262144 or time.monotonic() > deadline:
                 break
         parser.feed(bytes(raw[:262144]).decode('utf-8', 'replace'))
-        return parser.whatsapp
+        return {key: value for key, value in
+                [('whatsapp', parser.whatsapp), ('instagram', parser.instagram)] if value}
     except Exception:
-        return ''
+        return {}
     finally:
         if response is not None:
             response.close()
@@ -114,12 +141,14 @@ def published_whatsapp(url, safe_get):
                 session.close()
 
 
+def published_whatsapp(url, safe_get):
+    return published_contacts(url, safe_get).get('whatsapp', '')
+
+
 async def add_published_contacts(rows, safe_get):
-    if not safe_get:
-        return rows
     async def contact(row):
-        value = await asyncio.to_thread(published_whatsapp, row['website'], safe_get)
-        return {'whatsapp': value, 'whatsapp_source': row['website']} if value else {}
+        values = await asyncio.to_thread(published_contacts, row['website'], safe_get)
+        return {**values, **{key + '_source': row['website'] for key in values}}
     tasks = [asyncio.create_task(contact(row)) for row in rows]
     # Contacts enrich existing results; an unavailable website never blocks search.
     done, pending = await asyncio.wait(tasks, timeout=5) if tasks else (set(), set())

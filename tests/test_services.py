@@ -241,6 +241,50 @@ class ServicesTests(unittest.TestCase):
             photo_suggestions({'status': 'clear', 'options': None})
         self.assertEqual(photo_suggestions({'status': 'clear', 'options': [{'en': '<script>', 'ar': 'سباك'}]})['status'], 'unknown')
 
+    def test_instagram_and_whatsapp_share_one_published_website_fetch(self):
+        response = Mock(status_code=200, headers={'content-type': 'text/html'}, _findzia_session=None)
+        response.iter_content.return_value = [
+            b'<a href="https://wa.me/96555551234">WhatsApp</a>',
+            b'<a href="//www.instagram.com/fixture.carpentry/?igsh=tracking">Instagram</a>']
+        safe = Mock(return_value=response)
+        client, _, runtime = self.client({'places': [{'title': 'Fixture', 'address': 'Salmiya', 'website': 'https://example.com'}]}, safe_get=safe)
+        row = self.search(client).json()['items'][0]
+        self.assertEqual(row['instagram'], 'https://www.instagram.com/fixture.carpentry/')
+        self.assertEqual(row['instagram_source'], row['website'])
+        self.assertEqual(row['whatsapp'], 'https://wa.me/96555551234')
+        safe.assert_called_once_with('https://example.com', timeout=(1, 2), max_redirects=1)
+        self.assertTrue(response.close.called)
+        self.assertEqual(runtime.outcomes, [True])
+
+    def test_direct_instagram_listing_does_not_fetch_or_guess(self):
+        from findzia_services import published_contacts
+        safe = Mock()
+        self.assertEqual(published_contacts('https://instagram.com/fixture_company/?utm_source=maps', safe),
+                         {'instagram': 'https://www.instagram.com/fixture_company/'})
+        safe.assert_not_called()
+        client, _, _ = self.client({'places': [{'title': 'Fixture', 'address': 'Salmiya', 'website': 'https://instagram.com/fixture_company/'}]})
+        row = self.search(client).json()['items'][0]
+        self.assertEqual(row['instagram_source'], row['website'])
+        self.assertEqual(row['instagram'], 'https://www.instagram.com/fixture_company/')
+
+    def test_instagram_rejects_posts_spoofed_hosts_and_unpublished_handles(self):
+        from findzia_services import instagram_link, published_contacts
+        for raw in [None, {}, '@fixture', 'javascript:alert(1)',
+                    'https://instagram.com.evil.com/company', 'https://instagram.com@evil.com/company',
+                    'https://evil.com@instagram.com/company', 'https://instagram.com:8080/company',
+                    'https://instagram.com/p/abc', 'https://instagram.com/reel/abc',
+                    'https://instagram.com/accounts/', 'https://instagram.com/share/?url=abc',
+                    'https://instagram.com/company/extra', 'https://instagram.com/company./',
+                    'https://insta\ngram.com/company']:
+            with self.subTest(raw=raw):
+                self.assertEqual(instagram_link(raw), '')
+        response = Mock(status_code=200, headers={'content-type': 'text/html'}, _findzia_session=None)
+        response.iter_content.return_value = [b'<p>Instagram: @fixture</p><a href="https://instagram.com/p/abc">post</a>']
+        safe = Mock(return_value=response)
+        self.assertEqual(published_contacts('https://example.com', safe), {})
+        safe.side_effect = ValueError('unsafe_outbound_url')
+        self.assertEqual(published_contacts('http://127.0.0.1', safe), {})
+
 
 if __name__ == '__main__':
     unittest.main()

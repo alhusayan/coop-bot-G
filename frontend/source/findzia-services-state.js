@@ -35,6 +35,12 @@ export function serviceWhatsApp(row){
  if(!row?.whatsapp_source||row.whatsapp_source!==row.website||!/^https?:\/\//.test(row.whatsapp_source))return '';
  return /^https:\/\/wa\.me\/[1-9]\d{6,14}$/.test(row.whatsapp||'')?row.whatsapp:'';
 }
+export function serviceInstagram(row){
+ if(!row?.instagram_source||row.instagram_source!==row.website||!/^https?:\/\//.test(row.instagram_source))return '';
+ const match=/^https:\/\/www\.instagram\.com\/([A-Za-z0-9_][A-Za-z0-9_.]{0,29})\/$/.exec(row.instagram||'');
+ if(!match||match[1].endsWith('.')||match[1].includes('..')||/^(p|reel|reels|stories|explore|accounts|direct|about|legal|privacy|terms|developer|developers|web|share|sharing|tv|directory|challenge|oauth)$/i.test(match[1]))return '';
+ return row.instagram;
+}
 export function serviceLocation(data){
  const country=String(data?.countryCode||'').toUpperCase();
  if(!serviceCountries.includes(country))return null;
@@ -101,3 +107,4 @@ export function normalizeServiceArea(value,country){
  const best=choices[0],limit=key.length>=9?2:key.length>=4?1:0;
  return best.distance<=limit&&(choices[1]?.distance??Infinity)>best.distance?best.label:area;
 }
+

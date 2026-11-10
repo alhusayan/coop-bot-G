@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
-import {savedServiceArea,normalizeServiceArea,serviceResults,serviceWhatsApp} from '../source/findzia-services-state.js';
+import {savedServiceArea,normalizeServiceArea,serviceResults,serviceWhatsApp,serviceInstagram} from '../source/findzia-services-state.js';
 const source=readFileSync(new URL('../source/findzia-services.js',import.meta.url),'utf8');
 const section=(from,to)=>source.slice(source.indexOf(from),source.indexOf(to,source.indexOf(from)));
 function fixture(){
@@ -18,8 +18,8 @@ function fixture(){
  const $=s=>{if(!nodes.has(s))nodes.set(s,new Element());return nodes.get(s)};
  const context={$ ,URL,AbortController,language:'en',country:'KW',busy:false,ready:true,generation:0,pendingPhoto:null,retrieving:false,api:'https://api.findzia.com',
   document:{documentElement:{dataset:{}},activeElement:null,createElement:()=>new Element(),dispatchEvent(){},addEventListener(){},querySelector:()=>null},window:{innerHeight:500,visualViewport:{height:280}},requestAnimationFrame:fn=>fn(),setTimeout:()=>1,clearTimeout(){},
-  savedServiceArea,normalizeServiceArea,serviceResults,serviceWhatsApp,notice(){},updateLocation(){},creditLabel(){},clearPhoto(){},t:k=>k,
-  read:()=>'',write(){},remember(){},normalizeArea(){},motion:()=> 'instant',icon:()=>new Element(),sessionStorage:{getItem:()=>null,removeItem(){}},
+  savedServiceArea,normalizeServiceArea,serviceResults,serviceWhatsApp,serviceInstagram,notice(){},updateLocation(){},creditLabel(){},clearPhoto(){},t:k=>k,
+  read:()=>'',write(){},remember(){},normalizeArea(){},motion:()=> 'instant',icon:name=>{const el=new Element();el.dataset.icon=name;return el},sessionStorage:{getItem:()=>null,removeItem(){}},
   setCountry:value=>context.country=value,Event,setDirectory(){},root:{dataset:{},fzBilling:{refresh:async()=>{}}}};
  vm.createContext(context);return {context,$,run:code=>vm.runInContext(code,context)};
 }
@@ -118,4 +118,25 @@ test('a cancelled location lookup cannot start a stale search',async()=>{
  f.context.locateFromNetwork=()=>new Promise(r=>resolve=r);f.context.root.fzBilling={beforeSearch:async()=>{credits++;return true},refresh:async()=>{}};
  f.run(section("$('#svc-form').addEventListener('submit'","try{for(const name of"));
  const pending=f.$('#svc-form').events.submit({preventDefault(){}});f.context.generation++;resolve(true);await pending;assert.equal(credits,0);
+});
+
+
+test('details show only source-backed Instagram profiles, without duplicate website links',()=>{
+ for(const [website,instagram,source,expected] of [
+  ['https://example.com','https://www.instagram.com/fixture_company/','https://example.com',2],
+  ['https://instagram.com/fixture_company/?hl=en','https://www.instagram.com/fixture_company/','https://instagram.com/fixture_company/?hl=en',1],
+  ['https://example.com','https://www.instagram.com/fixture_company/','https://unrelated.example',1],
+  ['https://example.com','https://www.instagram.com/p/','https://example.com',1],
+  ['https://example.com','https://www.instagram.com.evil.com/company/','https://example.com',1],
+  ['https://example.com','','',1]
+ ]){
+  const f=fixture();f.context.results={area:'Kuwait',items:[{title:'Fixture carpenter',website,instagram,instagram_source:source}]};
+  f.run(section('function node(','const cats='));f.run(section('function text(','function creditLabel'));f.run(section('function safeLink(','function showCreditLimit'));f.run('renderResults(false)');
+  const card=f.$('#svc-cards').children[0],detail=card.children[2],links=detail.children.at(-1).children;
+  assert.equal(links.length,expected);
+  const social=links.find(a=>a.textContent==='instagram');
+  assert.equal(!!social,!!serviceInstagram(f.context.results.items[0]));
+  if(social){assert.equal(social.href,instagram);assert.equal(social.target,'_blank');assert.equal(social.rel,'noopener noreferrer');assert.equal(social.children[0].dataset.icon,'instagram');assert.match(social.attrs['aria-label'],/Fixture carpenter/);}
+  assert.equal(detail.hidden,true);card.children[1].children.at(-1).onclick();assert.equal(detail.hidden,false);
+ }
 });
