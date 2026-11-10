@@ -170,7 +170,7 @@ function feedbackMarkup(item){
  const caption=!shop?translate('Made or fitted by a specialist','يحتاج تنفيذ أو تفصيل من مختص'):service&&!busy&&!saved&&!item.error&&!checked&&item.status!=='kept'?translate('Buy it or find someone to fit it','اشترِ القطعة أو ابحث عن مختص لتركيبها'):busy?searchCopy(item):item.error?(messages[item.error]||messages.SEARCH_FAILED):saved?translate('Saved options','خيارات محفوظة'):item.status==='kept'?translate('Keep your own piece','الاحتفاظ بقطعتك الحالية'):checked?translate('No close matches yet','لم نعثر على نتائج قريبة من هذه القطعة.'):translate('Ready to find this piece','جاهز للبحث عن هذه القطعة');
  const action=free?'item':checked?'search-item':'start-piece';
  const button=free?translate('View options','عرض الخيارات'):translate('Find in stores','ابحث في المتاجر');
- const actions=(service?`<button class="piece-search-button" data-action="service-piece" data-id="${esc(item.id)}"><span>${esc(translate('Find a specialist','ابحث عن مختص'))}</span>${icon('forward',true)}</button>`:'')+(shop?`<button class="piece-search-button${service?' is-secondary':''}" data-action="${action}" data-id="${esc(item.id)}"><span>${esc(button)}</span><span>${free?icon('forward',true):esc(translate('2 credits','رصيدان'))}</span></button>`:'');
+ const actions=(service?`<button class="piece-search-button" data-action="service-piece" data-id="${esc(item.id)}"><span>${esc(translate('Find a specialist','ابحث عن مختص'))}</span><span>${esc(translate('2 credits','رصيدان'))}</span></button>`:'')+(shop?`<button class="piece-search-button${service?' is-secondary':''}" data-action="${action}" data-id="${esc(item.id)}"><span>${esc(button)}</span><span>${free?icon('forward',true):esc(translate('2 credits','رصيدان'))}</span></button>`:'');
  return `<article class="piece-selection-card${busy?' is-searching':''}${item.error||busy||checked?' has-status':''}" data-ui-key="${esc(keyFor(item))}"><div class="piece-selection-media"><img src="${esc(item.crop||selected().image)}" alt="${esc(name)}" decoding="async">${!busy?`<button class="piece-clear" data-action="clear-piece" aria-label="${esc(translate('Clear selection','إلغاء التحديد'))}">${icon('close',true)}</button>`:''}</div><div class="piece-selection-content"><div class="piece-selection-summary"><strong dir="auto">${esc(name)}</strong><p${caption===translate('Ready to find this piece','جاهز للبحث عن هذه القطعة')?' class="scene-sr-only"':''} role="status">${busy?'<span class="search-spinner" aria-hidden="true"></span>':''}${esc(caption)}${busy?` <span class="search-elapsed" aria-hidden="true">${elapsedLabel(item)}</span>`:''}</p></div>${busy?'<div class="piece-search-track" aria-hidden="true"><span></span></div>':actions}</div></article>`;
 }
 function selectPiece(id,marker){
@@ -195,7 +195,7 @@ function browsePieces(candidates=null){
 }
 function openServiceRequest(query){
  query=String(query||'').trim().slice(0,180);if(query.length<2)return;
- const url=new URL('/trial/services',location.origin);url.searchParams.set('designContext','1');url.searchParams.set('q',query);url.searchParams.set('country',countryCode());
+ const url=new URL('/trial/services',location.origin);url.searchParams.set('designContext','1');url.searchParams.set('searchIntent',crypto.randomUUID());url.searchParams.set('q',query);url.searchParams.set('country',countryCode());
  showSheet(`<div class="design-services-head"><h2>${esc(translate('Find a specialist','ابحث عن مختص'))}</h2></div><iframe class="design-services-frame" src="${esc(url.href)}" title="${esc(translate('Specialists for your design','مختصون لتصميمك'))}" allow="geolocation" referrerpolicy="same-origin"></iframe>`,'services');
 }
 function findSpecialist(id){
@@ -203,7 +203,7 @@ function findSpecialist(id){
  openServiceRequest(serviceQuery(item,shell?.getLanguage()));
 }
 function requestOtherWork(){
- showSheet(`<div class="sheet-body"><h2>${esc(translate('What do you need here?','شنو تحتاج هنا؟'))}</h2><form id="other-work-form"><label for="other-work-query">${esc(translate('Describe the work','اكتب المطلوب'))}</label><input id="other-work-query" type="text" minlength="2" maxlength="180" required dir="auto" placeholder="${esc(translate('e.g. custom wall decoration','مثلاً: تفصيل ديكور الحائط'))}"><button class="primary wide" type="submit">${esc(translate('Find a specialist','ابحث عن مختص'))}</button></form></div>`,'other-work');
+ showSheet(`<div class="sheet-body"><h2>${esc(translate('What do you need here?','شنو تحتاج هنا؟'))}</h2><form id="other-work-form"><label for="other-work-query">${esc(translate('Describe the work','اكتب المطلوب'))}</label><input id="other-work-query" type="text" minlength="2" maxlength="180" required dir="auto" placeholder="${esc(translate('e.g. custom wall decoration','مثلاً: تفصيل ديكور الحائط'))}"><button class="primary wide" type="submit">${esc(translate('Find a specialist','ابحث عن مختص'))} · ${esc(translate('2 credits','رصيدان'))}</button></form></div>`,'other-work');
  $('#other-work-form').addEventListener('submit',event=>{event.preventDefault();openServiceRequest($('#other-work-query').value);});
  $('#other-work-query').focus();
 }
