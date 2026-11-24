@@ -2,6 +2,8 @@
 // Never use client input as a hostname or an upstream URL.
 import https from 'node:https';
 const assets=new Set(['space-scene.css','space-scene-copy.js','space-cover.webp','app.js','request.js','room-state.js','live-view.js','style.css','hero.webp','icon.svg','design-studio.js','design-studio-copy.js','design-studio.css','store-links.js','spaces-typography.css','markets.js','findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','piece-intent.js','original-results.js','original-results-frame.css','design-picks.js','product-facts.js','product-summary.js','similar-review.js','spaces-theme.js','mobile-viewport.js','account-navigation.js','account-page.js','account-page.css','search-budget.js'].map(name=>'/'+name));
+// Continue iPhone sign-in on the canonical origin when the unified home is active.
+for(const path of ['/ios/auth/callback','/ios/auth/callback.js'])assets.add(path);
 for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js','fonts/OFL-Cairo.txt'])assets.add('/findzia/'+name);
 export function isSpacePath(path){return path==='/space'||path==='/space/'||path==='/account'||assets.has(path)||/^\/api\/(?:config|findzia-results|jobs(?:\/[a-f0-9]{24}(?:\/(?:measure|product-details(?:\/[a-f0-9]{64})?|catalog\/[0-2]\/\d{1,2}|(?:select|retry|search|focus|replace|results|picks)(?:\/\d+)?))?)?)$/.test(path)||/^\/(?:media|lens-media)\/[a-f0-9]{24}\/[a-zA-Z0-9_.-]+$/.test(path)}
 export function transformSpace(path,text,bridge){
@@ -33,3 +35,4 @@ export function proxySpace(req,res,bridge,request=https.request){
  });
  upstream.on('error',fail);upstream.on('timeout',()=>upstream.destroy());req.on('aborted',()=>upstream.destroy());res.on('close',()=>{if(!res.writableEnded)upstream.destroy()});req.pipe(upstream);
 }
+
